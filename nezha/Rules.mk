@@ -4,20 +4,16 @@ d := $(dir $(lastword $(MAKEFILE_LIST)))
 $(info   d is $(d))
 
 SRCS += $(addprefix $(d), \
-	main.cc foo.cc bar.cc)
+		replica-run.cc replica.cc)
 
 PROTOS += $(addprefix $(d), \
-	    main-proto.proto)
+	    nezha-proto.proto)
 
 
-OBJS-foo := $(o)foo.o 
 
-OBJS-bar := $(o)bar.o 
-
-
-$(b)main: $(o)main.o  $(OBJS-foo) $(OBJS-bar)
+$(b)nezha-replica: $(o)replica-run.o $(o)replica.o  $(o)nezha-proto.o 
 
 
-BINS += $(b)main 
+BINS += $(b)nezha-replica 
 
 # include $(d)tests/Rules.mk

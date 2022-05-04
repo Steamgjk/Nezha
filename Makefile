@@ -5,6 +5,7 @@
 CC = gcc
 CXX = g++
 LD = g++
+PROTOC = protoc
 # EXPAND = lib/tmpl/expand
 
 CFLAGS := -g -Wall -pthread -iquote.obj/gen -Wno-uninitialized  -O2 -DNASSERT
@@ -12,7 +13,7 @@ CXXFLAGS := -std=c++0x -O3
 # CFLAGS := -g2 -Wall -pthread -iquote.obj/gen -Wno-uninitialized -O0
 # CXXFLAGS := -std=c++0x -O0 -g2
 
-LDFLAGS := -lev -ldl
+LDFLAGS := -lev -ldl -lprotobuf
 LIBPATH := -I./
 CFLAGS += $(LIBPATH)
 
@@ -79,6 +80,9 @@ $(info   here d is $(d))
 # The object directory corresponding to the $(d)
 o = .obj/$(d)
 
+b = .bin/
+
+
 # SRCS is the list of all non-test-related source files.
 SRCS :=
 # TEST_SRCS is just like SRCS, but these source files will be compiled
@@ -115,6 +119,7 @@ $(foreach bin,$(1),$(eval LDFLAGS-$(bin) += $(2)))
 endef
 
 include sources/Rules.mk
+include nezha/Rules.mk
 
 ##################################################################
 # General rules
@@ -126,6 +131,9 @@ include sources/Rules.mk
 PROTOOBJS := $(PROTOS:%.proto=.obj/%.o)
 PROTOSRCS := $(PROTOS:%.proto=.obj/gen/%.pb.cc)
 PROTOHEADERS := $(PROTOS:%.proto=%.pb.h)
+
+$(info    PROTOOBJS is $(PROTOOBJS))
+$(info    PROTOSRCS is $(PROTOSRCS))
 
 $(PROTOSRCS) : .obj/gen/%.pb.cc: %.proto
 	@mkdir -p .obj/gen
@@ -160,7 +168,6 @@ endef
 
 define compilecxx
 	@mkdir -p $(dir $@)
-	
 	$(call trace,$(1),$<,\
 	  $(CXX) -iquote. $(CFLAGS) $(CXXFLAGS) $(CFLAGS-$<) $(2) $(DEPFLAGS) -E $<)
 	$(Q)$(CXX) -iquote. $(CFLAGS) $(CXXFLAGS) $(CFLAGS-$<) $(2) -c -o $@ $<
@@ -183,6 +190,7 @@ $(OBJS:%.o=%-pic.o): .obj/%-pic.o: %.cc
 $(call add-LDFLAGS,$(TEST_BINS),$(CHECK_LDFLAGS))
 
 $(BINS) $(TEST_BINS): %:
+	@mkdir -p $(b)
 	$(call trace,LD,$@,$(LD) -o $@ $^ $(LDFLAGS) $(LDFLAGS-$@))
 
 #

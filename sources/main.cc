@@ -6,12 +6,14 @@
 #include <chrono>
 #include <unistd.h>
 #include <arpa/inet.h>
-
+#include <iostream>
+#include "sources/main-proto.pb.h"
 #define USE_UDP
 #define BUFFER_SIZE 1024
 
 void accept_cb(struct ev_loop* loop, struct ev_io* watcher, int revents);
 void read_cb(struct ev_loop* loop, struct ev_io* watcher, int revents);
+void timeout_cb(struct ev_loop* loop, struct ev_timer* w, int revents);
 uint32_t messageCnt = 0;
 uint64_t sta, ed;
 
@@ -31,7 +33,7 @@ int main(int argc, char* argv[])
 	struct ev_loop* loop = ev_default_loop(0);
 	int sd;
 	struct sockaddr_in addr;
-	int addr_len = sizeof(addr);
+	// int addr_len = sizeof(addr);
 
 
 #ifndef USE_UDP
@@ -61,6 +63,13 @@ int main(int argc, char* argv[])
 		perror("bind error");
 	}
 
+
+	ev_timer timer;
+	timer.repeat = 1;
+	timer.data = new int(0);
+	ev_init(&timer, timeout_cb);
+
+	ev_timer_again(loop, &timer);
 #ifndef USE_UDP
 	// Start listing on the socket
 	if (listen(sd, 2) < 0)
@@ -73,17 +82,25 @@ int main(int argc, char* argv[])
 	ev_io_init(&w_accept, accept_cb, sd, EV_READ);
 	ev_io_start(loop, &w_accept);
 #else 
+	w_client.data = &timer;
 	ev_io_init(&w_client, read_cb, sd, EV_READ);
 	ev_io_start(loop, &w_client);
 #endif
 
 	// Start infinite loop
-	while (1)
-	{
-		ev_run(loop, 0);
-	}
+	ev_run(loop, 0);
 
 	return 0;
+}
+
+void timeout_cb(struct ev_loop* loop, struct ev_timer* w, int revents) {
+
+	int* cnt = (int*)(w->data);
+	std::cout << "Print " << *cnt << std::endl;
+	(*cnt)++;
+	// if ((*cnt) == 10) {
+	// 	ev_timer_stop(loop, w);
+	// }
 }
 
 void accept_cb(struct ev_loop* loop, struct ev_io* watcher, int revents)
@@ -116,7 +133,7 @@ void accept_cb(struct ev_loop* loop, struct ev_io* watcher, int revents)
 /* Read client message */
 void read_cb(struct ev_loop* loop, struct ev_io* watcher, int revents) {
 	char buffer[BUFFER_SIZE];
-	ssize_t read;
+	int read;
 
 	if (EV_ERROR & revents)
 	{
@@ -153,7 +170,7 @@ void read_cb(struct ev_loop* loop, struct ev_io* watcher, int revents) {
 		if (messageCnt == 1) {
 			sta = GetMicrosecondTimestamp();
 		}
-		// printf("messageCnt=%u readLen=%d\n", messageCnt, read);
+		printf("messageCnt=%u readLen=%d\n", messageCnt, read);
 		if (messageCnt % 100000 == 0) {
 			ed = GetMicrosecondTimestamp();
 
@@ -162,6 +179,10 @@ void read_cb(struct ev_loop* loop, struct ev_io* watcher, int revents) {
 			sta = ed;
 		}
 		// printf("message:%s", buffer);
+		if (messageCnt == 3) {
+			std::cout << "stop timer " << std::endl;
+			ev_timer_stop(loop, (struct ev_timer*)(watcher->data));
+		}
 	}
 
 	// Send message bach to the client

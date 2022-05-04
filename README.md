@@ -8,10 +8,8 @@ To make it easy for you to get started with GitLab, here's a list of recommended
 
 Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
 
-## Add your files
+## Clone Project
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
 
 ```
 cd existing_repo
@@ -20,9 +18,20 @@ git branch -M main
 git push -uf origin main
 ```
 
-## Integrate with your tools
+## Install Dependencies
 
-- [ ] [Set up project integrations](https://gitlab.com/steamgjk/nezhav2/-/settings/integrations)
+```
+# Ubuntu 20.04.4 LTS
+sudo apt update
+sudo apt install -y net-tools autoconf libtool build-essential protobuf-compiler pkg-config
+
+# install libev
+git clone https://github.com/enki/libev.git
+chmod -R 777 libev
+cd libev && sudo ./autogen.sh 
+./configure && make && sudo make install
+```
+
 
 ## Collaborate with your team
 

@@ -1,0 +1,14 @@
+{
+    "replica-ips": [
+        "127.0.0.1",
+        "127.0.0.1",
+        "127.0.0.1"
+    ],
+    "receiver-ports": [
+        33333,
+        33333,
+        33333
+    ],
+    "receiver-shards": 1,
+    "reply-shards": 1
+}
