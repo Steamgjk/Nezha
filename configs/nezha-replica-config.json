@@ -9,6 +9,15 @@
         33333,
         33333
     ],
+    "master-ports": [
+        34333,
+        34333,
+        34333
+    ],
+    "replica-id": 0,
     "receiver-shards": 1,
-    "reply-shards": 1
+    "process-shards": 1,
+    "reply-shards": 1,
+    "main-loop-period-ms": 20,
+    "heartbeat-threshold-ms": 500
 }

@@ -23,13 +23,28 @@ git push -uf origin main
 ```
 # Ubuntu 20.04.4 LTS
 sudo apt update
-sudo apt install -y net-tools autoconf libtool build-essential protobuf-compiler pkg-config
+sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake
+
+# install protobuf. Please make install libprotoc 3.20.1-rc1 from source code instead of using apt install. Please follow the instructions at https://github.com/protocolbuffers/protobuf/blob/main/src/README.md 
 
 # install libev
 git clone https://github.com/enki/libev.git
 chmod -R 777 libev
 cd libev && sudo ./autogen.sh 
 ./configure && make && sudo make install
+
+# install junction and the turf
+git clone https://github.com/preshing/junction.git
+git clone https://github.com/preshing/turf.git
+cd junction
+mkdir build
+cd build
+cmake ..
+make
+# it will install turf and junction together in /usr/local/lib
+sudo make install
+
+# install glog https://github.com/google/glog
 ```
 
 
