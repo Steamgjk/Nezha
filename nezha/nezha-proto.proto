@@ -5,5 +5,16 @@ message Request {
     uint64 sendtime = 1;
     uint32 bound=2;
     uint32 clientid = 3;
-    bytes command=4;
+    uint32 reqid = 4;
+    bytes command=5;
+    uint32 key = 6;
+}
+
+message Reply {
+    uint32 clientid = 1;
+    uint32 reqid = 2;
+    uint32 view = 3;
+    uint32 replicaid = 4;
+    bytes hash = 5;
+    bytes result = 6;
 }
