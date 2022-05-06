@@ -30,6 +30,7 @@ namespace nezha {
         VIEWCHANGE = 2,
         RECOVERING = 3
     };
+
     const uint32_t BUFFER_SIZE = 65535;
 
     class Replica
@@ -41,9 +42,23 @@ namespace nezha {
         std::atomic<uint32_t> replicaNum_;
         std::atomic<uint32_t> status_; // for workers to check whether they should stop (for view change)
 
-        std::set<std::pair<uint64_t, uint64_t>> earlyBuffer_; // <deadline, reqKey>
+        std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // <deadline, reqKey>
         std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
 
+        ConcurrentMap<uint64_t, Request*> syncedRequestMap_; // <reqKey, request>
+        ConcurrentMap<uint64_t, Request*> unsyncedRequestMap_; // <reqKey, request>
+        ConcurrentMap<uint32_t, LogEntry*> syncedEntries_; // log-id as the key [accumulated hashes]
+        ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_; // log-id as the key [accumulated hashes]
+        ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index)
+        ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index)
+        // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and 
+        // provide convenience for garbage-collection
+        std::atomic<uint32_t> maxSyncedLogId_;
+        std::atomic<uint32_t> minUnSyncedLogId_;
+        std::atomic<uint32_t> maxUnSyncedLogId_;
+        // syncedLogIdByKey_ and unsyncedLogIdByKey_ are fine-grained version of maxSyncedLogId_ and minUnSyncedLogId_, to support commutativity optimization
+        std::vector<uint32_t> syncedLogIdByKey_;
+        std::vector<uint32_t> unsyncedLogIdByKey_;
 
         // use <threadName> as the key (for search), <threadPtr, threadId> as the value
         std::map<std::string, std::thread*> threadPool_;
@@ -62,14 +77,15 @@ namespace nezha {
 
         ConcurrentMap<uint64_t, Request*> requestMap_;
         ConcurrentMap<uint64_t, Reply*> replyMap_;
-        ConcurrentQueue<uint64_t> processQu_;
-        ConcurrentQueue<uint64_t> replyQus_[16];
+        ConcurrentQueue<Request*> processQu_;
+        ConcurrentQueue<LogEntry*> fastReplyQus_[16];
 
         void CreateMasterContext();
         void CreateReceiverContext();
         void CreateContext();
         void LaunchThreads();
         void StartViewChange();
+        std::string ApplicationExecute(Request* req);
         bool AmLeader();
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.json"));
@@ -78,6 +94,8 @@ namespace nezha {
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);
         void ReplyTd(int id = -1);
+        void FastReplyTd(int id = -1);
+        void SlowReplyTd(int id = -1);
         void RequestReceive(int id = -1, int fd = -1);
 
         void Master();

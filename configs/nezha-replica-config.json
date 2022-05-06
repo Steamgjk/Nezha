@@ -14,6 +14,7 @@
         34333,
         34333
     ],
+    "key-num": 1000000,
     "replica-id": 0,
     "receiver-shards": 1,
     "process-shards": 1,

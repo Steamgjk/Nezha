@@ -23,7 +23,7 @@ git push -uf origin main
 ```
 # Ubuntu 20.04.4 LTS
 sudo apt update
-sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake
+sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake libssl-dev
 
 # install protobuf. Please make install libprotoc 3.20.1-rc1 from source code instead of using apt install. Please follow the instructions at https://github.com/protocolbuffers/protobuf/blob/main/src/README.md 
 

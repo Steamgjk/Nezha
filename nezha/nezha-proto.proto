@@ -7,7 +7,8 @@ message Request {
     uint32 clientid = 3;
     uint32 reqid = 4;
     bytes command=5;
-    uint32 key = 6;
+    uint32 proxyid = 6;
+    uint32 key = 7;
 }
 
 message Reply {
@@ -17,4 +18,5 @@ message Reply {
     uint32 replicaid = 4;
     bytes hash = 5;
     bytes result = 6;
+    bool isfast = 7;
 }

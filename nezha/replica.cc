@@ -14,10 +14,20 @@ namespace nezha {
         viewNum_ = 0;
         replicaId_ = replicaConfig_["replica-id"];
         replicaNum_ = replicaConfig_["replica-ips"].size();
+        uint32_t keyNum = replicaConfig_["key-num"].get<uint32_t>();
+        lastReleasedEntryByKeys_.resize(keyNum, std::pair<uint64_t, uint64_t>(0, 0));
+        // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
+        maxSyncedLogId_ = 1;
+        minUnSyncedLogId_ = 1;
+        maxUnSyncedLogId_ = 1;
+        syncedLogIdByKey_.resize(keyNum, 1);
+        unsyncedLogIdByKey_.resize(keyNum, 1);
+
         status_ = NORMAL;
         LOG(INFO) << "viewNum_=" << viewNum_
             << "\treplicaId=" << replicaId_
-            << "\treplicaNum=" << replicaNum_;
+            << "\treplicaNum=" << replicaNum_
+            << "\tkeyNum=" << keyNum;
 
         CreateMasterContext();
         CreateReceiverContext();
@@ -124,8 +134,8 @@ namespace nezha {
         }
         // RequestReply
         for (int i = 0; i < replicaConfig_["reply-shards"]; i++) {
-            std::thread* td = new std::thread(&Replica::ReplyTd, this, i);
-            std::string key("ReplyTd-" + std::to_string(i));
+            std::thread* td = new std::thread(&Replica::FastReplyTd, this, i);
+            std::string key("FastReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
@@ -141,39 +151,126 @@ namespace nezha {
     void Replica::ProcessTd(int id) {
         workerCounter_.fetch_add(1);
         uint64_t reqKey = 0;
+        Request* req = NULL;
+        uint32_t roundRobin = 0;
+        uint32_t replyShard = replicaConfig_['reply-shards'].get<uint32_t>();
+        bool amLeader = AmLeader();
         while (status_ == NORMAL) {
-            if (processQu_.try_dequeue(reqKey)) {
-                Request* req = requestMap_.get(reqKey);
-                if (req != NULL) {
-                    uint64_t deadline = req->sendtime() + req->bound();
-                    std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
-                    if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
-                        earlyBuffer_.insert(myEntry);
-                    }
-                    else {
-                        // req cannot enter early buffer
-                        if (AmLeader()) {
+            if (processQu_.try_dequeue(req)) {
+                reqKey = req->clientid();
+                reqKey = ((reqKey << 32u) | (req->reqid()));
+                if (amLeader) {
+                    uint32_t duplicateLogIdx = syncedReq2LogId_.get(reqKey);
+                    if (duplicateLogIdx == 0) {
+                        // not duplicate
+                        uint64_t deadline = req->sendtime() + req->bound();
+                        std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
+                        syncedRequestMap_.assign(reqKey, req);
+                        if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
+                            earlyBuffer_[myEntry] = req;
+                        }
+                        else {
+                            // req cannot enter early buffer
                             // leader modifies its deadline
-                            // followers donot care about it (i.e. leave it in late buffer)
-
+                            uint64_t newDeadline = lastReleasedEntryByKeys_[req->key()].first + 1;
+                            std::pair<uint64_t, uint64_t>myEntry(newDeadline, reqKey);
+                            earlyBuffer_[myEntry] = req;
                         }
                     }
-
+                    else {
+                        // at-most-once: duplicate requests are not executed twice
+                        // we simply send the previous reply messages
+                        LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
+                        fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
+                        // free this req
+                        delete req;
+                    }
                 }
                 else {
-                    LOG(WARNING) << "Abnormal behavior: req is NULL";
+                    uint32_t duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
+                    if (duplicateLogIdx == 0) {
+                        uint64_t deadline = req->sendtime() + req->bound();
+                        std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
+                        unsyncedRequestMap_.assign(reqKey, req);
+                        if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
+                            earlyBuffer_[myEntry] = req;
+                        }
+                        //  Followers donot care about it (i.e. leave it in late buffer)
+                    }
+                    else {
+                        LogEntry* entry = unsyncedEntries_.get(duplicateLogIdx);
+                        fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
+                        delete req;
+                    }
+
                 }
+
             }
 
             // Polling early-buffer
+            uint64_t nowTime = GetMicrosecondTimestamp();
+            while ((!earlyBuffer_.empty()) && nowTime >= earlyBuffer_.begin()->first.first) {
+                uint64_t deadline = earlyBuffer_.begin()->first.first;
+                uint64_t reqKey = earlyBuffer_.begin()->first.second;
+                Request* req = earlyBuffer_.begin()->second;
+                SHA_HASH hash = CalculateHash(deadline, reqKey);
+                if (amLeader) {
+                    if (syncedLogIdByKey_[req->key()] > 1) {
+                        // There are previous (non-commutative) requests appended
+                        LogEntry* prev = syncedEntries_.get(syncedLogIdByKey_[req->key()]);
+                        hash.XOR(prev->hash);
+                    }
+                    std::string result = ApplicationExecute(req);
+                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, result);
+                    fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
+                    uint32_t logId = maxSyncedLogId_ + 1;
+                    syncedEntries_.assign(logId, entry);
+                    syncedReq2LogId_.assign(reqKey, logId);
+                    syncedLogIdByKey_[req->key()] = logId;
+                    maxSyncedLogId_++;
+                }
+                else {
+                    if (unsyncedLogIdByKey_[req->key()] > 1) {
+                        // There are previous (non-commutative) requests appended
+                        LogEntry* prev = unsyncedEntries_.get(unsyncedLogIdByKey_[req->key()]);
+                        hash.XOR(prev->hash);
+                    }
+                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, "");
+                    fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
+                    uint32_t logId = maxUnSyncedLogId_ + 1;
+                    unsyncedEntries_.assign(logId, entry);
+                    unsyncedReq2LogId_.assign(reqKey, logId);
+                    unsyncedLogIdByKey_[req->key()] = logId;
+                    maxUnSyncedLogId_++;
+                }
+                earlyBuffer_.erase(earlyBuffer_.begin());
+            }
         }
         workerCounter_.fetch_sub(1);
     }
-    void Replica::ReplyTd(int id) {
+    void Replica::FastReplyTd(int id) {
         workerCounter_.fetch_add(1);
-        int fd = socketFds_["ReplyTd-" + std::to_string(id)];
+        std::string key = "FastReplyTd-" + std::to_string(id);
+        int fd = socketFds_[key];
+        char* buffer = receiverBuffers_[key];
+        LogEntry* entry = NULL;
+        Reply reply;
+        reply.set_view(viewNum_);
+        reply.set_isfast(true);
+        reply.set_replicaid(replicaId_);
         while (status_ == NORMAL) {
+            if (fastReplyQus_[id].try_dequeue(entry)) {
+                reply.set_clientid((entry->reqKey) >> 32);
+                reply.set_reqid((uint32_t)(entry->reqKey));
+                reply.set_hash(entry->hash.hash, SHA_DIGEST_LENGTH);
+                reply.set_result(entry->result);
+                size_t msgLen = reply.ByteSizeLong();
+                if (reply.SerializeToArray(buffer, msgLen)) {
+                    // sendto(fd, buffer, msgLen, 0, );
+                }
 
+
+            }
         }
         workerCounter_.fetch_sub(1);
     }
@@ -186,10 +283,7 @@ namespace nezha {
             // Parse and process message
             Request* request = new Request();
             if (request->ParseFromArray(buffer, sz)) {
-                uint64_t reqKey = request->clientid();
-                reqKey = ((reqKey << 32u) | (request->reqid()));
-                requestMap_.assign(reqKey, request);
-                processQu_.enqueue(reqKey);
+                processQu_.enqueue(request);
             }
         }
     }
@@ -228,6 +322,10 @@ namespace nezha {
     }
     void Replica::StartViewChange() {
 
+    }
+
+    std::string Replica::ApplicationExecute(Request* req) {
+        return "";
     }
     bool Replica::AmLeader() {
         return (viewNum_ % replicaNum_ == replicaId_);
