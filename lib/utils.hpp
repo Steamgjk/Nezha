@@ -12,6 +12,17 @@
 #include <openssl/sha.h>
 #include "nezha/nezha-proto.pb.h"
 
+enum REPLICA_STATUS {
+    NORMAL = 1,
+    VIEWCHANGE = 2,
+    RECOVERING = 3
+};
+enum REPLY_TYPE {
+    FAST_REPLY = 1,
+    SLOW_REPLY = 2,
+    COMMIT_REPLY = 3
+};
+
 union SHA_HASH {
     uint32_t item[5];
     unsigned char hash[SHA_DIGEST_LENGTH];
@@ -35,8 +46,9 @@ struct LogEntry {
     uint64_t reqKey;
     SHA_HASH hash;
     std::string result;
+    uint64_t proxyId;
     LogEntry() {}
-    LogEntry(const uint64_t d, const uint64_t r, const SHA_HASH& h, const std::string& re) :deadline(d), reqKey(r), hash(h), result(re) {}
+    LogEntry(const uint64_t d, const uint64_t r, const SHA_HASH& h, const std::string& re, const uint64_t p) :deadline(d), reqKey(r), hash(h), result(re), proxyId(p) {}
 
 };
 
@@ -65,6 +77,28 @@ inline SHA_HASH CalculateHash(uint64_t deadline, uint32_t clientId, uint64_t req
 inline uint64_t GetMicrosecondTimestamp() {
     auto tse = std::chrono::system_clock::now().time_since_epoch();
     return std::chrono::duration_cast<std::chrono::microseconds>(tse).count();
+}
+
+
+// Create socket fd and bind ip:port
+inline int CreateSocketFd(const std::string& ip, const int port) {
+    int fd = socket(PF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        LOG(ERROR) << "Receiver Fd fail " << ip << ":" << port;
+        return fd;
+    }
+    struct sockaddr_in addr;
+    bzero(&addr, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(ip.c_str());
+    // Bind socket to address
+    int bindRet = bind(fd, (struct sockaddr*)&addr, sizeof(addr));
+    if (bindRet != 0) {
+        LOG(ERROR) << "bind error\t" << bindRet;
+        return bindRet;
+    }
+    return fd;
 }
 
 

@@ -25,11 +25,6 @@ namespace nezha {
     using json = nlohmann::json;
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
-    enum REPLICA_STATUS {
-        NORMAL = 1,
-        VIEWCHANGE = 2,
-        RECOVERING = 3
-    };
 
     const uint32_t BUFFER_SIZE = 65535;
 
@@ -68,8 +63,9 @@ namespace nezha {
         std::map<std::string, struct ev_io*> evIOs_;
         std::map<std::string, struct ev_timer*> evTimers_;
         std::map<std::string, int> socketFds_;
-        std::map<std::string, char*> receiverBuffers_;
+        std::map<std::string, char*> buffers_;
         std::vector<char*> requestBuffers_;
+        std::vector<in_addr_t> proxyIPs_;
 
         std::atomic<uint64_t> lastHeartBeatTime_; // for master to check whether it should issue view change
         std::atomic<uint32_t> workerCounter_; // for master to check whether everybody has stopped
@@ -78,7 +74,8 @@ namespace nezha {
         ConcurrentMap<uint64_t, Request*> requestMap_;
         ConcurrentMap<uint64_t, Reply*> replyMap_;
         ConcurrentQueue<Request*> processQu_;
-        ConcurrentQueue<LogEntry*> fastReplyQus_[16];
+        ConcurrentQueue<LogEntry*> fastReplyQus_[4];
+        ConcurrentQueue<LogEntry*> slowReplyQus_[4];
 
         void CreateMasterContext();
         void CreateReceiverContext();
@@ -93,9 +90,10 @@ namespace nezha {
 
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);
-        void ReplyTd(int id = -1);
         void FastReplyTd(int id = -1);
         void SlowReplyTd(int id = -1);
+        void IndexSyncTd(int id = -1);
+        void IndexSyncReceive(int id = -1, int fd = -1);
         void RequestReceive(int id = -1, int fd = -1);
 
         void Master();

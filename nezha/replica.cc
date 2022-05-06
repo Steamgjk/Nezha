@@ -23,6 +23,9 @@ namespace nezha {
         syncedLogIdByKey_.resize(keyNum, 1);
         unsyncedLogIdByKey_.resize(keyNum, 1);
 
+        uint32_t proxyNum = replicaConfig_["max-proxy-num"].get<uint32_t>();
+        proxyIPs_.resize(proxyNum, 0u);
+
         status_ = NORMAL;
         LOG(INFO) << "viewNum_=" << viewNum_
             << "\treplicaId=" << replicaId_
@@ -51,19 +54,14 @@ namespace nezha {
         evTimer->data = (void*)this;
         struct ev_io* evIO = new ev_io();
         evIO->data = (void*)this;
-        int fd = socket(PF_INET, SOCK_DGRAM, 0);
+
+        std::string ip = replicaConfig_["replica-ips"][replicaId_].get<std::string>();
+        int port = replicaConfig_["master-ports"][replicaId_].get<int>();
+        int fd = CreateSocketFd(ip, port);
         if (fd < 0) {
-            LOG(ERROR) << "masterSocketFd_ fail";
+            LOG(ERROR) << "Receiver Fd fail " << ip << ":" << port;
         }
-        struct sockaddr_in addr;
-        bzero(&addr, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(replicaConfig_["master-ports"][replicaId_].get<uint32_t>());
-        addr.sin_addr.s_addr = inet_addr(replicaConfig_["replica-ips"][replicaId_].get<std::string>().c_str());
-        // Bind socket to address
-        if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-            LOG(ERROR) << "bind error";
-        }
+
         // Register Master Timer 
         ev_init(evTimer, [](struct ev_loop* loop, struct ev_timer* w, int revents) {
             static_cast<Replica*>(w->data)->Master();
@@ -82,7 +80,7 @@ namespace nezha {
         evIOs_[key] = evIO;
         evTimers_[key] = evTimer;
         socketFds_[key] = fd;
-        receiverBuffers_[key] = buffer;
+        buffers_[key] = buffer;
     }
 
     void Replica::CreateReceiverContext() {
@@ -90,19 +88,13 @@ namespace nezha {
             char* buffer = new char[BUFFER_SIZE];
             struct ev_loop* evLoop = ev_loop_new();
             struct ev_io* evIO = new ev_io();
-            int fd = socket(PF_INET, SOCK_DGRAM, 0);
+            std::string ip = replicaConfig_["replica-ips"][replicaId_].get<std::string>();
+            int port = replicaConfig_["receiver-ports"][replicaId_].get<int>() + i;
+            int fd = CreateSocketFd(ip, port);
             if (fd < 0) {
                 LOG(ERROR) << "Receiver Fd fail " << i;
             }
-            struct sockaddr_in addr;
-            bzero(&addr, sizeof(addr));
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(replicaConfig_["receiver-ports"][replicaId_].get<uint32_t>() + i);
-            addr.sin_addr.s_addr = inet_addr(replicaConfig_["replica-ips"][replicaId_].get<std::string>().c_str());
-            // Bind socket to address
-            if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-                LOG(ERROR) << "bind error";
-            }
+
             ev_io_init(evIO, [](struct ev_loop* loop, struct ev_io* w, int revents) {
                 int* idPtr = (int*)(w->data);
                 static_cast<Replica*>(w->data)->RequestReceive(*idPtr, w->fd);
@@ -113,8 +105,17 @@ namespace nezha {
             evLoops_[key] = evLoop;
             evIOs_[key] = evIO;
             socketFds_[key] = fd;
-            receiverBuffers_[key] = buffer;
+            buffers_[key] = buffer;
             requestBuffers_.push_back(buffer);
+        }
+        if (!AmLeader()) {
+            // follower needs an ev_io for index sync
+            // std::string key("IndexSyncTd-0");
+            // evLoops_[key] = evLoop;
+            // evIOs_[key] = evIO;
+            // socketFds_[key] = fd;
+            // buffers_[key] = buffer;
+            // requestBuffers_.push_back(buffer);
         }
     }
     void Replica::LaunchThreads() {
@@ -139,6 +140,23 @@ namespace nezha {
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
+        for (int i = 0; i < replicaConfig_["reply-shards"]; i++) {
+            std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
+            std::string key("SlowReplyTd-" + std::to_string(i));
+            threadPool_[key] = td;
+            LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
+        }
+        // IndexSync
+        for (int i = 0; i < replicaConfig_["index-sync-shards"]; i++) {
+            std::thread* td = new std::thread(&Replica::IndexSyncTd, this, i);
+            std::string key("IndexSyncTd-" + std::to_string(i));
+            threadPool_[key] = td;
+            LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
+            if (!AmLeader()) {
+                // follower only needs one sync thread
+                break;
+            }
+        }
 
     }
 
@@ -153,7 +171,7 @@ namespace nezha {
         uint64_t reqKey = 0;
         Request* req = NULL;
         uint32_t roundRobin = 0;
-        uint32_t replyShard = replicaConfig_['reply-shards'].get<uint32_t>();
+        uint32_t replyShard = replicaConfig_["reply-shards"].get<uint32_t>();
         bool amLeader = AmLeader();
         while (status_ == NORMAL) {
             if (processQu_.try_dequeue(req)) {
@@ -181,28 +199,42 @@ namespace nezha {
                         // at-most-once: duplicate requests are not executed twice
                         // we simply send the previous reply messages
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
+                        // update proxy id in case the client has changed its proxy
+                        entry->proxyId = req->proxyid();
                         fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
                         // free this req
                         delete req;
                     }
                 }
                 else {
-                    uint32_t duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
-                    if (duplicateLogIdx == 0) {
-                        uint64_t deadline = req->sendtime() + req->bound();
-                        std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
-                        unsyncedRequestMap_.assign(reqKey, req);
-                        if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
-                            earlyBuffer_[myEntry] = req;
-                        }
-                        //  Followers donot care about it (i.e. leave it in late buffer)
+                    uint32_t duplicateLogIdx = syncedReq2LogId_.get(reqKey);
+                    if (duplicateLogIdx > 0) {
+                        // duplicate: can resend slow-reply for this request
+                        LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
+                        entry->proxyId = req->proxyid();
+                        slowReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
                     }
                     else {
-                        LogEntry* entry = unsyncedEntries_.get(duplicateLogIdx);
-                        fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
-                        delete req;
+                        duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
+                        if (duplicateLogIdx > 0) {
+                            // duplicate: can resend fast-reply for this request
+                            LogEntry* entry = unsyncedEntries_.get(duplicateLogIdx);
+                            // update proxy id in case the client has changed its proxy
+                            entry->proxyId = req->proxyid();
+                            fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
+                            delete req;
+                        }
+                        else {
+                            // not duplicate
+                            uint64_t deadline = req->sendtime() + req->bound();
+                            std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
+                            unsyncedRequestMap_.assign(reqKey, req);
+                            if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
+                                earlyBuffer_[myEntry] = req;
+                            }
+                            //  Followers donot care about it (i.e. leave it in late buffer)
+                        }
                     }
-
                 }
 
             }
@@ -221,7 +253,7 @@ namespace nezha {
                         hash.XOR(prev->hash);
                     }
                     std::string result = ApplicationExecute(req);
-                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, result);
+                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, result, req->proxyid());
                     fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
                     uint32_t logId = maxSyncedLogId_ + 1;
                     syncedEntries_.assign(logId, entry);
@@ -235,7 +267,7 @@ namespace nezha {
                         LogEntry* prev = unsyncedEntries_.get(unsyncedLogIdByKey_[req->key()]);
                         hash.XOR(prev->hash);
                     }
-                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, "");
+                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, "", req->proxyid());
                     fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
                     uint32_t logId = maxUnSyncedLogId_ + 1;
                     unsyncedEntries_.assign(logId, entry);
@@ -248,16 +280,18 @@ namespace nezha {
         }
         workerCounter_.fetch_sub(1);
     }
+
     void Replica::FastReplyTd(int id) {
         workerCounter_.fetch_add(1);
         std::string key = "FastReplyTd-" + std::to_string(id);
         int fd = socketFds_[key];
-        char* buffer = receiverBuffers_[key];
+        char* buffer = buffers_[key];
         LogEntry* entry = NULL;
         Reply reply;
         reply.set_view(viewNum_);
-        reply.set_isfast(true);
+        reply.set_replytype(FAST_REPLY);
         reply.set_replicaid(replicaId_);
+        std::map<uint64_t, struct sockaddr_in> addrMap;
         while (status_ == NORMAL) {
             if (fastReplyQus_[id].try_dequeue(entry)) {
                 reply.set_clientid((entry->reqKey) >> 32);
@@ -265,15 +299,66 @@ namespace nezha {
                 reply.set_hash(entry->hash.hash, SHA_DIGEST_LENGTH);
                 reply.set_result(entry->result);
                 size_t msgLen = reply.ByteSizeLong();
-                if (reply.SerializeToArray(buffer, msgLen)) {
-                    // sendto(fd, buffer, msgLen, 0, );
+                if (addrMap.find(entry->proxyId) == addrMap.end()) {
+                    struct sockaddr_in addr;
+                    bzero(&addr, sizeof(addr));
+                    addr.sin_family = AF_INET;
+                    addr.sin_port = htons((uint32_t)(entry->proxyId));
+                    addr.sin_addr.s_addr = proxyIPs_[(entry->proxyId) >> 32];
+                    addrMap[entry->proxyId] = addr;
                 }
-
-
+                if (reply.SerializeToArray(buffer, msgLen)) {
+                    sendto(fd, buffer, msgLen, 0, (struct sockaddr*)&(addrMap[entry->proxyId]), sizeof(sockaddr_in));
+                }
             }
         }
         workerCounter_.fetch_sub(1);
     }
+
+    void Replica::SlowReplyTd(int id) {
+        workerCounter_.fetch_add(1);
+        std::string key = "SlowReplyTd-" + std::to_string(id);
+        int fd = socketFds_[key];
+        char* buffer = buffers_[key];
+        LogEntry* entry = NULL;
+        Reply reply;
+        reply.set_view(viewNum_);
+        reply.set_replytype(SLOW_REPLY);
+        reply.set_replicaid(replicaId_);
+        reply.set_hash("");
+        reply.set_result("");
+        std::map<uint64_t, struct sockaddr_in> addrMap;
+        while (status_ == NORMAL) {
+            if (slowReplyQus_[id].try_dequeue(entry)) {
+                reply.set_clientid((entry->reqKey) >> 32);
+                reply.set_reqid((uint32_t)(entry->reqKey));
+                size_t msgLen = reply.ByteSizeLong();
+                if (addrMap.find(entry->proxyId) == addrMap.end()) {
+                    struct sockaddr_in addr;
+                    bzero(&addr, sizeof(addr));
+                    addr.sin_family = AF_INET;
+                    addr.sin_port = htons((uint32_t)(entry->proxyId));
+                    addr.sin_addr.s_addr = proxyIPs_[(entry->proxyId) >> 32];
+                    addrMap[entry->proxyId] = addr;
+                }
+                // To optimize: SLOW_REPLY => COMMIT_REPLY
+                if (reply.SerializeToArray(buffer, msgLen)) {
+                    sendto(fd, buffer, msgLen, 0, (struct sockaddr*)&(addrMap[entry->proxyId]), sizeof(sockaddr_in));
+                }
+            }
+        }
+
+        workerCounter_.fetch_sub(1);
+    }
+
+    void Replica::IndexSyncTd(int id) {
+        workerCounter_.fetch_add(1);
+        while (status_ == NORMAL) {
+
+        }
+        workerCounter_.fetch_sub(1);
+    }
+
     void Replica::RequestReceive(int id, int fd) {
         struct sockaddr_in addr;
         socklen_t addrlen;
@@ -283,11 +368,30 @@ namespace nezha {
             // Parse and process message
             Request* request = new Request();
             if (request->ParseFromArray(buffer, sz)) {
-                processQu_.enqueue(request);
+                uint32_t proxyId = (request->proxyid() >> 32);
+                if (proxyId < proxyIPs_.size()) {
+                    if (proxyIPs_[proxyId] == 0) {
+                        proxyIPs_[proxyId] = addr.sin_addr.s_addr;
+                    }
+                    processQu_.enqueue(request);
+                }
+                else {
+                    LOG(WARNING) << "ProxyId out of scope " << request->proxyid();
+                }
+
             }
         }
     }
 
+    void Replica::IndexSyncReceive(int id, int fd) {
+        struct sockaddr_in addr;
+        socklen_t addrlen;
+        char* buffer = requestBuffers_[id];
+        int sz = recvfrom(fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&addr, &addrlen);
+        if (sz > 0) {
+            // recognize msg type based on sender port
+        }
+    }
     void Replica::Master() {
         uint64_t nowTime = GetMicrosecondTimestamp();
         // I have not heard from the leader for a long time, start a view change
@@ -310,7 +414,7 @@ namespace nezha {
     void Replica::MasterReceive(int fd) {
         struct sockaddr_in addr;
         socklen_t addrlen;
-        char* buffer = receiverBuffers_["master"];
+        char* buffer = buffers_["master"];
         int sz = recvfrom(fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&addr, &addrlen);
         if (sz > 0) {
             // Parse and process message

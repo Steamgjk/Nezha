@@ -14,11 +14,18 @@
         34333,
         34333
     ],
+    "index-sync-ports": [
+        35333,
+        35333,
+        35333
+    ],
     "key-num": 1000000,
     "replica-id": 0,
     "receiver-shards": 1,
     "process-shards": 1,
     "reply-shards": 1,
+    "index-sync-shards": 1,
+    "max-proxy-num": 8,
     "main-loop-period-ms": 20,
     "heartbeat-threshold-ms": 500
 }
