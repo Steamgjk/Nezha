@@ -18,7 +18,7 @@ namespace nezha {
         lastReleasedEntryByKeys_.resize(keyNum, std::pair<uint64_t, uint64_t>(0, 0));
         // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
         maxSyncedLogId_ = 1;
-        minUnSyncedLogId_ = 1;
+        minUnSyncedLogId_ = 2;
         maxUnSyncedLogId_ = 1;
         syncedLogIdByKey_.resize(keyNum, 1);
         unsyncedLogIdByKey_.resize(keyNum, 1);
@@ -34,6 +34,7 @@ namespace nezha {
 
         CreateMasterContext();
         CreateReceiverContext();
+        CreateSenderContext();
         // Launch Threads (based on Config)
         LaunchThreads();
         ev_run(evLoops_["master"], 0);
@@ -56,7 +57,7 @@ namespace nezha {
         evIO->data = (void*)this;
 
         std::string ip = replicaConfig_["replica-ips"][replicaId_].get<std::string>();
-        int port = replicaConfig_["master-ports"][replicaId_].get<int>();
+        int port = replicaConfig_["master-ports"].get<int>();
         int fd = CreateSocketFd(ip, port);
         if (fd < 0) {
             LOG(ERROR) << "Receiver Fd fail " << ip << ":" << port;
@@ -89,7 +90,7 @@ namespace nezha {
             struct ev_loop* evLoop = ev_loop_new();
             struct ev_io* evIO = new ev_io();
             std::string ip = replicaConfig_["replica-ips"][replicaId_].get<std::string>();
-            int port = replicaConfig_["receiver-ports"][replicaId_].get<int>() + i;
+            int port = replicaConfig_["receiver-ports"].get<int>() + i;
             int fd = CreateSocketFd(ip, port);
             if (fd < 0) {
                 LOG(ERROR) << "Receiver Fd fail " << i;
@@ -117,7 +118,23 @@ namespace nezha {
             // buffers_[key] = buffer;
             // requestBuffers_.push_back(buffer);
         }
+        else {
+            // leader also needs an ev_io for index_sync receive
+        }
     }
+
+    void Replica::CreateSenderContext() {
+        senderPorts_[INDEX_SYNC] = replicaConfig_["index-sync-ports"];
+        senderPorts_[MISSED_REQ] = replicaConfig_["missed-req-ports"];
+        senderPorts_[ASK_INDEX] = replicaConfig_["ask-index-ports"];
+        senderPorts_[ASK_REQ] = replicaConfig_["ask-req-ports"];
+        std::string replicaIP = replicaConfig_["replica-ips"][replicaId_];
+        for (int i = 0; i < MAX_SENDER_TYPE_NUM; i++) {
+            senderFds_[i] = CreateSocketFd(replicaIP, senderPorts_[i]);
+            senderBuffers_[i] = new char[BUFFER_SIZE];
+        }
+    }
+
     void Replica::LaunchThreads() {
         // RequestReceive
         for (int i = 0; i < replicaConfig_["receiver-shards"]; i++) {
@@ -245,7 +262,8 @@ namespace nezha {
                 uint64_t deadline = earlyBuffer_.begin()->first.first;
                 uint64_t reqKey = earlyBuffer_.begin()->first.second;
                 Request* req = earlyBuffer_.begin()->second;
-                SHA_HASH hash = CalculateHash(deadline, reqKey);
+                SHA_HASH myHash = CalculateHash(deadline, reqKey);
+                SHA_HASH hash = myHash;
                 if (amLeader) {
                     if (syncedLogIdByKey_[req->key()] > 1) {
                         // There are previous (non-commutative) requests appended
@@ -253,7 +271,7 @@ namespace nezha {
                         hash.XOR(prev->hash);
                     }
                     std::string result = ApplicationExecute(req);
-                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, result, req->proxyid());
+                    LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), result, req->proxyid());
                     fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
                     uint32_t logId = maxSyncedLogId_ + 1;
                     syncedEntries_.assign(logId, entry);
@@ -267,7 +285,7 @@ namespace nezha {
                         LogEntry* prev = unsyncedEntries_.get(unsyncedLogIdByKey_[req->key()]);
                         hash.XOR(prev->hash);
                     }
-                    LogEntry* entry = new LogEntry(deadline, reqKey, hash, "", req->proxyid());
+                    LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), "", req->proxyid());
                     fastReplyQus_[(roundRobin++) % replyShard].enqueue(entry);
                     uint32_t logId = maxUnSyncedLogId_ + 1;
                     unsyncedEntries_.assign(logId, entry);
@@ -292,11 +310,50 @@ namespace nezha {
         reply.set_replytype(FAST_REPLY);
         reply.set_replicaid(replicaId_);
         std::map<uint64_t, struct sockaddr_in> addrMap;
+        bool amLeader = AmLeader();
         while (status_ == NORMAL) {
             if (fastReplyQus_[id].try_dequeue(entry)) {
                 reply.set_clientid((entry->reqKey) >> 32);
                 reply.set_reqid((uint32_t)(entry->reqKey));
-                reply.set_hash(entry->hash.hash, SHA_DIGEST_LENGTH);
+                if (amLeader) {
+                    reply.set_hash(entry->hash.hash, SHA_DIGEST_LENGTH);
+                }
+                else {
+                    // TODO:consider both synced and unsynced entries
+                    uint32_t logid = unsyncedReq2LogId_.get(entry->reqKey);
+                    if (syncedLogIdByKey_[entry->opKey] > 1) {
+                        uint32_t syncPoint = syncedLogIdByKey_[entry->opKey];
+                        LogEntry* syncedEntry = syncedEntries_.get(syncPoint);
+                        if (syncedEntry->deadline < entry->deadline || (syncedEntry->deadline == entry->deadline && syncedEntry->reqKey < entry->reqKey)) {
+                            uint32_t unsyncedPoint = minUnSyncedLogId_;
+                            LogEntry* unsyncedEntry = NULL;
+                            while (unsyncedPoint <= logid) {
+                                unsyncedEntry = unsyncedEntries_.get(unsyncedPoint);
+                                if (unsyncedEntry->opKey != entry->opKey) {
+                                    unsyncedPoint++;
+                                }
+                                if (unsyncedEntry->deadline < syncedEntry->deadline || (unsyncedEntry->deadline == syncedEntry->deadline && unsyncedEntry->reqKey <= syncedEntry->reqKey)) {
+                                    unsyncedPoint++;
+                                }
+                                else {
+                                    break;
+                                }
+                            }
+                            // !!! Commutativity
+                            // TODO: think whether unsyncedEntry = NULL is possible
+                            assert(unsyncedPoint <= logid);
+                            SHA_HASH hash = entry->hash;
+                            hash.XOR(unsyncedEntry->hash);
+                            hash.XOR(unsyncedEntry->myhash);
+                            reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+
+                        }
+                        // else (unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need
+                        // to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
+
+                    }
+                }
+
                 reply.set_result(entry->result);
                 size_t msgLen = reply.ByteSizeLong();
                 if (addrMap.find(entry->proxyId) == addrMap.end()) {
@@ -383,15 +440,88 @@ namespace nezha {
         }
     }
 
-    void Replica::IndexSyncReceive(int id, int fd) {
+    void Replica::FollowerIndexSyncReceive(int id, int fd) {
         struct sockaddr_in addr;
         socklen_t addrlen;
         char* buffer = requestBuffers_[id];
         int sz = recvfrom(fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&addr, &addrlen);
+        IndexSync idxSyncMsg;
+        MissedReq missedReqMsg;
+        AskReq askReqMsg;
+        AskIndex askIdxMsg;
+        std::map<uint32_t, IndexSync> pendingIndexSync;
         if (sz > 0) {
             // recognize msg type based on sender port
+            int port = ntohs(addr.sin_port);
+            if (port == senderPorts_[INDEX_SYNC]) {
+                if (idxSyncMsg.ParseFromArray(buffer, sz)) {
+                    if (!CheckViewAndCV()) {
+                        return;
+                    }
+                    if (maxSyncedLogId_ + 1 < idxSyncMsg.logidbegin()) {
+                        pendingIndexSync[idxSyncMsg.logidbegin()] = idxSyncMsg;
+                        // We are missing some idxSyncMsgs
+                        askIdxMsg.set_logidbegin(maxSyncedLogId_ + 1);
+                        askIdxMsg.set_logidend(idxSyncMsg.logidbegin() - 1);
+                        addr.sin_port = htons(senderPorts_[ASK_INDEX]);
+                        sendto(senderFds_[ASK_INDEX], senderBuffers_[ASK_INDEX], askIdxMsg.ByteSizeLong(), 0, (struct sockaddr*)&addr, addrlen);
+                    }
+                    else if (maxSyncedLogId_ < idxSyncMsg.logidend()) {
+                        // This idxSyncMsg is useful
+                        ProcessIndexSync(idxSyncMsg);
+                    }
+                    // Process pendingIndexSync, if any
+                    while (!pendingIndexSync.empty()) {
+                        if (ProcessIndexSync(pendingIndexSync.begin()->second)) {
+                            pendingIndexSync.erase(pendingIndexSync.begin());
+                        }
+                        else {
+                            break;
+                        }
+                    }
+                }
+            }
+            // TODO: Maybe delegate to Master Thread
+            else if (port == senderPorts_[MISSED_REQ]) {
+
+            }
+
         }
     }
+
+    bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
+        if (idxSyncMsg.logidend() <= maxSyncedLogId_) {
+            // This idxSyncMsg is useless 
+            return true;
+        }
+        if (idxSyncMsg.logidbegin() > maxSyncedLogId_ + 1) {
+            return false;
+        }
+        for (uint32_t logid = maxSyncedLogId_ + 1; logid <= idxSyncMsg.logidend(); logid++) {
+            uint32_t offset = logid - idxSyncMsg.logidbegin();
+            uint64_t reqKey = idxSyncMsg.reqkeys(offset);
+            uint64_t deadline = idxSyncMsg.deadlines(offset);
+            Request* req = unsyncedRequestMap_.get(reqKey);
+            if (req) {
+                // Find the req locally
+                SHA_HASH myHash = CalculateHash(deadline, reqKey);
+                SHA_HASH hash = myHash;
+                assert(syncedEntries_.get(syncedLogIdByKey_[req->key()]) != NULL);
+                const SHA_HASH& prev = syncedEntries_.get(syncedLogIdByKey_[req->key()])->hash;
+                hash.XOR(prev);
+                LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), "", req->proxyid());
+                syncedRequestMap_.assign(reqKey, req);
+                syncedReq2LogId_.assign(reqKey, logid);
+                syncedEntries_.assign(logid, entry);
+                syncedLogIdByKey_[req->key()] = logid;
+                maxSyncedLogId_++;
+            }
+            // TO Continue
+
+        }
+        return true;
+    }
+
     void Replica::Master() {
         uint64_t nowTime = GetMicrosecondTimestamp();
         // I have not heard from the leader for a long time, start a view change
@@ -428,6 +558,9 @@ namespace nezha {
 
     }
 
+    bool Replica::CheckViewAndCV() {
+        return true;
+    }
     std::string Replica::ApplicationExecute(Request* req) {
         return "";
     }

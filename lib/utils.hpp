@@ -23,6 +23,15 @@ enum REPLY_TYPE {
     COMMIT_REPLY = 3
 };
 
+
+enum SENDER_TYPE {
+    INDEX_SYNC = 0,
+    MISSED_REQ = 1,
+    ASK_INDEX = 2,
+    ASK_REQ = 3
+};
+const int MAX_SENDER_TYPE_NUM = 4;
+
 union SHA_HASH {
     uint32_t item[5];
     unsigned char hash[SHA_DIGEST_LENGTH];
@@ -44,11 +53,13 @@ union SHA_HASH {
 struct LogEntry {
     uint64_t deadline;
     uint64_t reqKey;
-    SHA_HASH hash;
+    SHA_HASH myhash; // the hash value of this entry
+    SHA_HASH hash; // the accumulative hash
+    uint32_t opKey; // for commutativity optimization
     std::string result;
     uint64_t proxyId;
     LogEntry() {}
-    LogEntry(const uint64_t d, const uint64_t r, const SHA_HASH& h, const std::string& re, const uint64_t p) :deadline(d), reqKey(r), hash(h), result(re), proxyId(p) {}
+    LogEntry(const uint64_t d, const uint64_t r, const SHA_HASH& mh, const SHA_HASH& h, const uint32_t ok, const std::string& re, const uint64_t p) :deadline(d), reqKey(r), myhash(mh), hash(h), opKey(ok), result(re), proxyId(p) {}
 
 };
 

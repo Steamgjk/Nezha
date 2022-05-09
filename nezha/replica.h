@@ -46,6 +46,7 @@ namespace nezha {
         ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_; // log-id as the key [accumulated hashes]
         ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index)
         ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index)
+
         // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and 
         // provide convenience for garbage-collection
         std::atomic<uint32_t> maxSyncedLogId_;
@@ -66,24 +67,30 @@ namespace nezha {
         std::map<std::string, char*> buffers_;
         std::vector<char*> requestBuffers_;
         std::vector<in_addr_t> proxyIPs_;
+        int senderFds_[MAX_SENDER_TYPE_NUM];
+        char* senderBuffers_[MAX_SENDER_TYPE_NUM];
+        int senderPorts_[MAX_SENDER_TYPE_NUM];
 
         std::atomic<uint64_t> lastHeartBeatTime_; // for master to check whether it should issue view change
         std::atomic<uint32_t> workerCounter_; // for master to check whether everybody has stopped
 
 
         ConcurrentMap<uint64_t, Request*> requestMap_;
-        ConcurrentMap<uint64_t, Reply*> replyMap_;
+        ConcurrentMap<uint64_t, Reply*> fastReplyMap_;
+        ConcurrentMap<uint64_t, Reply*> slowReplyMap_;
         ConcurrentQueue<Request*> processQu_;
         ConcurrentQueue<LogEntry*> fastReplyQus_[4];
         ConcurrentQueue<LogEntry*> slowReplyQus_[4];
 
         void CreateMasterContext();
         void CreateReceiverContext();
+        void CreateSenderContext();
         void CreateContext();
         void LaunchThreads();
         void StartViewChange();
         std::string ApplicationExecute(Request* req);
         bool AmLeader();
+        bool CheckViewAndCV();
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.json"));
         ~Replica();
@@ -93,7 +100,9 @@ namespace nezha {
         void FastReplyTd(int id = -1);
         void SlowReplyTd(int id = -1);
         void IndexSyncTd(int id = -1);
-        void IndexSyncReceive(int id = -1, int fd = -1);
+        void FollowerIndexSyncReceive(int id = -1, int fd = -1);
+        void LeaderIndexSyncReceive(int id = -1, int fd = -1);
+        bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void RequestReceive(int id = -1, int fd = -1);
 
         void Master();

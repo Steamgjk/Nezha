@@ -20,3 +20,29 @@ message Reply {
     bytes result = 6;
     uint32 replytype = 7;
 }
+
+message IndexSync {
+    uint32 logidbegin = 1;
+    uint32 logidend = 2;
+    repeated uint64 deadlines = 3;
+    repeated uint64 reqkeys =4;
+    uint32 view = 5;
+    // crash-vector
+}
+
+message AskIndex {
+    uint32 logidbegin = 1;
+    uint32 logidend = 2;
+    uint32 replicaid = 3;
+}
+
+message AskReq {
+    uint32 logidbegin = 1;
+    uint32 logidend = 2;
+    uint32 replicaid = 3;
+}
+
+message MissedReq {
+    repeated Request reqs = 1;
+    uint32 replicaid = 2;
+}
