@@ -7,46 +7,57 @@
 #include <ev.h>
 #include <arpa/inet.h>
 #include <functional>
-#include <junction/ConcurrentMap_Leapfrog.h>
+#include <map>
 #include "lib/address.h"
 
-namespace nezha_network {
+
 #define BUFFER_SIZE (65535)
 
-    class UDPSocketEndpoint
-    {
-    private:
-        /* data */
-        Address addr_;
-        int fd_;
-        struct ev_loop* evLoop_;
-        junction::ConcurrentMap_Leapfrog<uint64_t, struct ParaStruct*> evWatchers_;
+class UDPSocketEndpoint
+{
+private:
+    /* data */
+    Address addr_;
+    int fd_;
+    struct ev_loop* evLoop_;
+    std::map<uint64_t, struct ParaStruct*> evWatchers_;
+    std::map<uint64_t, struct TimerStruct*> evTimers_;
+public:
+    UDPSocketEndpoint();
+    UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
+    UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
+    ~UDPSocketEndpoint();
 
-    public:
-        UDPSocketEndpoint();
-        UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
-        UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
-        ~UDPSocketEndpoint();
+    int SendMsgTo(const Address& dstAddr, const std::string& msg);
+    int SendMsgTo(const Address& dstAddr, const char* buffer, const uint32_t bufferLen);
 
-        int SendMsgTo(const Address& dstAddr, const std::string& msg);
-        int SendMsgTo(const Address& dstAddr, const char* buffer, const uint32_t bufferLen);
+    uint64_t RegisterReceiveHandler(std::function<void(char*, int, void*)> msgHandler, void* context);
+    bool UnregisterReceiveHandler(uint64_t key);
 
-        uint64_t RegisterReceiveHandler(std::function<void(char*, int, void*)> msgHandler, void* context);
-        bool UnregisterReceiveHandler(uint64_t key);
-        void ReceiverRun();
+    uint64_t RegisterTimer(std::function<void(void*)> timerFunc, void* context, uint32_t periodMs);
+    bool CancelTimer(uint64_t key);
 
-    };
-    struct ParaStruct {
-        std::function<void(char*, int, void*)> msgHandler_;
-        UDPSocketEndpoint* thisPtr_;
-        void* context_;
-        char* buffer_;
-        struct ev_io* evWatcher_;
+    void LoopRun();
 
-        ParaStruct(std::function<void(char*, int, void*)> msghdl, UDPSocketEndpoint* t = NULL, void* ctx = NULL, char* buf = NULL, struct ev_io* w) :msgHandler_(msghdl), thisPtr_(t), context_(ctx), buffer_(buf), evWatcher_(w) {}
-    };
-}
 
+};
+
+struct ParaStruct {
+    std::function<void(char*, int, void*)> msgHandler_;
+    UDPSocketEndpoint* thisPtr_;
+    void* context_;
+    char* buffer_;
+    struct ev_io* evWatcher_;
+
+    ParaStruct(std::function<void(char*, int, void*)> msghdl, UDPSocketEndpoint* t = NULL, void* ctx = NULL, char* buf = NULL, struct ev_io* w = NULL) :msgHandler_(msghdl), thisPtr_(t), context_(ctx), buffer_(buf), evWatcher_(w) {}
+};
+
+struct TimerStruct {
+    std::function<void(void*)> timerFunc_;
+    void* context_;
+    struct ev_timer* evTimer_;
+    TimerStruct(std::function<void(void*)> timerf, void* ctx = NULL, struct ev_timer* e = NULL) :timerFunc_(timerf), context_(ctx), evTimer_(e) {}
+};
 
 
 

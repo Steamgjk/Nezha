@@ -18,16 +18,13 @@
 #include <yaml-cpp/yaml.h>
 #include "nezha/nezha-proto.pb.h"
 #include "lib/utils.hpp"
-#include "lib/json.hpp"
 #include "lib/concurrentqueue.hpp"
+#include "lib/udp_socket_endpoint.h"
 
 namespace nezha {
     using namespace nezha::proto;
-    using json = nlohmann::json;
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
-
-    const uint32_t BUFFER_SIZE = 65535;
 
     class Replica
     {

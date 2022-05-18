@@ -11,7 +11,7 @@ PROTOS += $(addprefix $(d), \
 
 
 
-$(b)nezha-replica: $(o)replica-run.o $(o)replica.o  $(o)nezha-proto.o 
+$(b)nezha-replica: $(o)replica-run.o $(o)replica.o  $(o)nezha-proto.o $(LIB-configuration)
 
 
 BINS += $(b)nezha-replica 
