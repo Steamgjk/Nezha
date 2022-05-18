@@ -27,6 +27,8 @@ sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake 
 
 # install protobuf. Please make install libprotoc 3.20.1-rc1 from source code instead of using apt install. Please follow the instructions at https://github.com/protocolbuffers/protobuf/blob/main/src/README.md 
 
+# install yamlcpp. Please follow the instructions at https://github.com/jbeder/yaml-cpp
+
 # install libev
 git clone https://github.com/enki/libev.git
 chmod -R 777 libev

@@ -15,6 +15,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <junction/ConcurrentMap_Leapfrog.h>
+#include <yaml-cpp/yaml.h>
 #include "nezha/nezha-proto.pb.h"
 #include "lib/utils.hpp"
 #include "lib/json.hpp"
@@ -31,7 +32,8 @@ namespace nezha {
     class Replica
     {
     private:
-        json replicaConfig_;
+        YAML::Node replicaConfig_;
+
         std::atomic<uint32_t> viewNum_;
         std::atomic<uint32_t> replicaId_;
         std::atomic<uint32_t> replicaNum_;

@@ -4,17 +4,12 @@ namespace nezha {
     Replica::Replica(const std::string& configFile)
     {
         // Load Config
-        std::ifstream configIfs(configFile);
-        if (!configIfs.is_open()) {
-            LOG(ERROR) << "replica config open fail " << configFile;
-        }
-        configIfs >> replicaConfig_;
-        configIfs.close();
+        replicaConfig_ = YAML::LoadFile(configFile);
 
         viewNum_ = 0;
-        replicaId_ = replicaConfig_["replica-id"];
+        replicaId_ = replicaConfig_["replica-id"].as<int>();
         replicaNum_ = replicaConfig_["replica-ips"].size();
-        uint32_t keyNum = replicaConfig_["key-num"].get<uint32_t>();
+        uint32_t keyNum = replicaConfig_["key-num"].as<uint32_t>();
         lastReleasedEntryByKeys_.resize(keyNum, std::pair<uint64_t, uint64_t>(0, 0));
         // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
         maxSyncedLogId_ = 1;
@@ -23,7 +18,7 @@ namespace nezha {
         syncedLogIdByKey_.resize(keyNum, 1);
         unsyncedLogIdByKey_.resize(keyNum, 1);
 
-        uint32_t proxyNum = replicaConfig_["max-proxy-num"].get<uint32_t>();
+        uint32_t proxyNum = replicaConfig_["max-proxy-num"].as<uint32_t>();
         proxyIPs_.resize(proxyNum, 0u);
 
         status_ = NORMAL;
@@ -32,12 +27,12 @@ namespace nezha {
             << "\treplicaNum=" << replicaNum_
             << "\tkeyNum=" << keyNum;
 
-        CreateMasterContext();
-        CreateReceiverContext();
-        CreateSenderContext();
-        // Launch Threads (based on Config)
-        LaunchThreads();
-        ev_run(evLoops_["master"], 0);
+        // CreateMasterContext();
+        // CreateReceiverContext();
+        // CreateSenderContext();
+        // // Launch Threads (based on Config)
+        // LaunchThreads();
+        // ev_run(evLoops_["master"], 0);
     }
 
     Replica::~Replica()
@@ -47,17 +42,18 @@ namespace nezha {
             LOG(INFO) << "Deleted\t" << kv.first;
         }
     }
+
     void Replica::CreateMasterContext() {
         char* buffer = new char[BUFFER_SIZE];
         struct ev_loop* evLoop = ev_default_loop();
         struct ev_timer* evTimer = new ev_timer();
-        evTimer->repeat = replicaConfig_["main-loop-period-ms"].get<uint32_t>() * 1e-3;
+        evTimer->repeat = replicaConfig_["main-loop-period-ms"].as<uint32_t>() * 1e-3;
         evTimer->data = (void*)this;
         struct ev_io* evIO = new ev_io();
         evIO->data = (void*)this;
 
-        std::string ip = replicaConfig_["replica-ips"][replicaId_].get<std::string>();
-        int port = replicaConfig_["master-ports"].get<int>();
+        std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
+        int port = replicaConfig_["master-ports"].as<int>();
         int fd = CreateSocketFd(ip, port);
         if (fd < 0) {
             LOG(ERROR) << "Receiver Fd fail " << ip << ":" << port;
@@ -85,12 +81,12 @@ namespace nezha {
     }
 
     void Replica::CreateReceiverContext() {
-        for (int i = 0; i < replicaConfig_["receiver-shards"]; i++) {
+        for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
             char* buffer = new char[BUFFER_SIZE];
             struct ev_loop* evLoop = ev_loop_new();
             struct ev_io* evIO = new ev_io();
-            std::string ip = replicaConfig_["replica-ips"][replicaId_].get<std::string>();
-            int port = replicaConfig_["receiver-ports"].get<int>() + i;
+            std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
+            int port = replicaConfig_["receiver-ports"].as<int>() + i;
             int fd = CreateSocketFd(ip, port);
             if (fd < 0) {
                 LOG(ERROR) << "Receiver Fd fail " << i;
@@ -124,11 +120,11 @@ namespace nezha {
     }
 
     void Replica::CreateSenderContext() {
-        senderPorts_[INDEX_SYNC] = replicaConfig_["index-sync-ports"];
-        senderPorts_[MISSED_REQ] = replicaConfig_["missed-req-ports"];
-        senderPorts_[ASK_INDEX] = replicaConfig_["ask-index-ports"];
-        senderPorts_[ASK_REQ] = replicaConfig_["ask-req-ports"];
-        std::string replicaIP = replicaConfig_["replica-ips"][replicaId_];
+        senderPorts_[INDEX_SYNC] = replicaConfig_["index-sync-port"].as<int>();
+        senderPorts_[MISSED_REQ] = replicaConfig_["missed-req-port"].as<int>();
+        senderPorts_[ASK_INDEX] = replicaConfig_["ask-index-port"].as<int>();
+        senderPorts_[ASK_REQ] = replicaConfig_["ask-req-port"].as<int>();
+        std::string replicaIP = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         for (int i = 0; i < MAX_SENDER_TYPE_NUM; i++) {
             senderFds_[i] = CreateSocketFd(replicaIP, senderPorts_[i]);
             senderBuffers_[i] = new char[BUFFER_SIZE];
@@ -137,34 +133,34 @@ namespace nezha {
 
     void Replica::LaunchThreads() {
         // RequestReceive
-        for (int i = 0; i < replicaConfig_["receiver-shards"]; i++) {
+        for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::ReceiveTd, this, i);
             std::string key("ReceiveTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
         // RequestProcess
-        for (int i = 0; i < replicaConfig_["process-shards"]; i++) {
+        for (int i = 0; i < replicaConfig_["process-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::ProcessTd, this, i);
             std::string key("ProcessTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
         // RequestReply
-        for (int i = 0; i < replicaConfig_["reply-shards"]; i++) {
+        for (int i = 0; i < replicaConfig_["reply-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::FastReplyTd, this, i);
             std::string key("FastReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
-        for (int i = 0; i < replicaConfig_["reply-shards"]; i++) {
+        for (int i = 0; i < replicaConfig_["reply-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
             std::string key("SlowReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
         // IndexSync
-        for (int i = 0; i < replicaConfig_["index-sync-shards"]; i++) {
+        for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::IndexSyncTd, this, i);
             std::string key("IndexSyncTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -188,7 +184,7 @@ namespace nezha {
         uint64_t reqKey = 0;
         Request* req = NULL;
         uint32_t roundRobin = 0;
-        uint32_t replyShard = replicaConfig_["reply-shards"].get<uint32_t>();
+        uint32_t replyShard = replicaConfig_["reply-shards"].as<uint32_t>();
         bool amLeader = AmLeader();
         while (status_ == NORMAL) {
             if (processQu_.try_dequeue(req)) {
@@ -525,7 +521,7 @@ namespace nezha {
     void Replica::Master() {
         uint64_t nowTime = GetMicrosecondTimestamp();
         // I have not heard from the leader for a long time, start a view change
-        bool leaderMayDie = ((!AmLeader()) && nowTime > lastHeartBeatTime_ + replicaConfig_["heartbeat-threshold-ms"].get<uint64_t>());
+        bool leaderMayDie = ((!AmLeader()) && nowTime > lastHeartBeatTime_ + replicaConfig_["heartbeat-threshold-ms"].as<uint64_t>());
         if (leaderMayDie || status_ == VIEWCHANGE) {
             status_ = VIEWCHANGE;
             while (workerCounter_ > 0) {

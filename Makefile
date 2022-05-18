@@ -13,15 +13,11 @@ CXXFLAGS := -std=c++0x -O3
 # CFLAGS := -g2 -Wall -pthread -iquote.obj/gen -Wno-uninitialized -O0
 # CXXFLAGS := -std=c++0x -O0 -g2
 
-LDFLAGS := -lev -ldl -lprotobuf -ljunction -lcrypto -lglog -pthread
+LDFLAGS := -lev -ldl -lprotobuf -ljunction -lcrypto -lglog -lyaml-cpp -pthread
 LIBPATH := -I./
 CFLAGS += $(LIBPATH)
 
 
-
-# Junction (Concurrent HashMap)
-# LIBJUNCTION_LDFLAGS := /usr/lib/libjunction.a /usr/lib/libturf.a
-LDFLAGS += $(LIBJUNCTION_LDFLAGS)
 
 
 # # Google test framework. This doesn't use pkgconfig
