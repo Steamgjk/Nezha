@@ -34,9 +34,9 @@ namespace nezha {
         std::atomic<uint32_t> viewNum_;
         std::atomic<uint32_t> replicaId_;
         std::atomic<uint32_t> replicaNum_;
-        std::atomic<uint32_t> status_; // for workers to check whether they should stop (for view change)
+        std::atomic<uint32_t> status_; // Worker threads check status to decide whether they should stop (for view change)
 
-        std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // <deadline, reqKey>
+        std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // The key pair is <deadline, reqKey>
         std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
 
         ConcurrentMap<uint64_t, Request*> syncedRequestMap_; // <reqKey, request>
@@ -59,16 +59,19 @@ namespace nezha {
         std::map<std::string, std::thread*> threadPool_;
 
         // Context
-        std::map<std::string, struct ev_loop*> evLoops_;
-        std::map<std::string, struct ev_io*> evIOs_;
-        std::map<std::string, struct ev_timer*> evTimers_;
-        std::map<std::string, int> socketFds_;
-        std::map<std::string, char*> buffers_;
-        std::vector<char*> requestBuffers_;
+        std::vector<UDPSocketEndpoint*> endPoints_;
+        std::vector<std::pair<Replica*, int>> receiverEPContexts_;
+        std::vector<void*> endPointContexts_; // Free them in deconstructor to avoid memory leak
+        int masterEPIndex_;
+        int reqReceiverEPIndex_;
+        int indexSyncEPIndex_;
+        int askIndexSyncEPIndex_;
+        int askMissedReqEPIndex_;
+        int indexSenderEPIndex_;
+        int ackMissedReqEPIndex_;
+        int ackMissedIdxEPIndex_;
+
         std::vector<in_addr_t> proxyIPs_;
-        int senderFds_[MAX_SENDER_TYPE_NUM];
-        char* senderBuffers_[MAX_SENDER_TYPE_NUM];
-        int senderPorts_[MAX_SENDER_TYPE_NUM];
 
         std::atomic<uint64_t> lastHeartBeatTime_; // for master to check whether it should issue view change
         std::atomic<uint32_t> workerCounter_; // for master to check whether everybody has stopped
@@ -81,6 +84,7 @@ namespace nezha {
         ConcurrentQueue<LogEntry*> fastReplyQus_[4];
         ConcurrentQueue<LogEntry*> slowReplyQus_[4];
 
+        void CreateContext();
         void CreateMasterContext();
         void CreateReceiverContext();
         void CreateSenderContext();
@@ -94,11 +98,19 @@ namespace nezha {
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.json"));
         ~Replica();
 
+        void ReceiveClientRequest(int id = -1, char* msgBuffer, int msgLen);
+        void ReceiveIndexSyncMessage(char* msgBuffer, int msgLen);
+        void ReceiveAskMissedReq(char* msgBuffer, int msgLen);
+        void ReceiveAskMissedIdx(char* msgBuffer, int msgLen);
+
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);
         void FastReplyTd(int id = -1);
         void SlowReplyTd(int id = -1);
         void IndexSyncTd(int id = -1);
+        void MissedIndexAckTd();
+        void MissedReqAckTd();
+
         void FollowerIndexSyncReceive(int id = -1, int fd = -1);
         void LeaderIndexSyncReceive(int id = -1, int fd = -1);
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);

@@ -27,12 +27,12 @@ namespace nezha {
             << "\treplicaNum=" << replicaNum_
             << "\tkeyNum=" << keyNum;
 
-        // CreateMasterContext();
-        // CreateReceiverContext();
-        // CreateSenderContext();
-        // // Launch Threads (based on Config)
-        // LaunchThreads();
-        // ev_run(evLoops_["master"], 0);
+        CreateMasterContext();
+        CreateReceiverContext();
+        CreateSenderContext();
+        // Launch Threads (based on Config)
+        LaunchThreads();
+
     }
 
     Replica::~Replica()
@@ -43,93 +43,83 @@ namespace nezha {
         }
     }
 
-    void Replica::CreateMasterContext() {
-        char* buffer = new char[BUFFER_SIZE];
-        struct ev_loop* evLoop = ev_default_loop();
-        struct ev_timer* evTimer = new ev_timer();
-        evTimer->repeat = replicaConfig_["main-loop-period-ms"].as<uint32_t>() * 1e-3;
-        evTimer->data = (void*)this;
-        struct ev_io* evIO = new ev_io();
-        evIO->data = (void*)this;
-
+    void Replica::CreateContext() {
+        // Create master endpoints and context
+        masterEPIndex_ = 0;
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
-        int port = replicaConfig_["master-ports"].as<int>();
-        int fd = CreateSocketFd(ip, port);
-        if (fd < 0) {
-            LOG(ERROR) << "Receiver Fd fail " << ip << ":" << port;
-        }
+        int port = replicaConfig_["master-port"].as<int>();
+        UDPSocketEndpoint* masterEP = new UDPSocketEndpoint(ip, port, true);
+        endPoints_.push_back(masterEP);
 
-        // Register Master Timer 
-        ev_init(evTimer, [](struct ev_loop* loop, struct ev_timer* w, int revents) {
-            static_cast<Replica*>(w->data)->Master();
-            });
-
-        ev_timer_again(evLoop, evTimer);
-
-        // Register Master IO
-        ev_io_init(evIO, [](struct ev_loop* loop, struct ev_io* w, int revents) {
-            static_cast<Replica*>(w->data)->MasterReceive(w->fd);
-            }, fd, EV_READ);
-        ev_io_start(evLoop, evIO);
-
-        std::string key("master");
-        evLoops_[key] = evLoop;
-        evIOs_[key] = evIO;
-        evTimers_[key] = evTimer;
-        socketFds_[key] = fd;
-        buffers_[key] = buffer;
-    }
-
-    void Replica::CreateReceiverContext() {
+        // Create request-receiver endpoints and context
+        reqReceiverEPIndex_ = endPoints_.size();
         for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
-            char* buffer = new char[BUFFER_SIZE];
-            struct ev_loop* evLoop = ev_loop_new();
-            struct ev_io* evIO = new ev_io();
-            std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
-            int port = replicaConfig_["receiver-ports"].as<int>() + i;
-            int fd = CreateSocketFd(ip, port);
-            if (fd < 0) {
-                LOG(ERROR) << "Receiver Fd fail " << i;
-            }
+            int port = replicaConfig_["receiver-port"].as<int>() + i;
+            UDPSocketEndpoint* receiverEP = new UDPSocketEndpoint(ip, port);
+            // Register a request handler to this endpoint
+            std::pair<Replica*, int>* context = new std::pair<Replica*, int>(this, i);
+            receiverEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
+                std::pair<Replica*, int>* ctx = (std::pair<Replica*, int>*)context;
+                ctx->first->ReceiveClientRequest(ctx->second, buffer, bufferLen);
+                }, (void*)context);
 
-            ev_io_init(evIO, [](struct ev_loop* loop, struct ev_io* w, int revents) {
-                int* idPtr = (int*)(w->data);
-                static_cast<Replica*>(w->data)->RequestReceive(*idPtr, w->fd);
-                }, fd, EV_READ);
-            ev_io_start(evLoop, evIO);
+            // Register a timer to monitor replica status
+            TimerStruct* timer = new TimerStruct([](void* context) {
+                Replica* thisPtr = (Replica*)context;
+                if (thisPtr->status_ != NORMAL) {
+                    // break the 
+                }
+                }, (void*)this, 10);
+            receiverEP->RegisterTimer(timer);
 
-            std::string key("ReceiveTd-" + std::to_string(i));
-            evLoops_[key] = evLoop;
-            evIOs_[key] = evIO;
-            socketFds_[key] = fd;
-            buffers_[key] = buffer;
-            requestBuffers_.push_back(buffer);
+            endPoints_.push_back(receiverEP);
+            receiverEPContexts_.push_back(context);
         }
-        if (!AmLeader()) {
-            // follower needs an ev_io for index sync
-            // std::string key("IndexSyncTd-0");
-            // evLoops_[key] = evLoop;
-            // evIOs_[key] = evIO;
-            // socketFds_[key] = fd;
-            // buffers_[key] = buffer;
-            // requestBuffers_.push_back(buffer);
+
+        // Create index-sync endpoints and context
+        indexSyncEPIndex_ = endPoints_.size();
+        int idxSyncPort = replicaConfig_["index-sync-port"].as<int>();
+        UDPSocketEndpoint* indexSyncEP = new UDPSocketEndpoint(ip, idxSyncPort);
+        // Register a msg handler to this endpoint
+        indexSyncEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
+            Replica* thisPtr = (Replica*)context;
+            thisPtr->ReceiveIndexSyncMessage(buffer, bufferLen);
+            }, (void*)this);
+        endPoints_.push_back(indexSyncEP);
+
+        askIndexSyncEPIndex_ = endPoints_.size();
+        UDPSocketEndpoint* askIndexSyncEP = new UDPSocketEndpoint();
+        endPoints_.push_back(askIndexSyncEP);
+
+        askMissedReqEPIndex_ = endPoints_.size();
+        UDPSocketEndpoint* askMissedReqEP = new UDPSocketEndpoint();
+        endPoints_.push_back(askMissedReqEP);
+
+        indexSenderEPIndex_ = endPoints_.size();
+        for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
+            UDPSocketEndpoint* indexSenderEP = new UDPSocketEndpoint();
+            endPoints_.push_back(indexSenderEP);
         }
-        else {
-            // leader also needs an ev_io for index_sync receive
-        }
+
+        ackMissedReqEPIndex_ = endPoints_.size();
+        port = replicaConfig_["ack-missed-req-port"].as<int>();
+        UDPSocketEndpoint* ackMissedReqEP = new UDPSocketEndpoint(ip, port);
+        ackMissedReqEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
+            Replica* thisPtr = (Replica*)context;
+            thisPtr->ReceiveAskMissedReq(buffer, bufferLen);
+            }, (void*)this);
+        endPoints_.push_back(ackMissedReqEP);
+
+        ackMissedIdxEPIndex_ = endPoints_.size();
+        port = replicaConfig_["ack-missed-idx-port"].as<int>();
+        UDPSocketEndpoint* ackMissedIdxEP = new UDPSocketEndpoint(ip, port);
+        ackMissedIdxEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
+            Replica* thisPtr = (Replica*)context;
+            thisPtr->ReceiveAskMissedIdx(buffer, bufferLen);
+            }, (void*)this);
+        endPoints_.push_back(ackMissedIdxEP);
     }
 
-    void Replica::CreateSenderContext() {
-        senderPorts_[INDEX_SYNC] = replicaConfig_["index-sync-port"].as<int>();
-        senderPorts_[MISSED_REQ] = replicaConfig_["missed-req-port"].as<int>();
-        senderPorts_[ASK_INDEX] = replicaConfig_["ask-index-port"].as<int>();
-        senderPorts_[ASK_REQ] = replicaConfig_["ask-req-port"].as<int>();
-        std::string replicaIP = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
-        for (int i = 0; i < MAX_SENDER_TYPE_NUM; i++) {
-            senderFds_[i] = CreateSocketFd(replicaIP, senderPorts_[i]);
-            senderBuffers_[i] = new char[BUFFER_SIZE];
-        }
-    }
 
     void Replica::LaunchThreads() {
         // RequestReceive
@@ -139,6 +129,7 @@ namespace nezha {
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
+
         // RequestProcess
         for (int i = 0; i < replicaConfig_["process-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::ProcessTd, this, i);
@@ -146,6 +137,7 @@ namespace nezha {
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
+
         // RequestReply
         for (int i = 0; i < replicaConfig_["reply-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::FastReplyTd, this, i);
@@ -159,6 +151,7 @@ namespace nezha {
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
+
         // IndexSync
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
             std::thread* td = new std::thread(&Replica::IndexSyncTd, this, i);
@@ -170,15 +163,24 @@ namespace nezha {
                 break;
             }
         }
+        std::thread* td = new std::thread(&Replica::MissedIndexAckTd, this);
+        std::string key("MissedIndexAckTd");
+        threadPool_[key] = td;
+        LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
+
+        std::thread* td = new std::thread(&Replica::MissedReqAckTd, this);
+        std::string key("MissedReqAckTd");
+        threadPool_[key] = td;
+        LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
 
     }
 
     void Replica::ReceiveTd(int id) {
         workerCounter_.fetch_add(1);
-        std::string key("ReceiveTd-" + std::to_string(id));
-        ev_run(evLoops_[key], 0);
+        endPoints_[reqReceiverEPIndex_ + id]->LoopRun();
         workerCounter_.fetch_sub(1);
     }
+
     void Replica::ProcessTd(int id) {
         workerCounter_.fetch_add(1);
         uint64_t reqKey = 0;
