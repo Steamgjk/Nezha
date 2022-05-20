@@ -65,8 +65,10 @@ bool UDPSocketEndpoint::RegisterMsgHandler(MsgHandlerStruct* msgHdl) {
         return false;
     }
 
-    ev_io_start(evLoop_, msgHdl->evWatcher_);
+    msgHdl->attachedEP_ = this;
     msgHandlers_.insert(msgHdl);
+    ev_io_start(evLoop_, msgHdl->evWatcher_);
+
     return true;
 }
 
@@ -92,6 +94,8 @@ bool UDPSocketEndpoint::RegisterTimer(TimerStruct* timer) {
         LOG(ERROR) << "This timer has already been registered";
         return false;
     }
+
+    timer->attachedEP_ = this;
     eventTimers_.insert(timer);
     ev_timer_again(evLoop_, timer->evTimer_);
     return true;

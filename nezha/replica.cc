@@ -27,9 +27,7 @@ namespace nezha {
             << "\treplicaNum=" << replicaNum_
             << "\tkeyNum=" << keyNum;
 
-        CreateMasterContext();
-        CreateReceiverContext();
-        CreateSenderContext();
+        CreateContext();
         // Launch Threads (based on Config)
         LaunchThreads();
 
@@ -45,79 +43,97 @@ namespace nezha {
 
     void Replica::CreateContext() {
         // Create master endpoints and context
-        masterEPIndex_ = 0;
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         int port = replicaConfig_["master-port"].as<int>();
-        UDPSocketEndpoint* masterEP = new UDPSocketEndpoint(ip, port, true);
-        endPoints_.push_back(masterEP);
+        masterContext_.endPoint_ = new UDPSocketEndpoint(ip, port, true);
+        masterContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->ReceiverOtherMessage(msgBuffer, bufferLen, sender, receiverEP);
+            }, this);
+        // Register a timer to monitor replica status
+        masterContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            // ???
+            }, this, 10);
+        masterContext_.Register();
+
 
         // Create request-receiver endpoints and context
-        reqReceiverEPIndex_ = endPoints_.size();
+        requestContext_.resize(replicaConfig_["receiver-shards"].as<int>());
         for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
             int port = replicaConfig_["receiver-port"].as<int>() + i;
-            UDPSocketEndpoint* receiverEP = new UDPSocketEndpoint(ip, port);
+            requestContext_[i].endPoint_ = new UDPSocketEndpoint(ip, port);
             // Register a request handler to this endpoint
-            std::pair<Replica*, int>* context = new std::pair<Replica*, int>(this, i);
-            receiverEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
-                std::pair<Replica*, int>* ctx = (std::pair<Replica*, int>*)context;
-                ctx->first->ReceiveClientRequest(ctx->second, buffer, bufferLen);
-                }, (void*)context);
+            requestContext_[i].msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
+                ((Replica*)ctx)->ReceiveClientRequest(msgBuffer, bufferLen, sender, receiverEP);
+                }, this);
 
             // Register a timer to monitor replica status
-            TimerStruct* timer = new TimerStruct([](void* context) {
-                Replica* thisPtr = (Replica*)context;
-                if (thisPtr->status_ != NORMAL) {
-                    // break the 
+            requestContext_[i].monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+                if (((Replica*)ctx)->status_ != NORMAL) {
+                    receiverEP->LoopBreak();
                 }
-                }, (void*)this, 10);
-            receiverEP->RegisterTimer(timer);
-
-            endPoints_.push_back(receiverEP);
-            receiverEPContexts_.push_back(context);
+                }, this, 10);
+            requestContext_[i].Register();
         }
 
-        // Create index-sync endpoints and context
-        indexSyncEPIndex_ = endPoints_.size();
-        int idxSyncPort = replicaConfig_["index-sync-port"].as<int>();
-        UDPSocketEndpoint* indexSyncEP = new UDPSocketEndpoint(ip, idxSyncPort);
-        // Register a msg handler to this endpoint
-        indexSyncEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
-            Replica* thisPtr = (Replica*)context;
-            thisPtr->ReceiveIndexSyncMessage(buffer, bufferLen);
-            }, (void*)this);
-        endPoints_.push_back(indexSyncEP);
-
-        askIndexSyncEPIndex_ = endPoints_.size();
-        UDPSocketEndpoint* askIndexSyncEP = new UDPSocketEndpoint();
-        endPoints_.push_back(askIndexSyncEP);
-
-        askMissedReqEPIndex_ = endPoints_.size();
-        UDPSocketEndpoint* askMissedReqEP = new UDPSocketEndpoint();
-        endPoints_.push_back(askMissedReqEP);
-
-        indexSenderEPIndex_ = endPoints_.size();
+        // (Leader) Use these endpoints to broadcast indices
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
-            UDPSocketEndpoint* indexSenderEP = new UDPSocketEndpoint();
-            endPoints_.push_back(indexSenderEP);
+            indexSender_.push_back(new UDPSocketEndpoint());
         }
 
-        ackMissedReqEPIndex_ = endPoints_.size();
-        port = replicaConfig_["ack-missed-req-port"].as<int>();
-        UDPSocketEndpoint* ackMissedReqEP = new UDPSocketEndpoint(ip, port);
-        ackMissedReqEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
-            Replica* thisPtr = (Replica*)context;
-            thisPtr->ReceiveAskMissedReq(buffer, bufferLen);
-            }, (void*)this);
-        endPoints_.push_back(ackMissedReqEP);
+        // (Followers:) Create index-sync endpoint to receive indices
+        port = replicaConfig_["index-sync-port"].as<int>();
+        indexSyncContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
+        // Register a msg handler to this endpoint
+        indexSyncContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->ReceiveIndexSyncMessage(msgBuffer, bufferLen);
+            }, this);
+        // Register a timer to monitor replica status
+        indexSyncContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            if (((Replica*)ctx)->status_ != NORMAL) {
+                receiverEP->LoopBreak();
+            }
+            }, this, 10);
+        indexSyncContext_.Register();
 
-        ackMissedIdxEPIndex_ = endPoints_.size();
-        port = replicaConfig_["ack-missed-idx-port"].as<int>();
-        UDPSocketEndpoint* ackMissedIdxEP = new UDPSocketEndpoint(ip, port);
-        ackMissedIdxEP->RegisterReceiveHandler([](char* buffer, int bufferLen, void* context) {
-            Replica* thisPtr = (Replica*)context;
-            thisPtr->ReceiveAskMissedIdx(buffer, bufferLen);
-            }, (void*)this);
-        endPoints_.push_back(ackMissedIdxEP);
+        // Create an endpoint to handle others' requests for missed index
+        port = replicaConfig_["ack-missed-index-port"].as<int>();
+        missedIndexAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
+        // Register message handler
+        missedIndexAckContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->ReceiveAskMissedIdx(msgBuffer, bufferLen);
+            }, this);
+        // Register a timer to monitor replica status
+        missedIndexAckContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            if (((Replica*)ctx)->status_ != NORMAL) {
+                receiverEP->LoopBreak();
+            }
+            }, this, 10);
+        missedIndexAckContext_.Register();
+
+        // Create an endpoint to handle others' requests for missed req
+        port = replicaConfig_["ack-missed-req-port"].as<int>();
+        missedReqAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
+        // Register message handler
+        missedReqAckContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->ReceiveAskMissedReq(msgBuffer, bufferLen);
+            }, this);
+        // Register a timer to monitor replica status
+        missedReqAckContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            if (((Replica*)ctx)->status_ != NORMAL) {
+                receiverEP->LoopBreak();
+            }
+            }, this, 10);
+        missedReqAckContext_.Register();
+
+        // Create Reply endpoints
+        for (int i = 0; i < replicaConfig_["reply-shards"].as<int>();i++) {
+            fastReplySender_.push_back(new UDPSocketEndpoint());
+            slowReplySender_.push_back(new UDPSocketEndpoint());
+        }
+
+        // Create Other useful timers
+
+
     }
 
 
@@ -173,6 +189,13 @@ namespace nezha {
         threadPool_[key] = td;
         LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
 
+    }
+
+    void Replica::ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
+        if (msgLen <= 0) {
+            LOG(WARNING) << "\tmsgLen=" << msgLen;
+            return;
+        }
     }
 
     void Replica::ReceiveTd(int id) {

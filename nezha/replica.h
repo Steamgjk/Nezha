@@ -26,6 +26,25 @@ namespace nezha {
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
 
+    struct MessageHeader {
+        char msgType;
+        uint32_t msgLen;
+        MessageHeader(const char t, const uint32_t l) :msgType(t), msgLen(l) {}
+    };
+
+
+    struct Context
+    {
+        UDPSocketEndpoint* endPoint_;
+        MsgHandlerStruct* msgHandler_;
+        TimerStruct* monitorTimer_;
+        Context(UDPSocketEndpoint* ep = NULL, MsgHandlerStruct* m = NULL, TimerStruct* t = NULL) :endPoint_(ep), msgHandler_(m), monitorTimer_(t) {}
+        void Register() {
+            endPoint_->RegisterMsgHandler(msgHandler_);
+            endPoint_->RegisterTimer(monitorTimer_);
+        }
+    };
+
     class Replica
     {
     private:
@@ -59,17 +78,18 @@ namespace nezha {
         std::map<std::string, std::thread*> threadPool_;
 
         // Context
-        std::vector<UDPSocketEndpoint*> endPoints_;
-        std::vector<std::pair<Replica*, int>> receiverEPContexts_;
-        std::vector<void*> endPointContexts_; // Free them in deconstructor to avoid memory leak
-        int masterEPIndex_;
-        int reqReceiverEPIndex_;
-        int indexSyncEPIndex_;
-        int askIndexSyncEPIndex_;
-        int askMissedReqEPIndex_;
-        int indexSenderEPIndex_;
-        int ackMissedReqEPIndex_;
-        int ackMissedIdxEPIndex_;
+        Context masterContext_;
+        std::vector<Context> requestContext_;
+        Context indexSyncContext_;
+        Context missedIndexAckContext_;
+        Context missedReqAckContext_;
+        std::vector<UDPSocketEndpoint*> indexSender_;
+        std::vector<UDPSocketEndpoint*> fastReplySender_;
+        std::vector<UDPSocketEndpoint*> slowReplySender_;
+
+
+
+
 
         std::vector<in_addr_t> proxyIPs_;
 
@@ -98,10 +118,11 @@ namespace nezha {
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.json"));
         ~Replica();
 
-        void ReceiveClientRequest(int id = -1, char* msgBuffer, int msgLen);
+        void ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
         void ReceiveIndexSyncMessage(char* msgBuffer, int msgLen);
         void ReceiveAskMissedReq(char* msgBuffer, int msgLen);
         void ReceiveAskMissedIdx(char* msgBuffer, int msgLen);
+        void ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
 
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);

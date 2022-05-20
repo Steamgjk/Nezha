@@ -25,6 +25,7 @@ private:
     std::set<struct MsgHandlerStruct*> msgHandlers_;
     std::set<struct TimerStruct*> eventTimers_;
 public:
+    int epId_; // for debug
     UDPSocketEndpoint();
     UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
     UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
@@ -50,13 +51,13 @@ public:
 
 struct MsgHandlerStruct {
     std::function<void(char*, int, Address, void*)> msgHandler_;
-    UDPSocketEndpoint* thisPtr_;
     void* context_;
+    UDPSocketEndpoint* attachedEP_;
     char* buffer_;
     Address sender_;
     struct ev_io* evWatcher_;
 
-    MsgHandlerStruct(std::function<void(char*, int, Address*, void*)> msghdl, UDPSocketEndpoint* t = NULL, void* ctx = NULL) :msgHandler_(msghdl), thisPtr_(t), context_(ctx) {
+    MsgHandlerStruct(std::function<void(char*, int, Address*, void*, UDPSocketEndpoint*)> msghdl, void* ctx = NULL, UDPSocketEndpoint* aep = NULL) :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
         buffer = new char[BUFFER_SIZE];
         evWatcher_ = new ev_io();
         evWatcher_->data = (void*)this;
@@ -64,23 +65,32 @@ struct MsgHandlerStruct {
             MsgHandlerStruct* m = (MsgHandlerStruct*)(w->data);
             socklen_t sockLen;
             int msgLen = recvfrom(w->fd, m->buffer_, BUFFER_SIZE, 0, &(m->sender_.addr_), &sockLen);
-            m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_);
+            m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_, m->attachedEP_);
             }, fd_, EV_READ);
+    }
+    ~MsgHandlerStruct() {
+        delete evWatcher_;
+        delete[]buffer_;
     }
 };
 
 struct TimerStruct {
-    std::function<void(void*)> timerFunc_;
+    std::function<void(void*, int)> timerFunc_;
     void* context_;
+    UDPSocketEndpoint* attachedEP_;
     struct ev_timer* evTimer_;
-    TimerStruct(std::function<void(void*)> timerf, void* ctx = NULL, uint32_t periodMs = 1) :timerFunc_(timerf), context_(ctx) {
+
+    TimerStruct(std::function<void(void*, UDPSocketEndpoint*)> timerf, void* ctx = NULL, uint32_t periodMs = 1, UDPSocketEndpoint* aep = NULL) :timerFunc_(timerf), context_(ctx), attachedEP_(aep) {
         evTimer_ = new ev_timer();
         evTimer_->data = (void*)this;
         evTimer->repeat = periodMs * 1e-3;
         ev_init(evTimer_, [](struct ev_loop* loop, struct ev_timer* w, int revents) {
             TimerStruct* t = (TimerStruct*)(w->data);
-            t->timerFunc_(t->context_);
+            t->timerFunc_(t->context_, t->attachedEP_);
             });
+    }
+    ~TimerStruct() {
+        delete evTimer_;
     }
 };
 
