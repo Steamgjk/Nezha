@@ -26,12 +26,18 @@ namespace nezha {
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
 
-    struct MessageHeader {
-        char msgType;
-        uint32_t msgLen;
-        MessageHeader(const char t, const uint32_t l) :msgType(t), msgLen(l) {}
-    };
 
+    struct CrashVectorStruct {
+        std::vector<uint32_t> cv_;
+        uint32_t version_;
+        SHA_HASH cvHash_;
+        CrashVectorStruct(const std::vector<uint32_t>& c, const uint32_t v) :cv_(c), version_(v) {
+            const uint32_t contentLen = c.size() * sizeof(uint32_t);
+            const unsigned char* content = (const unsigned char*)(void*)(c.data());
+            cvHash_ = CalculateHash(content, contentLen);
+        }
+        CrashVectorStruct(const CrashVectorStruct& c) :cv_(c.cv_), version_(c.version_), cvHash_(c.cvHash_) {}
+    };
 
     struct Context
     {
@@ -65,8 +71,7 @@ namespace nezha {
         ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index)
         ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index)
 
-        // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and 
-        // provide convenience for garbage-collection
+        // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and provide convenience for garbage-collection
         std::atomic<uint32_t> maxSyncedLogId_;
         std::atomic<uint32_t> minUnSyncedLogId_;
         std::atomic<uint32_t> maxUnSyncedLogId_;
@@ -74,7 +79,7 @@ namespace nezha {
         std::vector<uint32_t> syncedLogIdByKey_;
         std::vector<uint32_t> unsyncedLogIdByKey_;
 
-        // use <threadName> as the key (for search), <threadPtr, threadId> as the value
+        // Use <threadName> as the key (for search), <threadPtr, threadId> as the value
         std::map<std::string, std::thread*> threadPool_;
 
         // Context
@@ -86,12 +91,11 @@ namespace nezha {
         std::vector<UDPSocketEndpoint*> indexSender_;
         std::vector<UDPSocketEndpoint*> fastReplySender_;
         std::vector<UDPSocketEndpoint*> slowReplySender_;
+        ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector
+        std::atomic<uint32_t>* cvVersionInUse_;
 
 
-
-
-
-        std::vector<in_addr_t> proxyIPs_;
+        ConcurrentMap<uint64_t, Address*> proxyAddressMap_; // Inserted by receiver threads, and looked up by fast/slow reply threads
 
         std::atomic<uint64_t> lastHeartBeatTime_; // for master to check whether it should issue view change
         std::atomic<uint32_t> workerCounter_; // for master to check whether everybody has stopped
@@ -101,13 +105,9 @@ namespace nezha {
         ConcurrentMap<uint64_t, Reply*> fastReplyMap_;
         ConcurrentMap<uint64_t, Reply*> slowReplyMap_;
         ConcurrentQueue<Request*> processQu_;
-        ConcurrentQueue<LogEntry*> fastReplyQus_[4];
-        ConcurrentQueue<LogEntry*> slowReplyQus_[4];
+        std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
+        std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
 
-        void CreateContext();
-        void CreateMasterContext();
-        void CreateReceiverContext();
-        void CreateSenderContext();
         void CreateContext();
         void LaunchThreads();
         void StartViewChange();
@@ -115,7 +115,7 @@ namespace nezha {
         bool AmLeader();
         bool CheckViewAndCV();
     public:
-        Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.json"));
+        Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.yaml"));
         ~Replica();
 
         void ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
@@ -126,9 +126,10 @@ namespace nezha {
 
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);
-        void FastReplyTd(int id = -1);
-        void SlowReplyTd(int id = -1);
-        void IndexSyncTd(int id = -1);
+        void FastReplyTd(int id = -1, int cvId = -1);
+        void SlowReplyTd(int id = -1, int cvId = -1);
+        void IndexSendTd(int id = -1);
+        void IndexRecvTd();
         void MissedIndexAckTd();
         void MissedReqAckTd();
 

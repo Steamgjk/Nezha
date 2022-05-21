@@ -23,6 +23,12 @@ enum REPLY_TYPE {
     COMMIT_REPLY = 3
 };
 
+enum REQUEST_TYPE {
+    CLIENT_REQUEST = 1,
+    SYNC_INDEX,
+    MISSED_INDEX_ASK,
+    MISSED_REQ_ASK
+};
 
 enum SENDER_TYPE {
     INDEX_SYNC = 0,
@@ -48,6 +54,12 @@ union SHA_HASH {
         item[3] ^= h.item[3];
         item[4] ^= h.item[4];
     }
+};
+
+struct MessageHeader {
+    char msgType;
+    uint32_t msgLen;
+    MessageHeader(const char t, const uint32_t l) :msgType(t), msgLen(l) {}
 };
 
 struct LogEntry {
@@ -80,6 +92,13 @@ inline SHA_HASH CalculateHash(uint64_t deadline, uint32_t clientId, uint64_t req
     memcpy(content, &deadline, sizeof(uint64_t));
     memcpy(content + sizeof(uint64_t), &clientId, sizeof(uint32_t));
     memcpy(content + sizeof(uint64_t) + sizeof(uint32_t), &reqId, sizeof(uint32_t));
+    SHA1(content, contentLen, hash.hash);
+    return hash;
+}
+
+
+inline SHA_HASH CalculateHash(const unsigned char* content, const uint32_t contentLen) {
+    SHA_HASH hash;
     SHA1(content, contentLen, hash.hash);
     return hash;
 }

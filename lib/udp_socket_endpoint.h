@@ -50,7 +50,7 @@ public:
 };
 
 struct MsgHandlerStruct {
-    std::function<void(char*, int, Address, void*)> msgHandler_;
+    std::function<void(char*, int, Address*, void*, UDPSocketEndpoint*)> msgHandler_;
     void* context_;
     UDPSocketEndpoint* attachedEP_;
     char* buffer_;
@@ -58,15 +58,20 @@ struct MsgHandlerStruct {
     struct ev_io* evWatcher_;
 
     MsgHandlerStruct(std::function<void(char*, int, Address*, void*, UDPSocketEndpoint*)> msghdl, void* ctx = NULL, UDPSocketEndpoint* aep = NULL) :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
-        buffer = new char[BUFFER_SIZE];
+        buffer_ = new char[BUFFER_SIZE];
         evWatcher_ = new ev_io();
         evWatcher_->data = (void*)this;
-        ev_io_init(evWatcher_, [](struct ev_loop* loop, struct ev_io* w, int revents) {
+
+        ev_init(evWatcher_, [](struct ev_loop* loop, struct ev_io* w, int revents) {
             MsgHandlerStruct* m = (MsgHandlerStruct*)(w->data);
+            if (m->attachedEP_ == NULL) {
+                LOG(ERROR) << "This message handler is not attached to any endpoints";
+                return;
+            }
             socklen_t sockLen;
-            int msgLen = recvfrom(w->fd, m->buffer_, BUFFER_SIZE, 0, &(m->sender_.addr_), &sockLen);
+            int msgLen = recvfrom(w->fd, m->buffer_, BUFFER_SIZE, 0, (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
             m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_, m->attachedEP_);
-            }, fd_, EV_READ);
+            });
     }
     ~MsgHandlerStruct() {
         delete evWatcher_;
@@ -75,7 +80,7 @@ struct MsgHandlerStruct {
 };
 
 struct TimerStruct {
-    std::function<void(void*, int)> timerFunc_;
+    std::function<void(void*, UDPSocketEndpoint*)> timerFunc_;
     void* context_;
     UDPSocketEndpoint* attachedEP_;
     struct ev_timer* evTimer_;
@@ -83,7 +88,7 @@ struct TimerStruct {
     TimerStruct(std::function<void(void*, UDPSocketEndpoint*)> timerf, void* ctx = NULL, uint32_t periodMs = 1, UDPSocketEndpoint* aep = NULL) :timerFunc_(timerf), context_(ctx), attachedEP_(aep) {
         evTimer_ = new ev_timer();
         evTimer_->data = (void*)this;
-        evTimer->repeat = periodMs * 1e-3;
+        evTimer_->repeat = periodMs * 1e-3;
         ev_init(evTimer_, [](struct ev_loop* loop, struct ev_timer* w, int revents) {
             TimerStruct* t = (TimerStruct*)(w->data);
             t->timerFunc_(t->context_, t->attachedEP_);

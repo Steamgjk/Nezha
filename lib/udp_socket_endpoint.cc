@@ -43,7 +43,7 @@ UDPSocketEndpoint::~UDPSocketEndpoint() {
 
 int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr, const char* buffer, const uint32_t bufferLen) {
 
-    int ret = sendto(fd_, buffer, bufferLen, 0, &(dstAddr.addr_), sizeof(sockaddr_in));
+    int ret = sendto(fd_, buffer, bufferLen, 0, (struct sockaddr*)(&(dstAddr.addr_)), sizeof(sockaddr_in));
     if (ret < 0) {
         LOG(ERROR) << "Send Fail ret =" << ret;
     }
@@ -67,6 +67,7 @@ bool UDPSocketEndpoint::RegisterMsgHandler(MsgHandlerStruct* msgHdl) {
 
     msgHdl->attachedEP_ = this;
     msgHandlers_.insert(msgHdl);
+    ev_io_set(msgHdl->evWatcher_, this->fd_, EV_READ);
     ev_io_start(evLoop_, msgHdl->evWatcher_);
 
     return true;
@@ -75,7 +76,7 @@ bool UDPSocketEndpoint::RegisterMsgHandler(MsgHandlerStruct* msgHdl) {
 
 bool UDPSocketEndpoint::UnregisterMsgHandler(MsgHandlerStruct* msgHdl) {
     if (msgHandlers_.find(msgHdl) == msgHandlers_.end()) {
-        LOG(ERROR) << "The handler does not exist " << key;
+        LOG(ERROR) << "The handler does not exist ";
         return false;
     }
     ev_io_stop(evLoop_, msgHdl->evWatcher_);
@@ -118,7 +119,7 @@ void UDPSocketEndpoint::LoopRun() {
 
 void UDPSocketEndpoint::LoopBreak() {
     for (MsgHandlerStruct* msgHdl : msgHandlers_) {
-        ev_io_stop(evLoop_, msgHdl->evWatcher_)
+        ev_io_stop(evLoop_, msgHdl->evWatcher_);
     }
 
     for (TimerStruct* timer : eventTimers_) {

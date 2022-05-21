@@ -118,6 +118,8 @@ include sources/Rules.mk
 include lib/Rules.mk
 include nezha/Rules.mk
 
+$(info SRCS is $(SRCS))
+
 ##################################################################
 # General rules
 #
