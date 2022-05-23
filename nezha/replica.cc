@@ -31,8 +31,11 @@ namespace nezha {
 
 
         CreateContext();
-        // // Launch Threads (based on Config)
+        // Launch Threads (based on Config)
         LaunchThreads();
+
+        // Master thread run
+        masterContext_.endPoint_->LoopRun();
 
     }
 
@@ -48,14 +51,15 @@ namespace nezha {
         // Create master endpoints and context
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         int port = replicaConfig_["master-port"].as<int>();
+        int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
         masterContext_.endPoint_ = new UDPSocketEndpoint(ip, port, true);
         masterContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->ReceiverOtherMessage(msgBuffer, bufferLen, sender, receiverEP);
             }, this);
         // Register a timer to monitor replica status
         masterContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            // ???
-            }, this, 10);
+            ((Replica*)ctx)->CheckHeartBeat();
+            }, this, monitorPeriodMs);
         masterContext_.Register();
 
         // Create request-receiver endpoints and context
@@ -72,7 +76,7 @@ namespace nezha {
                 if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                     receiverEP->LoopBreak();
                 }
-                }, this, 10);
+                }, this, monitorPeriodMs);
             requestContext_[i].Register();
         }
 
@@ -94,6 +98,8 @@ namespace nezha {
             indexAskReceiver_.push_back(new Address(ip, indexAskPort));
             int requestAskPort = replicaConfig_["request-ask-port"].as<int>();
             requestAskReceiver_.push_back(new Address(ip, requestAskPort));
+            int masterPort = replicaConfig_["master-port"].as<int>();
+            masterReceiver_.push_back(new Address(ip, masterPort));
         }
 
         // (Followers:) Create index-sync endpoint to receive indices
@@ -108,7 +114,7 @@ namespace nezha {
             if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                 receiverEP->LoopBreak();
             }
-            }, this, 10);
+            }, this, monitorPeriodMs);
         indexSyncContext_.Register();
 
         // Create an endpoint to handle others' requests for missed index
@@ -123,7 +129,7 @@ namespace nezha {
             if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                 receiverEP->LoopBreak();
             }
-            }, this, 10);
+            }, this, monitorPeriodMs);
         missedIndexAckContext_.Register();
 
         // Create an endpoint to handle others' requests for missed req
@@ -138,7 +144,7 @@ namespace nezha {
             if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                 receiverEP->LoopBreak();
             }
-            }, this, 10);
+            }, this, monitorPeriodMs);
         missedReqAckContext_.Register();
 
         // Create reply endpoints
@@ -175,6 +181,10 @@ namespace nezha {
             }, this, replicaConfig_["request-ask-period-ms"].as<int>());
         roundRobinRequestAskIdx_ = 0;
         missedReqKeys_.clear();
+
+        viewChangeTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->InitiateViewChange();
+            }, this, replicaConfig_["view-change-period-ms"].as<int>());
     }
 
 
@@ -403,7 +413,7 @@ namespace nezha {
         reply.set_replicaid(replicaId_);
         bool amLeader = AmLeader();
         CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[cvId].load());
-        char buffer[2048];
+        char buffer[UDP_BUFFER_SIZE];
         MessageHeader* replyHeader = (MessageHeader*)(void*)buffer;
         replyHeader->msgType = MessageType::FAST_REPLY;
         uint64_t opKeyAndId = 0ul;
@@ -430,7 +440,6 @@ namespace nezha {
                         uint32_t syncPoint = maxSyncedLogIdByKey_[entry->opKey];
                         opKeyAndId = entry->opKey;
                         opKeyAndId = ((opKeyAndId << 32u) | syncPoint);
-
                         LogEntry* syncedEntry = NULL;
                         do {
                             // Normally, this do-while will break by just executing once
@@ -463,15 +472,17 @@ namespace nezha {
                                 reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
                             }
                         }
-                        // else (unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
+                        // else (very unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
                     }
                 }
                 reply.set_result(entry->result);
 
-                replyHeader->msgLen = reply.ByteSizeLong();
+                std::string serializedString = reply.SerializeAsString();
+                replyHeader->msgLen = serializedString.length();
 
                 Address* addr = proxyAddressMap_.get(entry->proxyId);
-                if (addr != NULL && reply.SerializeToArray(buffer + sizeof(MessageHeader), replyHeader->msgLen)) {
+                if (addr != NULL && serializedString.length() > 0) {
+                    memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
                     fastReplySender_[id]->SendMsgTo(*addr, buffer, replyHeader->msgLen + sizeof(MessageHeader));
                 }
                 // else (unlikely): this replica does not have the addr of the proxy
@@ -486,7 +497,7 @@ namespace nezha {
             return;
         }
         workerCounter_.fetch_add(1);
-        char buffer[2048];
+        char buffer[UDP_BUFFER_SIZE];
         LogEntry* entry = NULL;
         Reply reply;
         reply.set_view(viewNum_);
@@ -507,8 +518,11 @@ namespace nezha {
                 }
 
                 Address* addr = proxyAddressMap_.get(entry->proxyId);
-                replyHeader->msgLen = reply.ByteSizeLong();
-                if (addr != NULL && reply.SerializeToArray(buffer + sizeof(MessageHeader), replyHeader->msgLen)) {
+
+                std::string serializedString = reply.SerializeAsString();
+                replyHeader->msgLen = serializedString.length();
+                if (addr != NULL && serializedString.length() > 0) {
+                    memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
                     slowReplySender_[id]->SendMsgTo(*addr, buffer, replyHeader->msgLen + sizeof(MessageHeader));
                 }
             }
@@ -526,7 +540,7 @@ namespace nezha {
         uint32_t lastSyncedLogId = 2;
         IndexSync indexSyncMsg;
         CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[cvId]);
-        char buffer[2048];
+        char buffer[UDP_BUFFER_SIZE];
         MessageHeader* msgHdr = (MessageHeader*)buffer;
         msgHdr->msgType = MessageType::SYNC_INDEX;
         while (status_ == ReplicaStatus::NORMAL) {
@@ -554,11 +568,10 @@ namespace nezha {
                 for (uint32_t i = 0; i < 5; i++) {
                     indexSyncMsg.add_cv(cv->cvHash_.item[i]);
                 }
-                indexSyncMsg.set_cvversion(cvVersionInUse_[cvId]);
 
-
-                msgHdr->msgLen = indexSyncMsg.ByteSizeLong();
-                indexSyncMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen);
+                std::string serializedString = indexSyncMsg.SerializeAsString();
+                msgHdr->msgLen = serializedString.length();
+                memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
 
                 // Send
                 for (uint32_t r = 0; r < replicaNum_; r++) {
@@ -757,13 +770,15 @@ namespace nezha {
                     indexSyncMsg.add_deadlines(entry->deadline);
                     indexSyncMsg.add_reqkeys(entry->reqKey);
                 }
-                indexSyncMsg.set_cvversion(0); // no need to piggyback crash vector
-                char buffer[2048];
+                // no need to piggyback crash vector
+                char buffer[UDP_BUFFER_SIZE];
+                std::string serializedString = indexSyncMsg.SerializeAsString();
                 MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
                 msgHdr->msgType = MessageType::SYNC_INDEX;
-                msgHdr->msgLen = indexSyncMsg.ByteSizeLong();
+                msgHdr->msgLen = serializedString.length();
 
-                if (indexSyncMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                if (serializedString.length() > 0) {
+                    memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
                     indexAcker_->SendMsgTo(*(indexReceiver_[askIndex.replicaid()]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
                 }
                 logBegin = logEnd + 1;
@@ -803,11 +818,14 @@ namespace nezha {
             }
             if (missedReqMsg.reqs().size() > 0) {
                 // This ack is useful, so send it
-                char buffer[2048];
+                char buffer[UDP_BUFFER_SIZE];
+                std::string serializedString = missedReqMsg.SerializeAsString();
                 MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
-                msgHdr->msgLen = missedReqMsg.ByteSizeLong();
                 msgHdr->msgType = MessageType::MISSED_REQ;
-                if (missedReqMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                msgHdr->msgLen = serializedString.length();
+
+                if (serializedString.length() > 0) {
+                    memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
                     missedReqAckContext_.endPoint_->SendMsgTo(*(indexReceiver_[askReqMsg.replicaid()]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
                 }
 
@@ -815,11 +833,6 @@ namespace nezha {
         }
     }
 
-
-
-    void Replica::ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
-
-    }
 
     void Replica::AskMissedIndex() {
         if (missedIndices_.first > missedIndices_.second) {
@@ -830,11 +843,13 @@ namespace nezha {
         askIndexMsg.set_replicaid(this->replicaId_);
         askIndexMsg.set_logidbegin(missedIndices_.first);
         askIndexMsg.set_logidend(missedIndices_.second);
-        char buffer[2048];
+        std::string serializedString = askIndexMsg.SerializeAsString();
+        char buffer[UDP_BUFFER_SIZE];
         MessageHeader* msgHdr = (MessageHeader*)(void*)msgHdr;
         msgHdr->msgType = MessageType::MISSED_INDEX_ASK;
-        msgHdr->msgLen = askIndexMsg.ByteSizeLong();
-        if (askIndexMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+        msgHdr->msgLen = serializedString.length();
+        if (serializedString.length() > 0) {
+            memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
             // Do not ask leader every time, choose random replica to ask to avoid leader bottleneck
             reqRequester_->SendMsgTo(*(requestAskReceiver_[roundRobinIndexAskIdx_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
             roundRobinIndexAskIdx_++;
@@ -857,12 +872,14 @@ namespace nezha {
         for (const uint64_t& reqKey : missedReqKeys_) {
             askReqMsg.add_missedreqkeys(reqKey);
         }
-        char buffer[2048];
+        std::string serializedString = askReqMsg.SerializeAsString();
+        char buffer[UDP_BUFFER_SIZE];
         MessageHeader* msgHdr = (MessageHeader*)(void*)msgHdr;
         msgHdr->msgType = MessageType::MISSED_REQ_ASK;
-        msgHdr->msgLen = askReqMsg.ByteSizeLong();
-        if (askReqMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+        msgHdr->msgLen = serializedString.length();
+        if (serializedString.length() > 0) {
             // Do not ask leader every time, choose random replica to ask to avoid leader bottleneck
+            memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
             reqRequester_->SendMsgTo(*(requestAskReceiver_[roundRobinRequestAskIdx_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
             roundRobinRequestAskIdx_++;
             if (roundRobinRequestAskIdx_ % replicaNum_ == replicaId_) {
@@ -872,43 +889,78 @@ namespace nezha {
 
     }
 
-    // void Replica::Master() {
-    //     uint64_t nowTime = GetMicrosecondTimestamp();
-    //     // I have not heard from the leader for a long time, start a view change
-    //     bool leaderMayDie = ((!AmLeader()) && nowTime > lastHeartBeatTime_ + replicaConfig_["heartbeat-threshold-ms"].as<uint64_t>());
-    //     if (leaderMayDie || status_ == VIEWCHANGE) {
-    //         status_ = VIEWCHANGE;
-    //         while (workerCounter_ > 0) {
-    //             // Wait until all workers have exit
-    //             usleep(10);
-    //         }
-    //         // Increment viewNum
-    //         viewNum_++;
-    //         // Stop masterTimer
-    //         ev_timer_stop(evLoops_["master"], evTimers_["master"]);
+    void Replica::CheckHeartBeat() {
+        if (AmLeader()) {
+            return;
+        }
+        if (status_ != ReplicaStatus::NORMAL) {
+            StartViewChange();
+            return;
+        }
+        uint64_t nowTime = GetMicrosecondTimestamp();
+        uint32_t threashold = replicaConfig_["heartbeat-threshold-ms"].as<uint32_t>() * 1000;
+        if (lastHeartBeatTime_ + threashold < nowTime) {
+            // I haven't heard from the leader for too long, it probably has died
+            // Before start view change, clear context
+            StartViewChange();
+        }
+    }
 
-    //         // Start ViewChange
-    //         StartViewChange();
-    //     }
-    // }
-    // void Replica::MasterReceive(int fd) {
-    //     struct sockaddr_in addr;
-    //     socklen_t addrlen;
-    //     char* buffer = buffers_["master"];
-    //     int sz = recvfrom(fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&addr, &addrlen);
-    //     if (sz > 0) {
-    //         // Parse and process message
-    //         Request* request = new Request();
-    //         if (request->ParseFromArray(buffer, sz)) {
-    //             requestMap_.assign(request->sendtime(), request);
-    //         }
-    //     }
-    // }
-    void Replica::StartViewChange() {
+    void Replica::ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
 
     }
 
+    void Replica::StartViewChange() {
+        status_ = ReplicaStatus::VIEWCHANGE;
+        if (masterContext_.endPoint_->isRegistered(viewChangeTimer_)) {
+            // Already launched viewchange timer
+            return;
+        }
+
+        // ViewChange has not been initiated, so let's do that
+        while (workerCounter_ > 0) {
+            // Wait until all workers have exit
+            usleep(1000);
+        }
+        // Every other threads have stopped, no worry about data race any more
+        viewNum_++;
+        // Initiate the ViewChange
+        masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
+
+    }
+
+    void Replica::InitiateViewChange() {
+        // Broadcast VIEW-CHANGE-REQ to all replicas
+        ViewChangeRequest viewChangeReq;
+        viewChangeReq.set_view(viewNum_);
+        viewChangeReq.set_replicaid(replicaId_);
+        CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[0]);
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            viewChangeReq.add_cv(cv->cv_[i]);
+        }
+
+
+        std::string serializedString = viewChangeReq.SerializeAsString();
+        char buffer[UDP_BUFFER_SIZE];
+        MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
+        msgHdr->msgType = MessageType::VIEWCHANGE_REQ;
+        msgHdr->msgLen = serializedString.length();
+        memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
+
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            if (i != replicaId_) {
+                // no need to send to myself
+                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+            }
+            // 
+        }
+        // Send VIEW-CHANGE to the new leader
+    }
+
     bool Replica::CheckViewAndCV() {
+        // TODO: When it is false, just update status to viewchange, and then leave it to master thread
+        // Freshen heartbeat time
+        lastHeartBeatTime_ = GetMicrosecondTimestamp();
         return true;
     }
     std::string Replica::ApplicationExecute(Request* req) {

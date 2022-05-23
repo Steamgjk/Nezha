@@ -14,8 +14,10 @@ request-ask-port: 36333 # When one follower is missing requests, they ask from t
 index-ask-port: 37333 # When one follower is missing some index sync msgs, it asks the leader (or other followers) for the missing ones, and the leader (or other followers) send to the index-sync-port of the problematic follower
 master-port: 34333 # This port is mainly used to send/receive other messages
 max-proxy-num: 8 # The replica uses static array to store proxy addresses, so as to accelerate lookup (when sending replies). Therefore, a max bound is necessary
+monitor-period-ms: 10 # Each blocking thread has a monitor timer, which periodically checks the replica status and unblock the thread (and exit) when replica status is not Normal
 main-loop-period-ms: 20
 heartbeat-threshold-ms: 500
 index-ask-period-ms: 5 # When missing indices, we launch a timer to periodically ask indices
 request-ask-period-ms: 5 # When missing logs, we launch a timer to periodically ask logs(requests)
+view-change-period-ms: 5
 key-num: 1000000 # when commutativity is enabled for test, we need the specified key number to detect commutativity

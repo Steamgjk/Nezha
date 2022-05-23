@@ -86,6 +86,8 @@ namespace nezha {
         Context missedReqAckContext_;
         TimerStruct* indexAskTimer_;
         TimerStruct* requestAskTimer_;
+        TimerStruct* viewChangeTimer_;
+        TimerStruct* stateTransferTimer_;
         std::vector<UDPSocketEndpoint*> indexSender_;
         std::vector<UDPSocketEndpoint*> fastReplySender_;
         std::vector<UDPSocketEndpoint*> slowReplySender_;
@@ -96,6 +98,7 @@ namespace nezha {
         std::vector<Address*> indexReceiver_;
         std::vector<Address*> indexAskReceiver_;
         std::vector<Address*> requestAskReceiver_;
+        std::vector<Address*> masterReceiver_;
         uint32_t roundRobinIndexAskIdx_;
         uint32_t roundRobinRequestAskIdx_;
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector
@@ -122,6 +125,7 @@ namespace nezha {
         void CreateContext();
         void LaunchThreads();
         void StartViewChange();
+        void InitiateViewChange();
         std::string ApplicationExecute(Request* req);
         bool AmLeader();
         bool CheckMsgLength(const char* msgBuffer, const int msgLen);
@@ -137,6 +141,7 @@ namespace nezha {
         void ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
         void AskMissedIndex();
         void AskMissedRequest();
+        void CheckHeartBeat();
 
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);

@@ -29,7 +29,6 @@ message IndexSync {
     uint32 view = 5;
     // crash-vector
     repeated uint32 cv = 6;
-    uint32 cvversion = 7;
 }
 
 message AskIndex {
@@ -46,4 +45,10 @@ message AskReq {
 message MissedReq {
     repeated Request reqs = 1;
     uint32 replicaid = 2;
+}
+
+message ViewChangeRequest {
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    repeated uint32 cv = 3;
 }

@@ -19,6 +19,8 @@ namespace MessageType {
     char SLOW_REPLY = 7;
     char COMMIT_REPLY = 8;
     char MISSED_REQ = 9;
+    char VIEWCHANGE_REQ = 10;
+    char VIEWCHANGE = 11;
 };
 
 

@@ -11,7 +11,7 @@
 #include "lib/address.h"
 
 
-#define BUFFER_SIZE (65535)
+
 
 // TODO: In the future, we will extract a base class, and from that class, we derive two sub-classes: one for UDP and the other for TCP
 
@@ -60,7 +60,7 @@ struct MsgHandlerStruct {
     struct ev_io* evWatcher_;
 
     MsgHandlerStruct(std::function<void(char*, int, Address*, void*, UDPSocketEndpoint*)> msghdl, void* ctx = NULL, UDPSocketEndpoint* aep = NULL) :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
-        buffer_ = new char[BUFFER_SIZE];
+        buffer_ = new char[UDP_BUFFER_SIZE];
         evWatcher_ = new ev_io();
         evWatcher_->data = (void*)this;
 
@@ -71,7 +71,7 @@ struct MsgHandlerStruct {
                 return;
             }
             socklen_t sockLen;
-            int msgLen = recvfrom(w->fd, m->buffer_, BUFFER_SIZE, 0, (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
+            int msgLen = recvfrom(w->fd, m->buffer_, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
             m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_, m->attachedEP_);
             });
     }

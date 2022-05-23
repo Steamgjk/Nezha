@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 
+#define UDP_BUFFER_SIZE (512)
 
 class Address
 {

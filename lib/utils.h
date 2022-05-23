@@ -31,6 +31,8 @@ namespace MessageType {
     extern char SLOW_REPLY;
     extern char COMMIT_REPLY;
     extern char MISSED_REQ;
+    extern char VIEWCHANGE_REQ;
+    extern char VIEWCHANGE;
 };
 
 
