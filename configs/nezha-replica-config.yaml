@@ -10,10 +10,12 @@ reply-shards: 1 # The number of threads to send replies (both fast/slow replies)
 index-sync-shards: 1 # The number of threads used by the leader to broadcast index synchronization messages to followers. For followers, they only need one such thread to receive and handle the index sync msgs
 receiver-port: 33333 # The port is exposed to client/proxy and is used to receive client/proxy requests. When receiver-shards>1, the corresponding ports are receiver-ports + shard-index
 index-sync-port: 35333 # The port is used for replicas to communicate index synchronization messages. Typicall, the leader sends index sync msgs and the followers receive them
-ack-missed-req-port: 36333 # When one follower is missing requests, they ask from the leader or other followers via this port. The leader/followers send the missed requests to this port of this follower
-ack-missed-idx-port: 37333 # When one follower is missing some index sync msgs, it asks the leader (or other followers) for the missing ones via this port, and the leader (or other followers) send to the index-sync-port of the problematic follower
+request-ask-port: 36333 # When one follower is missing requests, they ask from the leader or other followers. The leader/followers send the missed requests to this port of this follower
+index-ask-port: 37333 # When one follower is missing some index sync msgs, it asks the leader (or other followers) for the missing ones, and the leader (or other followers) send to the index-sync-port of the problematic follower
 master-port: 34333 # This port is mainly used to send/receive other messages
 max-proxy-num: 8 # The replica uses static array to store proxy addresses, so as to accelerate lookup (when sending replies). Therefore, a max bound is necessary
 main-loop-period-ms: 20
 heartbeat-threshold-ms: 500
+index-ask-period-ms: 5 # When missing indices, we launch a timer to periodically ask indices
+request-ask-period-ms: 5 # When missing logs, we launch a timer to periodically ask logs(requests)
 key-num: 1000000 # when commutativity is enabled for test, we need the specified key number to detect commutativity

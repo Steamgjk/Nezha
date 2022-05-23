@@ -1,9 +1,11 @@
 d := $(dir $(lastword $(MAKEFILE_LIST)))
 
 SRCS += $(addprefix $(d), \
-	address.cc udp_socket_endpoint.cc)
+	address.cc utils.cc udp_socket_endpoint.cc)
 
 LIB-address :=  $(o)address.o
+
+LIB-utils := $(o)utils.o
 
 LIB-udp-socket := $(o)udp_socket_endpoint.o $(LIB-address)
 

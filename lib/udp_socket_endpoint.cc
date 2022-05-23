@@ -60,7 +60,7 @@ bool UDPSocketEndpoint::RegisterMsgHandler(MsgHandlerStruct* msgHdl) {
         LOG(ERROR) << "No evLoop!";
         return false;
     }
-    if (msgHandlers_.find(msgHdl) != msgHandlers_.end()) {
+    if (isRegistered(msgHdl)) {
         LOG(ERROR) << "This msgHdl has already been registered";
         return false;
     }
@@ -75,8 +75,12 @@ bool UDPSocketEndpoint::RegisterMsgHandler(MsgHandlerStruct* msgHdl) {
 
 
 bool UDPSocketEndpoint::UnregisterMsgHandler(MsgHandlerStruct* msgHdl) {
-    if (msgHandlers_.find(msgHdl) == msgHandlers_.end()) {
-        LOG(ERROR) << "The handler does not exist ";
+    if (evLoop_ == NULL) {
+        LOG(ERROR) << "No evLoop!";
+        return false;
+    }
+    if (!isRegistered(msgHdl)) {
+        LOG(ERROR) << "The handler has not been registered ";
         return false;
     }
     ev_io_stop(evLoop_, msgHdl->evWatcher_);
@@ -84,6 +88,9 @@ bool UDPSocketEndpoint::UnregisterMsgHandler(MsgHandlerStruct* msgHdl) {
     return true;
 }
 
+bool UDPSocketEndpoint::isRegistered(MsgHandlerStruct* msgHdl) {
+    return (msgHandlers_.find(msgHdl) != msgHandlers_.end());
+}
 
 bool UDPSocketEndpoint::RegisterTimer(TimerStruct* timer) {
     if (evLoop_ == NULL) {
@@ -91,7 +98,7 @@ bool UDPSocketEndpoint::RegisterTimer(TimerStruct* timer) {
         return false;
     }
 
-    if (eventTimers_.find(timer) != eventTimers_.end()) {
+    if (isRegistered(timer)) {
         LOG(ERROR) << "This timer has already been registered";
         return false;
     }
@@ -103,8 +110,12 @@ bool UDPSocketEndpoint::RegisterTimer(TimerStruct* timer) {
 }
 
 bool UDPSocketEndpoint::UnregisterTimer(TimerStruct* timer) {
-    if (eventTimers_.find(timer) == eventTimers_.end()) {
-        LOG(ERROR) << "The timer does not exist ";
+    if (evLoop_ == NULL) {
+        LOG(ERROR) << "No evLoop!";
+        return false;
+    }
+    if (!isRegistered(timer)) {
+        LOG(ERROR) << "The timer has not been registered ";
         return false;
     }
     ev_timer_stop(evLoop_, timer->evTimer_);
@@ -112,6 +123,10 @@ bool UDPSocketEndpoint::UnregisterTimer(TimerStruct* timer) {
     return true;
 }
 
+
+bool UDPSocketEndpoint::isRegistered(TimerStruct* timer) {
+    return (eventTimers_.find(timer) != eventTimers_.end());
+}
 
 void UDPSocketEndpoint::LoopRun() {
     ev_run(evLoop_, 0);

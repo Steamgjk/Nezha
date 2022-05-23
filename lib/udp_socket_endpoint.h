@@ -37,9 +37,11 @@ public:
 
     bool RegisterMsgHandler(MsgHandlerStruct* msgHdl);
     bool UnregisterMsgHandler(MsgHandlerStruct* msgHdl);
+    bool isRegistered(MsgHandlerStruct* msgHdl);
 
     bool RegisterTimer(TimerStruct* timer);
     bool UnregisterTimer(TimerStruct* timer);
+    bool isRegistered(TimerStruct* timer);
 
 
     void LoopRun();

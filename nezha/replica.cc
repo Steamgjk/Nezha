@@ -15,10 +15,15 @@ namespace nezha {
         maxSyncedLogId_ = 1;
         minUnSyncedLogId_ = 2;
         maxUnSyncedLogId_ = 1;
-        syncedLogIdByKey_.resize(keyNum, 1);
-        unsyncedLogIdByKey_.resize(keyNum, 1);
+        // syncedLogIdByKey_.resize(keyNum, 1);
+        // unsyncedLogIdByKey_.resize(keyNum, 1);
 
-        status_ = NORMAL;
+        maxSyncedLogIdByKey_.resize(keyNum, 1);
+        minUnSyncedLogIdByKey_.resize(keyNum, 2);
+        maxUnSyncedLogIdByKey_.resize(keyNum, 1);
+
+
+        status_ = ReplicaStatus::NORMAL;
         LOG(INFO) << "viewNum_=" << viewNum_
             << "\treplicaId=" << replicaId_
             << "\treplicaNum=" << replicaNum_
@@ -27,7 +32,7 @@ namespace nezha {
 
         CreateContext();
         // // Launch Threads (based on Config)
-        // LaunchThreads();
+        LaunchThreads();
 
     }
 
@@ -64,7 +69,7 @@ namespace nezha {
                 }, this);
             // Register a timer to monitor replica status
             requestContext_[i].monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-                if (((Replica*)ctx)->status_ != NORMAL) {
+                if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                     receiverEP->LoopBreak();
                 }
                 }, this, 10);
@@ -76,6 +81,21 @@ namespace nezha {
             indexSender_.push_back(new UDPSocketEndpoint());
         }
 
+        indexAcker_ = new UDPSocketEndpoint();
+        reqAcker_ = new UDPSocketEndpoint();
+        indexRequster_ = new UDPSocketEndpoint();
+        reqRequester_ = new UDPSocketEndpoint();
+
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            std::string ip = replicaConfig_["replica-ips"].as<std::string>();
+            int indexPort = replicaConfig_["index-sync-port"].as<int>();
+            indexReceiver_.push_back(new Address(ip, indexPort));
+            int indexAskPort = replicaConfig_["index-ask-port"].as<int>();
+            indexAskReceiver_.push_back(new Address(ip, indexAskPort));
+            int requestAskPort = replicaConfig_["request-ask-port"].as<int>();
+            requestAskReceiver_.push_back(new Address(ip, requestAskPort));
+        }
+
         // (Followers:) Create index-sync endpoint to receive indices
         port = replicaConfig_["index-sync-port"].as<int>();
         indexSyncContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
@@ -85,7 +105,7 @@ namespace nezha {
             }, this);
         // Register a timer to monitor replica status
         indexSyncContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            if (((Replica*)ctx)->status_ != NORMAL) {
+            if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                 receiverEP->LoopBreak();
             }
             }, this, 10);
@@ -100,7 +120,7 @@ namespace nezha {
             }, this);
         // Register a timer to monitor replica status
         missedIndexAckContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            if (((Replica*)ctx)->status_ != NORMAL) {
+            if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                 receiverEP->LoopBreak();
             }
             }, this, 10);
@@ -115,7 +135,7 @@ namespace nezha {
             }, this);
         // Register a timer to monitor replica status
         missedReqAckContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            if (((Replica*)ctx)->status_ != NORMAL) {
+            if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
                 receiverEP->LoopBreak();
             }
             }, this, 10);
@@ -130,13 +150,31 @@ namespace nezha {
         // Create reply queues (one queue per fast/slow reply thread)
         fastReplyQu_.resize(replyShardNum);
         slowReplyQu_.resize(replyShardNum);
-        cvVersionInUse_ = new std::atomic<uint32_t>[replyShardNum * 2 + 1];
-        for (int i = 0; i < replyShardNum * 2 + 1; i++) {
-            cvVersionInUse_[i] = 0;
+
+        uint32_t cvVecSize = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>();
+        cvVersionInUse_ = new std::atomic<uint32_t>[cvVecSize];
+        for (uint32_t i = 0; i < cvVecSize; i++) {
+            cvVersionInUse_[i] = 2;
         }
 
-        // Create other useful timers
+        std::vector<uint32_t> cvVec(replicaNum_, 0);
+        CrashVectorStruct* cv = new CrashVectorStruct(cvVec, 2);
+        crashVector_.assign(2, cv);
 
+        // Create other useful timers
+        indexAskTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->AskMissedIndex();
+            }, this, replicaConfig_["index-ask-period-ms"].as<int>());
+        roundRobinIndexAskIdx_ = 0;
+        // Initially, no missed indices, so we make first > second
+        missedIndices_.first = 1;
+        missedIndices_.second = 0;
+
+        requestAskTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->AskMissedRequest();
+            }, this, replicaConfig_["request-ask-period-ms"].as<int>());
+        roundRobinRequestAskIdx_ = 0;
+        missedReqKeys_.clear();
     }
 
 
@@ -174,7 +212,7 @@ namespace nezha {
 
         // IndexSync
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
-            std::thread* td = new std::thread(&Replica::IndexSendTd, this, i);
+            std::thread* td = new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum * 2 + 1);
             std::string key("IndexSendTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
@@ -195,35 +233,31 @@ namespace nezha {
     }
 
     void Replica::ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
-        if (msgLen <= 0) {
-            LOG(WARNING) << "\tmsgLen=" << msgLen;
+        if (!CheckMsgLength(msgBuffer, msgLen)) {
             return;
         }
-        if (msgBuffer[0] == CLIENT_REQUEST) {
-            uint32_t requestLen = 0;
-            memcpy(&requestLen, msgBuffer + 1, sizeof(uint32_t));
-            if (requestLen + 1 + sizeof(uint32_t) == (uint32_t)msgLen) {
-                Request* request = new Request();
-                if (request->ParseFromArray(msgBuffer + 1 + sizeof(uint32_t), requestLen)) {
-                    if (proxyAddressMap_.get(request->proxyid()) == 0) {
-                        Address* addr = new Address(*sender);
-                        // Alert: When one proxy sends the request, it needs to specify a proper *unique* proxyid related to one specific receiver thread on the replica, so that this replica's different receiver threads will not insert the same entry concurrently (otherwise, it may cause memory leakage) 
-                        proxyAddressMap_.assign(request->proxyid(), addr);
-                    }
+        MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
+        if (msgHdr->msgType == MessageType::CLIENT_REQUEST
+            || msgHdr->msgType == MessageType::LEADER_REQUEST) {
+            Request* request = new Request();
+            if (request->ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                // Alert: When this request is sent by leader, do not update proxyAddressMap
+                if (msgHdr->msgType == MessageType::CLIENT_REQUEST && proxyAddressMap_.get(request->proxyid()) == 0) {
+                    Address* addr = new Address(*sender);
+                    // Alert: When one proxy sends the request, it needs to specify a proper *unique* proxyid related to one specific receiver thread on the replica, so that this replica's different receiver threads will not insert the same entry concurrently (otherwise, it may cause memory leakage) 
+                    proxyAddressMap_.assign(request->proxyid(), addr);
+                }
 
-                    processQu_.enqueue(request);
-                }
-                else {
-                    LOG(WARNING) << "Parse request fail";
-                    delete request;
-                }
+                processQu_.enqueue(request);
             }
             else {
-                LOG(WARNING) << "Incomplete message: expected length " << requestLen + 1 + sizeof(uint32_t) << "\tbut got " << msgLen;
+                LOG(WARNING) << "Parse request fail";
+                delete request;
             }
+
         }
         else {
-            LOG(WARNING) << "Invalid message type: expected " << (int)CLIENT_REQUEST << "\tbut got " << (int)(msgBuffer[0]);
+            LOG(WARNING) << "Invalid Message Type " << (uint32_t)(msgHdr->msgType);
         }
 
     }
@@ -241,7 +275,7 @@ namespace nezha {
         uint32_t roundRobin = 0;
         uint32_t replyShard = replicaConfig_["reply-shards"].as<uint32_t>();
         bool amLeader = AmLeader();
-        while (status_ == NORMAL) {
+        while (status_ == ReplicaStatus::NORMAL) {
             if (processQu_.try_dequeue(req)) {
                 reqKey = req->clientid();
                 reqKey = ((reqKey << 32u) | (req->reqid()));
@@ -309,6 +343,7 @@ namespace nezha {
 
             // Polling early-buffer
             uint64_t nowTime = GetMicrosecondTimestamp();
+            uint64_t opKeyAndId = 0ul;
             while ((!earlyBuffer_.empty()) && nowTime >= earlyBuffer_.begin()->first.first) {
                 uint64_t deadline = earlyBuffer_.begin()->first.first;
                 uint64_t reqKey = earlyBuffer_.begin()->first.second;
@@ -316,9 +351,11 @@ namespace nezha {
                 SHA_HASH myHash = CalculateHash(deadline, reqKey);
                 SHA_HASH hash = myHash;
                 if (amLeader) {
-                    if (syncedLogIdByKey_[req->key()] > 1) {
+                    if (maxSyncedLogIdByKey_[req->key()] > 1) {
                         // There are previous (non-commutative) requests appended
-                        LogEntry* prev = syncedEntries_.get(syncedLogIdByKey_[req->key()]);
+                        opKeyAndId = req->key();
+                        opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[req->key()]));
+                        LogEntry* prev = syncedEntriesByKey_.get(opKeyAndId);
                         hash.XOR(prev->hash);
                     }
                     std::string result = ApplicationExecute(req);
@@ -327,13 +364,18 @@ namespace nezha {
                     uint32_t logId = maxSyncedLogId_ + 1;
                     syncedEntries_.assign(logId, entry);
                     syncedReq2LogId_.assign(reqKey, logId);
-                    syncedLogIdByKey_[req->key()] = logId;
+                    maxSyncedLogIdByKey_[req->key()]++;
+                    opKeyAndId = req->key();
+                    opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[req->key()]));
+                    syncedEntriesByKey_.assign(opKeyAndId, entry);
                     maxSyncedLogId_++;
                 }
                 else {
-                    if (unsyncedLogIdByKey_[req->key()] > 1) {
+                    if (maxUnSyncedLogIdByKey_[req->key()] > 1) {
                         // There are previous (non-commutative) requests appended
-                        LogEntry* prev = unsyncedEntries_.get(unsyncedLogIdByKey_[req->key()]);
+                        opKeyAndId = req->key();
+                        opKeyAndId = ((opKeyAndId << 32u) | (maxUnSyncedLogIdByKey_[req->key()]));
+                        LogEntry* prev = unsyncedEntries_.get(opKeyAndId);
                         hash.XOR(prev->hash);
                     }
                     LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), "", req->proxyid());
@@ -341,7 +383,8 @@ namespace nezha {
                     uint32_t logId = maxUnSyncedLogId_ + 1;
                     unsyncedEntries_.assign(logId, entry);
                     unsyncedReq2LogId_.assign(reqKey, logId);
-                    unsyncedLogIdByKey_[req->key()] = logId;
+                    maxUnSyncedLogIdByKey_[req->key()]++;
+                    unsyncedEntriesByKey_.assign(opKeyAndId, entry);
                     maxUnSyncedLogId_++;
                 }
                 earlyBuffer_.erase(earlyBuffer_.begin());
@@ -353,222 +396,481 @@ namespace nezha {
 
     void Replica::FastReplyTd(int id, int cvId) {
         workerCounter_.fetch_add(1);
-        // LogEntry* entry = NULL;
-        // Reply reply;
-        // reply.set_view(viewNum_);
-        // reply.set_replytype(FAST_REPLY);
-        // reply.set_replicaid(replicaId_);
-        // std::map<uint64_t, struct sockaddr_in> addrMap;
-        // bool amLeader = AmLeader();
-        // while (status_ == NORMAL) {
-        //     if (fastReplyQu_[id].try_dequeue(entry)) {
-        //         reply.set_clientid((entry->reqKey) >> 32);
-        //         reply.set_reqid((uint32_t)(entry->reqKey));
-        //         if (amLeader) {
-        //             reply.set_hash(entry->hash.hash, SHA_DIGEST_LENGTH);
-        //         }
-        //         else {
-        //             // TODO:consider both synced and unsynced entries
-        //             uint32_t logid = unsyncedReq2LogId_.get(entry->reqKey);
-        //             if (syncedLogIdByKey_[entry->opKey] > 1) {
-        //                 uint32_t syncPoint = syncedLogIdByKey_[entry->opKey];
-        //                 LogEntry* syncedEntry = syncedEntries_.get(syncPoint);
-        //                 if (syncedEntry->deadline < entry->deadline || (syncedEntry->deadline == entry->deadline && syncedEntry->reqKey < entry->reqKey)) {
-        //                     uint32_t unsyncedPoint = minUnSyncedLogId_;
-        //                     LogEntry* unsyncedEntry = NULL;
-        //                     while (unsyncedPoint <= logid) {
-        //                         unsyncedEntry = unsyncedEntries_.get(unsyncedPoint);
-        //                         if (unsyncedEntry->opKey != entry->opKey) {
-        //                             unsyncedPoint++;
-        //                         }
-        //                         if (unsyncedEntry->deadline < syncedEntry->deadline || (unsyncedEntry->deadline == syncedEntry->deadline && unsyncedEntry->reqKey <= syncedEntry->reqKey)) {
-        //                             unsyncedPoint++;
-        //                         }
-        //                         else {
-        //                             break;
-        //                         }
-        //                     }
-        //                     // !!! Commutativity
-        //                     // TODO: think whether unsyncedEntry = NULL is possible
-        //                     assert(unsyncedPoint <= logid);
-        //                     SHA_HASH hash = entry->hash;
-        //                     hash.XOR(unsyncedEntry->hash);
-        //                     hash.XOR(unsyncedEntry->myhash);
-        //                     reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+        LogEntry* entry = NULL;
+        Reply reply;
+        reply.set_view(viewNum_);
+        reply.set_replytype(MessageType::FAST_REPLY);
+        reply.set_replicaid(replicaId_);
+        bool amLeader = AmLeader();
+        CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[cvId].load());
+        char buffer[2048];
+        MessageHeader* replyHeader = (MessageHeader*)(void*)buffer;
+        replyHeader->msgType = MessageType::FAST_REPLY;
+        uint64_t opKeyAndId = 0ul;
+        while (status_ == ReplicaStatus::NORMAL) {
+            if (fastReplyQu_[id].try_dequeue(entry)) {
+                reply.set_clientid((entry->reqKey) >> 32);
+                reply.set_reqid((uint32_t)(entry->reqKey));
+                if (cvVersionInUse_[cvId] < cvVersionInUse_[0]) {
+                    // My cv is stale, update it
+                    uint32_t newCVversion = cvVersionInUse_[0];
+                    do {
+                        cv = crashVector_.get(newCVversion);
+                    } while (cv == NULL);
+                    cvVersionInUse_[cvId] = newCVversion;
 
-        //                 }
-        //                 // else (unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need
-        //                 // to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
+                }
+                if (amLeader) {
+                    SHA_HASH hash = entry->hash;
+                    hash.XOR(cv->cvHash_);
+                    reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+                }
+                else {
+                    if (maxSyncedLogIdByKey_[entry->opKey] > 1) {
+                        uint32_t syncPoint = maxSyncedLogIdByKey_[entry->opKey];
+                        opKeyAndId = entry->opKey;
+                        opKeyAndId = ((opKeyAndId << 32u) | syncPoint);
 
-        //             }
-        //         }
+                        LogEntry* syncedEntry = NULL;
+                        do {
+                            // Normally, this do-while will break by just executing once
+                            syncedEntry = syncedEntriesByKey_.get(opKeyAndId);
+                        } while (syncedEntry == NULL);
 
-        //         reply.set_result(entry->result);
-        //         size_t msgLen = reply.ByteSizeLong();
-        //         if (addrMap.find(entry->proxyId) == addrMap.end()) {
-        //             struct sockaddr_in addr;
-        //             bzero(&addr, sizeof(addr));
-        //             addr.sin_family = AF_INET;
-        //             addr.sin_port = htons((uint32_t)(entry->proxyId));
-        //             addr.sin_addr.s_addr = proxyIPs_[(entry->proxyId) >> 32];
-        //             addrMap[entry->proxyId] = addr;
-        //         }
-        //         if (reply.SerializeToArray(buffer, msgLen)) {
-        //             // sendto(fd, buffer, msgLen, 0, (struct sockaddr*)&(addrMap[entry->proxyId]), sizeof(sockaddr_in));
-        //         }
-        //     }
-        // }
-        workerCounter_.fetch_sub(1);
-    }
+                        uint32_t unsyncedPointStart = minUnSyncedLogIdByKey_[entry->opKey];
+                        uint32_t unsyncedPointEnd = maxUnSyncedLogIdByKey_[entry->opKey];
 
-    void Replica::SlowReplyTd(int id, int cvId) {
-        workerCounter_.fetch_add(1);
-        // std::string key = "SlowReplyTd-" + std::to_string(id);
-        // int fd = socketFds_[key];
-        // char* buffer = buffers_[key];
-        // LogEntry* entry = NULL;
-        // Reply reply;
-        // reply.set_view(viewNum_);
-        // reply.set_replytype(SLOW_REPLY);
-        // reply.set_replicaid(replicaId_);
-        // reply.set_hash("");
-        // reply.set_result("");
-        // std::map<uint64_t, struct sockaddr_in> addrMap;
-        // while (status_ == NORMAL) {
-        //     if (slowReplyQus_[id].try_dequeue(entry)) {
-        //         reply.set_clientid((entry->reqKey) >> 32);
-        //         reply.set_reqid((uint32_t)(entry->reqKey));
-        //         size_t msgLen = reply.ByteSizeLong();
-        //         if (addrMap.find(entry->proxyId) == addrMap.end()) {
-        //             struct sockaddr_in addr;
-        //             bzero(&addr, sizeof(addr));
-        //             addr.sin_family = AF_INET;
-        //             addr.sin_port = htons((uint32_t)(entry->proxyId));
-        //             addr.sin_addr.s_addr = proxyIPs_[(entry->proxyId) >> 32];
-        //             addrMap[entry->proxyId] = addr;
-        //         }
-        //         // To optimize: SLOW_REPLY => COMMIT_REPLY
-        //         if (reply.SerializeToArray(buffer, msgLen)) {
-        //             sendto(fd, buffer, msgLen, 0, (struct sockaddr*)&(addrMap[entry->proxyId]), sizeof(sockaddr_in));
-        //         }
-        //     }
-        // }
+                        if (syncedEntry->LessThan(*entry) && unsyncedPointStart <= unsyncedPointEnd) {
+                            LogEntry* unsyncedEntryBoundary = NULL;
+                            while (unsyncedPointStart <= unsyncedPointEnd) {
+                                opKeyAndId = entry->opKey;
+                                opKeyAndId = ((opKeyAndId << 32u) | unsyncedPointStart);
+                                unsyncedEntryBoundary = unsyncedEntriesByKey_.get(opKeyAndId);
+                                assert(unsyncedEntryBoundary != NULL);
+                                if (unsyncedEntryBoundary->LessThan(*syncedEntry)) {
+                                    unsyncedPointStart++;
+                                }
+                                else {
+                                    break;
+                                }
+                            }
+                            if (unsyncedPointStart <= unsyncedPointEnd) {
+                                SHA_HASH hash(entry->hash);
+                                hash.XOR(unsyncedEntryBoundary->hash);
+                                hash.XOR(unsyncedEntryBoundary->myhash); // so far, hash encodes all unsynced info
+                                hash.XOR(syncedEntry->hash);// plus the synced info
+                                hash.XOR(cv->cvHash_); // plus crash-vector to avoid stray message effect
+                                reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+                            }
+                        }
+                        // else (unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
+                    }
+                }
+                reply.set_result(entry->result);
 
-        workerCounter_.fetch_sub(1);
-    }
+                replyHeader->msgLen = reply.ByteSizeLong();
 
-    void Replica::IndexSendTd(int id) {
-        workerCounter_.fetch_add(1);
-        while (status_ == NORMAL) {
-
+                Address* addr = proxyAddressMap_.get(entry->proxyId);
+                if (addr != NULL && reply.SerializeToArray(buffer + sizeof(MessageHeader), replyHeader->msgLen)) {
+                    fastReplySender_[id]->SendMsgTo(*addr, buffer, replyHeader->msgLen + sizeof(MessageHeader));
+                }
+                // else (unlikely): this replica does not have the addr of the proxy
+            }
         }
         workerCounter_.fetch_sub(1);
     }
 
-    void Replica::IndexRecvTd() {}
+    void Replica::SlowReplyTd(int id, int cvId) {
+        if (AmLeader()) {
+            // Leader does not send slow replies
+            return;
+        }
+        workerCounter_.fetch_add(1);
+        char buffer[2048];
+        LogEntry* entry = NULL;
+        Reply reply;
+        reply.set_view(viewNum_);
+        reply.set_replytype(MessageType::SLOW_REPLY);
+        reply.set_replicaid(replicaId_);
+        reply.set_hash("");
+        reply.set_result("");
+        MessageHeader* replyHeader = (MessageHeader*)(void*)buffer;
+        replyHeader->msgType = MessageType::SLOW_REPLY;
 
-    void Replica::MissedIndexAckTd() {}
+        while (status_ == ReplicaStatus::NORMAL) {
+            if (slowReplyQu_[id].try_dequeue(entry)) {
+                reply.set_clientid((entry->reqKey) >> 32);
+                reply.set_reqid((uint32_t)(entry->reqKey));
+                // Optimize: SLOW_REPLY => COMMIT_REPLY
+                if (syncedReq2LogId_.get(entry->reqKey) <= committedLogId_) {
+                    reply.set_replytype(MessageType::COMMIT_REPLY);
+                }
 
-    void Replica::MissedReqAckTd() {}
+                Address* addr = proxyAddressMap_.get(entry->proxyId);
+                replyHeader->msgLen = reply.ByteSizeLong();
+                if (addr != NULL && reply.SerializeToArray(buffer + sizeof(MessageHeader), replyHeader->msgLen)) {
+                    slowReplySender_[id]->SendMsgTo(*addr, buffer, replyHeader->msgLen + sizeof(MessageHeader));
+                }
+            }
+        }
+
+        workerCounter_.fetch_sub(1);
+    }
+
+    void Replica::IndexSendTd(int id, int cvId) {
+        if (!AmLeader()) {
+            // Followers do not broadcast indices
+            return;
+        }
+        workerCounter_.fetch_add(1);
+        uint32_t lastSyncedLogId = 2;
+        IndexSync indexSyncMsg;
+        CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[cvId]);
+        char buffer[2048];
+        MessageHeader* msgHdr = (MessageHeader*)buffer;
+        msgHdr->msgType = MessageType::SYNC_INDEX;
+        while (status_ == ReplicaStatus::NORMAL) {
+            uint32_t logEnd = maxSyncedLogId_;
+            if (lastSyncedLogId < logEnd) {
+                // Leader has some indices to sync
+                indexSyncMsg.set_view(this->viewNum_);
+                indexSyncMsg.set_logidbegin(lastSyncedLogId + 1);
+                logEnd = (lastSyncedLogId + 50 < logEnd) ? (lastSyncedLogId + 50) : logEnd;
+                indexSyncMsg.set_logidend(logEnd);
+                for (uint32_t i = indexSyncMsg.logidbegin(); i <= indexSyncMsg.logidend(); i++) {
+                    LogEntry* entry = syncedEntries_.get(i);
+                    assert(entry != NULL);
+                    indexSyncMsg.add_deadlines(entry->deadline);
+                    indexSyncMsg.add_reqkeys(entry->reqKey);
+                }
+                if (cvVersionInUse_[cvId] < cvVersionInUse_[0]) {
+                    uint32_t newCVversion = cvVersionInUse_[0];
+                    do {
+                        cv = crashVector_.get(newCVversion);
+                    } while (cv == NULL);
+                    cvVersionInUse_[cvId] = newCVversion;
+                }
+                // Add cv to broadcast
+                for (uint32_t i = 0; i < 5; i++) {
+                    indexSyncMsg.add_cv(cv->cvHash_.item[i]);
+                }
+                indexSyncMsg.set_cvversion(cvVersionInUse_[cvId]);
+
+
+                msgHdr->msgLen = indexSyncMsg.ByteSizeLong();
+                indexSyncMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen);
+
+                // Send
+                for (uint32_t r = 0; r < replicaNum_; r++) {
+                    if (r != this->replicaNum_) {
+                        indexSender_[id]->SendMsgTo(*(indexReceiver_[r]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+                    }
+                }
+            }
+            usleep(20);
+        }
+        workerCounter_.fetch_sub(1);
+    }
+
+    void Replica::IndexRecvTd() {
+        workerCounter_.fetch_add(1);
+        indexSyncContext_.endPoint_->LoopRun();
+        workerCounter_.fetch_sub(1);
+    }
 
     void Replica::ReceiveIndexSyncMessage(char* msgBuffer, int msgLen) {
+        if (!CheckMsgLength(msgBuffer, msgLen)) {
+            return;
+        }
+        MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
+        char* buffer = msgBuffer + sizeof(MessageHeader);
+        if (msgHdr->msgType == MessageType::SYNC_INDEX) {
+            IndexSync idxSyncMsg;
+            if (idxSyncMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
+                if (!CheckViewAndCV()) {
+                    return;
+                }
+
+                if (maxSyncedLogId_ + 1 < idxSyncMsg.logidbegin()) {
+                    pendingIndexSync_[idxSyncMsg.logidbegin()] = idxSyncMsg;
+                    if (this->missedIndices_.first == 0) {
+                        // We are missing some idxSyncMsgs
+                       // We haven't launched the timer to ask indices
+                        this->missedIndices_.first = maxSyncedLogId_ + 1;
+                        this->missedIndices_.second = idxSyncMsg.logidbegin() - 1;
+                        this->indexSyncContext_.endPoint_->RegisterTimer(indexAskTimer_);
+                        return;
+                    }
+                }
+                else if (maxSyncedLogId_ < idxSyncMsg.logidend()) {
+                    // This idxSyncMsg is useful
+                    ProcessIndexSync(idxSyncMsg);
+                }
+                // Process pendingIndexSync, if any
+                while (!pendingIndexSync_.empty()) {
+                    if (ProcessIndexSync(pendingIndexSync_.begin()->second)) {
+                        pendingIndexSync_.erase(pendingIndexSync_.begin());
+                    }
+                    else {
+                        break;
+                    }
+                }
+            }
+        }
+        else if (msgHdr->msgType == MessageType::MISSED_REQ) {
+            MissedReq missedReqMsg;
+            if (missedReqMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
+                for (int i = 0; i < missedReqMsg.reqs().size(); i++) {
+                    uint64_t reqKey = missedReqMsg.reqs(i).clientid();
+                    reqKey = ((reqKey << 32u) | missedReqMsg.reqs(i).reqid());
+                    if (missedReqKeys_.find(reqKey) != missedReqKeys_.end()) {
+                        Request* req = new Request(missedReqMsg.reqs(i));
+                        // We must handle it to process td, to avoid data race (and further memroy leakage), although it is a trivial possibility
+                        processQu_.enqueue(req);
+                        missedReqKeys_.erase(reqKey);
+                        if (missedReqKeys_.empty()) {
+                            // can stop the timer now
+                            indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            LOG(WARNING) << "Unexpected msg type " << msgHdr->msgType;
+        }
 
     }
 
-    void Replica::ReceiveAskMissedReq(char* msgBuffer, int msgLen) {
 
+    bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
+        if (idxSyncMsg.logidend() <= maxSyncedLogId_) {
+            // This idxSyncMsg is useless 
+            return true;
+        }
+        if (idxSyncMsg.logidbegin() > maxSyncedLogId_ + 1) {
+            return false;
+        }
+        if (missedIndices_.first < idxSyncMsg.logidend()) {
+            // Narrow the gap
+            missedIndices_.first = idxSyncMsg.logidend() + 1;
+        }
+
+        if (missedIndices_.first > missedIndices_.second) {
+            // We have fixed the missing gap of indices, no need to continue the indexask Timer
+            if (indexSyncContext_.endPoint_->isRegistered(this->indexAskTimer_)) {
+                indexSyncContext_.endPoint_->UnregisterTimer(this->indexAskTimer_);
+            }
+        }
+        uint64_t opKeyAndId = 0ul;
+        for (uint32_t logid = maxSyncedLogId_ + 1; logid <= idxSyncMsg.logidend(); logid++) {
+            uint32_t offset = logid - idxSyncMsg.logidbegin();
+            uint64_t reqKey = idxSyncMsg.reqkeys(offset);
+            uint64_t deadline = idxSyncMsg.deadlines(offset);
+            Request* req = unsyncedRequestMap_.get(reqKey);
+            if (req) {
+                // Find the req locally
+                SHA_HASH myHash = CalculateHash(deadline, reqKey);
+                SHA_HASH hash = myHash;
+                if (maxSyncedLogIdByKey_[req->key()] > 1) {
+                    // This req has some pre non-commutative ones
+                    // In that way, XOR the previous accumulated hash
+                    opKeyAndId = req->key();
+                    opKeyAndId = ((opKeyAndId << 32u) | maxSyncedLogIdByKey_[req->key()]);
+                    const SHA_HASH& prev = syncedEntriesByKey_.get(opKeyAndId)->hash;
+                    hash.XOR(prev);
+                }
+
+                LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), "", req->proxyid());
+                syncedRequestMap_.assign(reqKey, req);
+                syncedReq2LogId_.assign(reqKey, logid);
+                syncedEntries_.assign(logid, entry);
+                maxSyncedLogIdByKey_[req->key()]++;
+                opKeyAndId = req->key();
+                opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[req->key()]));
+                syncedEntriesByKey_.assign(opKeyAndId, entry);
+                maxSyncedLogId_++;
+                // Chunk UnSynced logs
+                uint32_t m = minUnSyncedLogIdByKey_[req->key()];
+                while (m <= maxUnSyncedLogIdByKey_[req->key()]) {
+                    opKeyAndId = req->key();
+                    opKeyAndId = ((opKeyAndId << 32u) | m);
+                    LogEntry* minEntry = unsyncedEntriesByKey_.get(opKeyAndId);
+                    assert(minEntry != NULL);
+                    if (minEntry->LessThan(*entry)) {
+                        // This minEntry is useless
+                        m++;
+                    }
+                    else {
+                        break;
+                    }
+                }
+                minUnSyncedLogIdByKey_[req->key()] = m;
+
+            }
+            else {
+                this->missedReqKeys_.insert(reqKey);
+            }
+
+        }
+        if (this->missedReqKeys_.empty()) {
+            return true;
+        }
+        else {
+            // Start Timer ask for missing logs
+            if (!indexSyncContext_.endPoint_->isRegistered(requestAskTimer_)) {
+                indexSyncContext_.endPoint_->RegisterTimer(requestAskTimer_);
+            }
+            return false;
+        }
+    }
+
+    void Replica::MissedIndexAckTd() {
+        workerCounter_.fetch_add(1);
+        missedIndexAckContext_.endPoint_->LoopRun();
+        workerCounter_.fetch_sub(1);
     }
 
     void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
+        if (!CheckMsgLength(msgBuffer, msgLen)) {
+            return;
+        }
+        AskIndex askIndex;
 
+        if (msgBuffer[0] == MessageType::MISSED_INDEX_ASK && askIndex.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgLen - sizeof(MessageHeader))) {
+            uint32_t logBegin = askIndex.logidbegin();
+            while (logBegin <= maxSyncedLogId_) {
+                // I can help
+                IndexSync indexSyncMsg;
+                indexSyncMsg.set_view(this->viewNum_);
+                indexSyncMsg.set_logidbegin(logBegin);
+                uint32_t logEnd = maxSyncedLogId_;
+                if (logEnd > askIndex.logidend()) {
+                    logEnd = askIndex.logidend();
+                }
+                if (logEnd > logBegin + 50) {
+                    logEnd = logBegin + 50;
+                }
+                indexSyncMsg.set_logidend(logEnd);
+                for (uint32_t logid = indexSyncMsg.logidbegin(); logid <= indexSyncMsg.logidend(); logid++) {
+                    LogEntry* entry = syncedEntries_.get(logid);
+                    indexSyncMsg.add_deadlines(entry->deadline);
+                    indexSyncMsg.add_reqkeys(entry->reqKey);
+                }
+                indexSyncMsg.set_cvversion(0); // no need to piggyback crash vector
+                char buffer[2048];
+                MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
+                msgHdr->msgType = MessageType::SYNC_INDEX;
+                msgHdr->msgLen = indexSyncMsg.ByteSizeLong();
+
+                if (indexSyncMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                    indexAcker_->SendMsgTo(*(indexReceiver_[askIndex.replicaid()]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+                }
+                logBegin = logEnd + 1;
+            }
+        }
     }
+
+    void Replica::MissedReqAckTd() {
+        workerCounter_.fetch_add(1);
+        missedReqAckContext_.endPoint_->LoopRun();
+        workerCounter_.fetch_sub(1);
+    }
+
+
+    // TODO: ack to request receiver
+    void Replica::ReceiveAskMissedReq(char* msgBuffer, int msgLen) {
+        if (!CheckMsgLength(msgBuffer, msgLen)) {
+            return;
+        }
+        AskReq askReqMsg;
+        if (msgBuffer[0] == MessageType::MISSED_REQ_ASK && askReqMsg.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgLen - sizeof(MessageHeader))) {
+            MissedReq missedReqMsg;
+            missedReqMsg.set_replicaid(this->replicaId_);
+            for (int i = 0; i < askReqMsg.missedreqkeys().size(); i++) {
+                uint64_t reqKey = askReqMsg.missedreqkeys(i);
+                Request* req = syncedRequestMap_.get(reqKey);
+                if (req == NULL) {
+                    req = unsyncedRequestMap_.get(reqKey);
+                }
+                if (req) {
+                    // the req is found
+                    missedReqMsg.add_reqs()->CopyFrom(*req);
+                }
+                if (missedReqMsg.reqs().size() > 10) {
+                    break;
+                }
+            }
+            if (missedReqMsg.reqs().size() > 0) {
+                // This ack is useful, so send it
+                char buffer[2048];
+                MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
+                msgHdr->msgLen = missedReqMsg.ByteSizeLong();
+                msgHdr->msgType = MessageType::MISSED_REQ;
+                if (missedReqMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                    missedReqAckContext_.endPoint_->SendMsgTo(*(indexReceiver_[askReqMsg.replicaid()]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+                }
+
+            }
+        }
+    }
+
+
 
     void Replica::ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
 
     }
 
+    void Replica::AskMissedIndex() {
+        if (missedIndices_.first > missedIndices_.second) {
+            indexSyncContext_.endPoint_->UnregisterTimer(indexAskTimer_);
+            return;
+        }
+        AskIndex askIndexMsg;
+        askIndexMsg.set_replicaid(this->replicaId_);
+        askIndexMsg.set_logidbegin(missedIndices_.first);
+        askIndexMsg.set_logidend(missedIndices_.second);
+        char buffer[2048];
+        MessageHeader* msgHdr = (MessageHeader*)(void*)msgHdr;
+        msgHdr->msgType = MessageType::MISSED_INDEX_ASK;
+        msgHdr->msgLen = askIndexMsg.ByteSizeLong();
+        if (askIndexMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            // Do not ask leader every time, choose random replica to ask to avoid leader bottleneck
+            reqRequester_->SendMsgTo(*(requestAskReceiver_[roundRobinIndexAskIdx_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+            roundRobinIndexAskIdx_++;
+            if (roundRobinIndexAskIdx_ % replicaNum_ == replicaId_) {
+                roundRobinIndexAskIdx_++;
+            }
+        }
 
-    // void Replica::FollowerIndexSyncReceive(int id, int fd) {
-    //     struct sockaddr_in addr;
-    //     socklen_t addrlen;
-    //     char* buffer = requestBuffers_[id];
-    //     int sz = recvfrom(fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&addr, &addrlen);
-    //     IndexSync idxSyncMsg;
-    //     MissedReq missedReqMsg;
-    //     AskReq askReqMsg;
-    //     AskIndex askIdxMsg;
-    //     std::map<uint32_t, IndexSync> pendingIndexSync;
-    //     if (sz > 0) {
-    //         // recognize msg type based on sender port
-    //         int port = ntohs(addr.sin_port);
-    //         if (port == senderPorts_[INDEX_SYNC]) {
-    //             if (idxSyncMsg.ParseFromArray(buffer, sz)) {
-    //                 if (!CheckViewAndCV()) {
-    //                     return;
-    //                 }
-    //                 if (maxSyncedLogId_ + 1 < idxSyncMsg.logidbegin()) {
-    //                     pendingIndexSync[idxSyncMsg.logidbegin()] = idxSyncMsg;
-    //                     // We are missing some idxSyncMsgs
-    //                     askIdxMsg.set_logidbegin(maxSyncedLogId_ + 1);
-    //                     askIdxMsg.set_logidend(idxSyncMsg.logidbegin() - 1);
-    //                     addr.sin_port = htons(senderPorts_[ASK_INDEX]);
-    //                     sendto(senderFds_[ASK_INDEX], senderBuffers_[ASK_INDEX], askIdxMsg.ByteSizeLong(), 0, (struct sockaddr*)&addr, addrlen);
-    //                 }
-    //                 else if (maxSyncedLogId_ < idxSyncMsg.logidend()) {
-    //                     // This idxSyncMsg is useful
-    //                     ProcessIndexSync(idxSyncMsg);
-    //                 }
-    //                 // Process pendingIndexSync, if any
-    //                 while (!pendingIndexSync.empty()) {
-    //                     if (ProcessIndexSync(pendingIndexSync.begin()->second)) {
-    //                         pendingIndexSync.erase(pendingIndexSync.begin());
-    //                     }
-    //                     else {
-    //                         break;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         // TODO: Maybe delegate to Master Thread
-    //         else if (port == senderPorts_[MISSED_REQ]) {
+    }
 
-    //         }
+    void Replica::AskMissedRequest() {
+        // TODO: Test and confirm ev_timer_again start immediately after register
+        if (missedReqKeys_.empty()) {
+            // no need to start timer
+            indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
+            return;
+        }
+        AskReq askReqMsg;
+        askReqMsg.set_replicaid(this->replicaId_);
+        for (const uint64_t& reqKey : missedReqKeys_) {
+            askReqMsg.add_missedreqkeys(reqKey);
+        }
+        char buffer[2048];
+        MessageHeader* msgHdr = (MessageHeader*)(void*)msgHdr;
+        msgHdr->msgType = MessageType::MISSED_REQ_ASK;
+        msgHdr->msgLen = askReqMsg.ByteSizeLong();
+        if (askReqMsg.SerializeToArray(buffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            // Do not ask leader every time, choose random replica to ask to avoid leader bottleneck
+            reqRequester_->SendMsgTo(*(requestAskReceiver_[roundRobinRequestAskIdx_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+            roundRobinRequestAskIdx_++;
+            if (roundRobinRequestAskIdx_ % replicaNum_ == replicaId_) {
+                roundRobinRequestAskIdx_++;
+            }
+        }
 
-    //     }
-    // }
-
-    // bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
-    //     if (idxSyncMsg.logidend() <= maxSyncedLogId_) {
-    //         // This idxSyncMsg is useless 
-    //         return true;
-    //     }
-    //     if (idxSyncMsg.logidbegin() > maxSyncedLogId_ + 1) {
-    //         return false;
-    //     }
-    //     for (uint32_t logid = maxSyncedLogId_ + 1; logid <= idxSyncMsg.logidend(); logid++) {
-    //         uint32_t offset = logid - idxSyncMsg.logidbegin();
-    //         uint64_t reqKey = idxSyncMsg.reqkeys(offset);
-    //         uint64_t deadline = idxSyncMsg.deadlines(offset);
-    //         Request* req = unsyncedRequestMap_.get(reqKey);
-    //         if (req) {
-    //             // Find the req locally
-    //             SHA_HASH myHash = CalculateHash(deadline, reqKey);
-    //             SHA_HASH hash = myHash;
-    //             assert(syncedEntries_.get(syncedLogIdByKey_[req->key()]) != NULL);
-    //             const SHA_HASH& prev = syncedEntries_.get(syncedLogIdByKey_[req->key()])->hash;
-    //             hash.XOR(prev);
-    //             LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), "", req->proxyid());
-    //             syncedRequestMap_.assign(reqKey, req);
-    //             syncedReq2LogId_.assign(reqKey, logid);
-    //             syncedEntries_.assign(logid, entry);
-    //             syncedLogIdByKey_[req->key()] = logid;
-    //             maxSyncedLogId_++;
-    //         }
-    //         // TO Continue
-
-    //     }
-    //     return true;
-    // }
+    }
 
     // void Replica::Master() {
     //     uint64_t nowTime = GetMicrosecondTimestamp();
@@ -614,6 +916,26 @@ namespace nezha {
     }
     bool Replica::AmLeader() {
         return (viewNum_ % replicaNum_ == replicaId_);
+    }
+    bool Replica::CheckMsgLength(const char* msgBuffer, const int msgLen) {
+        if (msgLen < 0) {
+            LOG(WARNING) << "\tmsgLen=" << msgLen;
+            return false;
+        }
+        if ((uint32_t)msgLen < sizeof(MessageHeader)) {
+            LOG(WARNING) << "\tmsgLen=" << msgLen;
+            return false;
+        }
+        const MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
+
+        if (msgHdr->msgLen == msgLen - sizeof(MessageHeader)) {
+            return true;
+        }
+        else {
+            LOG(WARNING) << "Incomplete message: expected length " << msgHdr->msgLen + sizeof(MessageHeader) << "\tbut got " << msgLen;
+            return false;
+        }
+
     }
 }
 

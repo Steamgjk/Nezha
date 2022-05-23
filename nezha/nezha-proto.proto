@@ -28,6 +28,8 @@ message IndexSync {
     repeated uint64 reqkeys =4;
     uint32 view = 5;
     // crash-vector
+    repeated uint32 cv = 6;
+    uint32 cvversion = 7;
 }
 
 message AskIndex {
@@ -37,9 +39,8 @@ message AskIndex {
 }
 
 message AskReq {
-    uint32 logidbegin = 1;
-    uint32 logidend = 2;
-    uint32 replicaid = 3;
+    repeated uint64 missedreqkeys = 1;
+    uint32 replicaid = 2;
 }
 
 message MissedReq {

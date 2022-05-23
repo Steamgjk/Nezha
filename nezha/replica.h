@@ -17,7 +17,7 @@
 #include <junction/ConcurrentMap_Leapfrog.h>
 #include <yaml-cpp/yaml.h>
 #include "nezha/nezha-proto.pb.h"
-#include "lib/utils.hpp"
+#include "lib/utils.h"
 #include "lib/concurrentqueue.hpp"
 #include "lib/udp_socket_endpoint.h"
 
@@ -27,17 +27,7 @@ namespace nezha {
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
 
 
-    struct CrashVectorStruct {
-        std::vector<uint32_t> cv_;
-        uint32_t version_;
-        SHA_HASH cvHash_;
-        CrashVectorStruct(const std::vector<uint32_t>& c, const uint32_t v) :cv_(c), version_(v) {
-            const uint32_t contentLen = c.size() * sizeof(uint32_t);
-            const unsigned char* content = (const unsigned char*)(void*)(c.data());
-            cvHash_ = CalculateHash(content, contentLen);
-        }
-        CrashVectorStruct(const CrashVectorStruct& c) :cv_(c.cv_), version_(c.version_), cvHash_(c.cvHash_) {}
-    };
+
 
     struct Context
     {
@@ -59,7 +49,7 @@ namespace nezha {
         std::atomic<uint32_t> viewNum_;
         std::atomic<uint32_t> replicaId_;
         std::atomic<uint32_t> replicaNum_;
-        std::atomic<uint32_t> status_; // Worker threads check status to decide whether they should stop (for view change)
+        std::atomic<int> status_; // Worker threads check status to decide whether they should stop (for view change)
 
         std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // The key pair is <deadline, reqKey>
         std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
@@ -68,16 +58,22 @@ namespace nezha {
         ConcurrentMap<uint64_t, Request*> unsyncedRequestMap_; // <reqKey, request>
         ConcurrentMap<uint32_t, LogEntry*> syncedEntries_; // log-id as the key [accumulated hashes]
         ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_; // log-id as the key [accumulated hashes]
-        ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index)
-        ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index)
+        ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by leader)
+        ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by followers)
 
         // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and provide convenience for garbage-collection
         std::atomic<uint32_t> maxSyncedLogId_;
         std::atomic<uint32_t> minUnSyncedLogId_;
         std::atomic<uint32_t> maxUnSyncedLogId_;
         // syncedLogIdByKey_ and unsyncedLogIdByKey_ are fine-grained version of maxSyncedLogId_ and minUnSyncedLogId_, to support commutativity optimization
-        std::vector<uint32_t> syncedLogIdByKey_;
-        std::vector<uint32_t> unsyncedLogIdByKey_;
+        std::atomic<uint32_t> committedLogId_;
+
+        //  To support commutativity optimization
+        std::vector<uint32_t> maxSyncedLogIdByKey_; // per-key based log-id
+        std::vector<uint32_t> minUnSyncedLogIdByKey_; // per-key based log-id, starts with 2
+        std::vector<uint32_t> maxUnSyncedLogIdByKey_; // per-key based log-id
+        ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id), entry>
+        ConcurrentMap<uint64_t, LogEntry*> unsyncedEntriesByKey_; // <(Key|Id), entry>
 
         // Use <threadName> as the key (for search), <threadPtr, threadId> as the value
         std::map<std::string, std::thread*> threadPool_;
@@ -88,11 +84,26 @@ namespace nezha {
         Context indexSyncContext_;
         Context missedIndexAckContext_;
         Context missedReqAckContext_;
+        TimerStruct* indexAskTimer_;
+        TimerStruct* requestAskTimer_;
         std::vector<UDPSocketEndpoint*> indexSender_;
         std::vector<UDPSocketEndpoint*> fastReplySender_;
         std::vector<UDPSocketEndpoint*> slowReplySender_;
+        UDPSocketEndpoint* indexRequster_;
+        UDPSocketEndpoint* reqRequester_;
+        UDPSocketEndpoint* indexAcker_;
+        UDPSocketEndpoint* reqAcker_;
+        std::vector<Address*> indexReceiver_;
+        std::vector<Address*> indexAskReceiver_;
+        std::vector<Address*> requestAskReceiver_;
+        uint32_t roundRobinIndexAskIdx_;
+        uint32_t roundRobinRequestAskIdx_;
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector
         std::atomic<uint32_t>* cvVersionInUse_;
+        std::map<uint32_t, IndexSync> pendingIndexSync_;
+        std::set<uint32_t> missedReqKeys_; // Missed Request during index synchronization
+        std::pair<uint32_t, uint32_t> missedIndices_; // Missed Indices during index synchronization
+
 
 
         ConcurrentMap<uint64_t, Address*> proxyAddressMap_; // Inserted by receiver threads, and looked up by fast/slow reply threads
@@ -113,6 +124,7 @@ namespace nezha {
         void StartViewChange();
         std::string ApplicationExecute(Request* req);
         bool AmLeader();
+        bool CheckMsgLength(const char* msgBuffer, const int msgLen);
         bool CheckViewAndCV();
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.yaml"));
@@ -123,12 +135,14 @@ namespace nezha {
         void ReceiveAskMissedReq(char* msgBuffer, int msgLen);
         void ReceiveAskMissedIdx(char* msgBuffer, int msgLen);
         void ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
+        void AskMissedIndex();
+        void AskMissedRequest();
 
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);
         void FastReplyTd(int id = -1, int cvId = -1);
         void SlowReplyTd(int id = -1, int cvId = -1);
-        void IndexSendTd(int id = -1);
+        void IndexSendTd(int id = -1, int cvId = -1);
         void IndexRecvTd();
         void MissedIndexAckTd();
         void MissedReqAckTd();
@@ -137,6 +151,7 @@ namespace nezha {
         void LeaderIndexSyncReceive(int id = -1, int fd = -1);
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void RequestReceive(int id = -1, int fd = -1);
+
 
         void Master();
         void MasterReceive(int fd = -1);
