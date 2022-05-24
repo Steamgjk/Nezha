@@ -21,6 +21,7 @@ namespace MessageType {
     char MISSED_REQ = 9;
     char VIEWCHANGE_REQ = 10;
     char VIEWCHANGE = 11;
+    char STARTVIEW = 12;
 };
 
 

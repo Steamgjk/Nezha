@@ -33,6 +33,7 @@ namespace MessageType {
     extern char MISSED_REQ;
     extern char VIEWCHANGE_REQ;
     extern char VIEWCHANGE;
+    extern char STARTVIEW;
 };
 
 

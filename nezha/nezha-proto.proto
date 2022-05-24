@@ -47,7 +47,13 @@ message MissedReq {
     uint32 replicaid = 2;
 }
 
-message ViewChangeRequest {
+message ViewChangeRequest{
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    repeated uint32 cv = 3;
+}
+
+message ViewChange {
     uint32 view = 1;
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
@@ -55,3 +61,9 @@ message ViewChangeRequest {
     uint32 lastnormalview= 5;
 }
 
+message StartView {
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    repeated uint32 cv = 3;
+    uint32 syncpoint = 4;
+}

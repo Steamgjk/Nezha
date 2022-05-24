@@ -102,7 +102,7 @@ namespace nezha {
         std::vector<Address*> masterReceiver_;
         uint32_t roundRobinIndexAskIdx_;
         uint32_t roundRobinRequestAskIdx_;
-        ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector
+        ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector, used for garbage-collection
         std::atomic<CrashVectorStruct*>* crashVectorInUse_;
         uint32_t indexRecvCVIdx_;
         uint32_t indexAckCVIdx_;
@@ -127,13 +127,19 @@ namespace nezha {
         void CreateContext();
         void LaunchThreads();
         void StartViewChange();
-        void InitiateViewChange();
+        void BroadcastViewChange();
+        void SendViewChangeRequest(const int toReplicaId);
+        void SendViewChange();
+        void InitiateViewChange(const uint32_t view);
+        void SendStartView(const int toReplicaId);
 
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
+        void ProcessViewChange(const ViewChange& viewChange);
         std::string ApplicationExecute(Request* req);
         bool AmLeader();
         MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
         bool CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv);
+        bool CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv);
 
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.yaml"));

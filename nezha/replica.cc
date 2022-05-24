@@ -161,7 +161,7 @@ namespace nezha {
         // Create CrashVector Context
         std::vector<uint32_t> cvVec(replicaNum_, 0);
         CrashVectorStruct* cv = new CrashVectorStruct(cvVec, 2);
-        crashVector_.assign(2, cv);
+        crashVector_.assign(cv->version_, cv);
         uint32_t cvVecSize = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>() + 2;
         indexRecvCVIdx_ = cvVecSize - 2;
         indexAckCVIdx_ = cvVecSize - 1;
@@ -186,8 +186,9 @@ namespace nezha {
         missedReqKeys_.clear();
 
         viewChangeTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->InitiateViewChange();
+            ((Replica*)ctx)->BroadcastViewChange();
             }, this, replicaConfig_["view-change-period-ms"].as<int>());
+
     }
 
 
@@ -949,9 +950,7 @@ namespace nezha {
 
     }
 
-    void Replica::InitiateViewChange() {
-        // Broadcast VIEW-CHANGE-REQ to all replicas
-        // VIEW-CHANGE-REQ and VIEW-CHANGE are combined here (refer to Algorithm-2 in the paper)
+    void Replica::SendViewChangeRequest(const int toReplicaId) {
         ViewChangeRequest viewChangeReq;
         viewChangeReq.set_view(viewNum_);
         viewChangeReq.set_replicaid(replicaId_);
@@ -959,8 +958,6 @@ namespace nezha {
         for (uint32_t i = 0; i < replicaNum_; i++) {
             viewChangeReq.add_cv(cv->cv_[i]);
         }
-        viewChangeReq.set_syncpoint(maxSyncedLogId_);
-        viewChangeReq.set_lastnormalview(lastNormalView_);
 
         std::string serializedString = viewChangeReq.SerializeAsString();
         char buffer[UDP_BUFFER_SIZE];
@@ -968,24 +965,115 @@ namespace nezha {
         msgHdr->msgType = MessageType::VIEWCHANGE_REQ;
         msgHdr->msgLen = serializedString.length();
         memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
+        if (toReplicaId < 0) {
+            // send to all
+            for (uint32_t i = 0; i < replicaNum_; i++) {
+                if (i != replicaId_) {
+                    // no need to send to myself
+                    masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+                }
 
-        for (uint32_t i = 0; i < replicaNum_; i++) {
-            if (i != replicaId_) {
-                // no need to send to myself
-                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
             }
-
         }
+        else {
+            masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[toReplicaId]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+        }
+    }
+
+    void Replica::SendViewChange() {
+        ViewChange viewChangeMsg;
+        viewChangeMsg.set_view(viewNum_);
+        viewChangeMsg.set_replicaid(replicaId_);
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            viewChangeMsg.add_cv(cv->cv_[i]);
+        }
+        viewChangeMsg.set_syncpoint(maxSyncedLogId_);
+        viewChangeMsg.set_lastnormalview(lastNormalView_);
+
+        std::string serializedString = viewChangeMsg.SerializeAsString();
+        char buffer[UDP_BUFFER_SIZE];
+        MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
+        msgHdr->msgType = MessageType::VIEWCHANGE;
+        msgHdr->msgLen = serializedString.length();
+        memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
+
+        masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewNum_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+
+    }
+
+    void Replica::InitiateViewChange(const uint32_t view) {
+        viewNum_ = view;
+        status_ = ReplicaStatus::VIEWCHANGE;
+        // Launch the timer
+        if (masterContext_.endPoint_->isRegistered(viewChangeTimer_) == false) {
+            masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
+        }
+    }
+
+    void Replica::BroadcastViewChange() {
+        if (status_ == ReplicaStatus::NORMAL) {
+            // Can stop the timer 
+            masterContext_.endPoint_->UnregisterTimer(viewChangeTimer_);
+            return;
+        }
+        // Broadcast VIEW-CHANGE-REQ to all replicas
+        SendViewChangeRequest(-1);
+        // Send VIEW-CHANGE to the leader in this view
+        SendViewChange();
+
+    }
+
+    void Replica::SendStartView(const int toReplicaId) {
 
     }
 
     void Replica::ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq)
     {
-        // if (!CheckViewAndCV(viewChangeReq.view(), viewChangeReq.cv())) {
-        //     return;
-        // }
+        if (status_ == ReplicaStatus::RECOVERING) {
+            // Recovering replicas do not participate in view change
+            return;
+        }
+        if (!CheckCV(viewChangeReq.replicaid(), viewChangeReq.cv())) {
+            // stray message
+            return;
+        }
+        if (viewChangeReq.view() > viewNum_) {
+            InitiateViewChange(viewChangeReq.view());
+        }
+        else {
+            if (status_ == ReplicaStatus::NORMAL) {
+                SendStartView(viewChangeReq.replicaid());
+            }
+        }
+    }
 
-
+    void Replica::ProcessViewChange(const ViewChange& viewChange) {
+        if (status_ == ReplicaStatus::RECOVERING) {
+            // Recovering replicas do not participate in view change
+            return;
+        }
+        if (!CheckCV(viewChange.replicaid(), viewChange.cv())) {
+            // stray message
+            return;
+        }
+        if (status_ == ReplicaStatus::NORMAL) {
+            if (viewChange.view() > viewNum_) {
+                InitiateViewChange(viewChange.view());
+            }
+            else {
+                // The sender lags behind
+                SendStartView(viewChange.replicaid());
+            }
+        }
+        else if (status_ == ReplicaStatus::VIEWCHANGE) {
+            if (viewChange.view() > viewNum_) {
+                InitiateViewChange(viewChange.view());
+            }
+            else if (viewChange.view() < viewNum_) {
+                SendViewChangeRequest(viewChange.replicaid());
+            }
+        }
     }
 
     bool Replica::CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv) {
@@ -1011,6 +1099,32 @@ namespace nezha {
         }
         return true;
     }
+
+    bool Replica::CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv) {
+        // This will check and Update crashVector
+        bool isStray = false;
+        bool needAggregate = false;
+        CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+        std::vector<uint32_t> maxCV(masterCV->cv_);
+        if (cv.at(senderId) < maxCV[senderId]) {
+            isStray = true;
+        }
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            if (maxCV[i] < cv.at(i)) {
+                // The incoming cv has fresher elements
+                needAggregate = true;
+                maxCV[i] = cv.at(i);
+            }
+        }
+        if (needAggregate) {
+            CrashVectorStruct* newCV = new CrashVectorStruct(maxCV, masterCV->version_ + 1);
+            crashVector_.assign(newCV->version_, newCV);
+            crashVectorInUse_[0] = newCV;
+        }
+        return isStray;
+
+    }
+
     std::string Replica::ApplicationExecute(Request* req) {
         return "";
     }
