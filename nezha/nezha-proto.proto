@@ -51,4 +51,7 @@ message ViewChangeRequest {
     uint32 view = 1;
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
+    uint32 syncpoint = 4;
+    uint32 lastnormalview= 5;
 }
+

@@ -7,6 +7,7 @@ namespace nezha {
         replicaConfig_ = YAML::LoadFile(configFile);
 
         viewNum_ = 0;
+        lastNormalView_ = 0;
         replicaId_ = replicaConfig_["replica-id"].as<int>();
         replicaNum_ = replicaConfig_["replica-ips"].size();
         uint32_t keyNum = replicaConfig_["key-num"].as<uint32_t>();
@@ -157,15 +158,17 @@ namespace nezha {
         fastReplyQu_.resize(replyShardNum);
         slowReplyQu_.resize(replyShardNum);
 
-        uint32_t cvVecSize = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>();
-        cvVersionInUse_ = new std::atomic<uint32_t>[cvVecSize];
-        for (uint32_t i = 0; i < cvVecSize; i++) {
-            cvVersionInUse_[i] = 2;
-        }
-
+        // Create CrashVector Context
         std::vector<uint32_t> cvVec(replicaNum_, 0);
         CrashVectorStruct* cv = new CrashVectorStruct(cvVec, 2);
         crashVector_.assign(2, cv);
+        uint32_t cvVecSize = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>() + 2;
+        indexRecvCVIdx_ = cvVecSize - 2;
+        indexAckCVIdx_ = cvVecSize - 1;
+        crashVectorInUse_ = new std::atomic<CrashVectorStruct*>[cvVecSize];
+        for (uint32_t i = 0; i < cvVecSize; i++) {
+            crashVectorInUse_[i] = cv;
+        }
 
         // Create other useful timers
         indexAskTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
@@ -412,7 +415,7 @@ namespace nezha {
         reply.set_replytype(MessageType::FAST_REPLY);
         reply.set_replicaid(replicaId_);
         bool amLeader = AmLeader();
-        CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[cvId].load());
+        CrashVectorStruct* cv = crashVectorInUse_[cvId];
         char buffer[UDP_BUFFER_SIZE];
         MessageHeader* replyHeader = (MessageHeader*)(void*)buffer;
         replyHeader->msgType = MessageType::FAST_REPLY;
@@ -421,14 +424,11 @@ namespace nezha {
             if (fastReplyQu_[id].try_dequeue(entry)) {
                 reply.set_clientid((entry->reqKey) >> 32);
                 reply.set_reqid((uint32_t)(entry->reqKey));
-                if (cvVersionInUse_[cvId] < cvVersionInUse_[0]) {
+                CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+                if (cv->version_ < masterCV->version_) {
                     // My cv is stale, update it
-                    uint32_t newCVversion = cvVersionInUse_[0];
-                    do {
-                        cv = crashVector_.get(newCVversion);
-                    } while (cv == NULL);
-                    cvVersionInUse_[cvId] = newCVversion;
-
+                    crashVectorInUse_[cvId] = masterCV;
+                    cv = masterCV;
                 }
                 if (amLeader) {
                     SHA_HASH hash = entry->hash;
@@ -539,7 +539,7 @@ namespace nezha {
         workerCounter_.fetch_add(1);
         uint32_t lastSyncedLogId = 2;
         IndexSync indexSyncMsg;
-        CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[cvId]);
+        CrashVectorStruct* cv = crashVectorInUse_[cvId].load();
         char buffer[UDP_BUFFER_SIZE];
         MessageHeader* msgHdr = (MessageHeader*)buffer;
         msgHdr->msgType = MessageType::SYNC_INDEX;
@@ -557,12 +557,11 @@ namespace nezha {
                     indexSyncMsg.add_deadlines(entry->deadline);
                     indexSyncMsg.add_reqkeys(entry->reqKey);
                 }
-                if (cvVersionInUse_[cvId] < cvVersionInUse_[0]) {
-                    uint32_t newCVversion = cvVersionInUse_[0];
-                    do {
-                        cv = crashVector_.get(newCVversion);
-                    } while (cv == NULL);
-                    cvVersionInUse_[cvId] = newCVversion;
+
+                CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+                if (cv->version_ < masterCV->version_) {
+                    crashVectorInUse_[cvId] = masterCV;
+                    cv = masterCV;
                 }
                 // Add cv to broadcast
                 for (uint32_t i = 0; i < 5; i++) {
@@ -600,7 +599,7 @@ namespace nezha {
         if (msgHdr->msgType == MessageType::SYNC_INDEX) {
             IndexSync idxSyncMsg;
             if (idxSyncMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
-                if (!CheckViewAndCV()) {
+                if (!CheckViewAndCV(idxSyncMsg.view(), idxSyncMsg.cv())) {
                     return;
                 }
 
@@ -745,7 +744,7 @@ namespace nezha {
     }
 
     void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
-        if (!CheckMsgLength(msgBuffer, msgLen)) {
+        if (NULL == CheckMsgLength(msgBuffer, msgLen)) {
             return;
         }
         AskIndex askIndex;
@@ -761,8 +760,8 @@ namespace nezha {
                 if (logEnd > askIndex.logidend()) {
                     logEnd = askIndex.logidend();
                 }
-                if (logEnd > logBegin + 50) {
-                    logEnd = logBegin + 50;
+                if (logEnd > logBegin + 25) {
+                    logEnd = logBegin + 25;
                 }
                 indexSyncMsg.set_logidend(logEnd);
                 for (uint32_t logid = indexSyncMsg.logidbegin(); logid <= indexSyncMsg.logidend(); logid++) {
@@ -770,7 +769,14 @@ namespace nezha {
                     indexSyncMsg.add_deadlines(entry->deadline);
                     indexSyncMsg.add_reqkeys(entry->reqKey);
                 }
-                // no need to piggyback crash vector
+                // Piggyback crash vector
+                crashVectorInUse_[indexAckCVIdx_] = crashVectorInUse_[0].load();
+                CrashVectorStruct* cv = crashVectorInUse_[indexAckCVIdx_].load();
+
+                for (uint32_t i = 0; i < replicaNum_; i++) {
+                    indexSyncMsg.add_cv(cv->cv_[i]);
+                }
+
                 char buffer[UDP_BUFFER_SIZE];
                 std::string serializedString = indexSyncMsg.SerializeAsString();
                 MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
@@ -907,6 +913,20 @@ namespace nezha {
     }
 
     void Replica::ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
+        MessageHeader* msgHdr = CheckMsgLength(msgBuffer, msgLen);
+        if (!msgHdr) {
+            return;
+        }
+        if (msgBuffer[0] == MessageType::VIEWCHANGE_REQ) {
+            ViewChangeRequest viewChangeReq;
+            if (viewChangeReq.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessViewChangeReq(viewChangeReq);
+            }
+
+        }
+        else {
+            LOG(WARNING) << "Unexpected message type " << (int)msgBuffer[0];
+        }
 
     }
 
@@ -931,14 +951,16 @@ namespace nezha {
 
     void Replica::InitiateViewChange() {
         // Broadcast VIEW-CHANGE-REQ to all replicas
+        // VIEW-CHANGE-REQ and VIEW-CHANGE are combined here (refer to Algorithm-2 in the paper)
         ViewChangeRequest viewChangeReq;
         viewChangeReq.set_view(viewNum_);
         viewChangeReq.set_replicaid(replicaId_);
-        CrashVectorStruct* cv = crashVector_.get(cvVersionInUse_[0]);
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
         for (uint32_t i = 0; i < replicaNum_; i++) {
             viewChangeReq.add_cv(cv->cv_[i]);
         }
-
+        viewChangeReq.set_syncpoint(maxSyncedLogId_);
+        viewChangeReq.set_lastnormalview(lastNormalView_);
 
         std::string serializedString = viewChangeReq.SerializeAsString();
         char buffer[UDP_BUFFER_SIZE];
@@ -952,15 +974,41 @@ namespace nezha {
                 // no need to send to myself
                 masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
             }
-            // 
+
         }
-        // Send VIEW-CHANGE to the new leader
+
     }
 
-    bool Replica::CheckViewAndCV() {
-        // TODO: When it is false, just update status to viewchange, and then leave it to master thread
-        // Freshen heartbeat time
+    void Replica::ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq)
+    {
+        // if (!CheckViewAndCV(viewChangeReq.view(), viewChangeReq.cv())) {
+        //     return;
+        // }
+
+
+    }
+
+    bool Replica::CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv) {
+        if (view < this->viewNum_) {
+            // old message
+            return false;
+        }
+        if (view > this->viewNum_) {
+            // new view, update status and wait for master thread to handle the situation
+            status_ = ReplicaStatus::VIEWCHANGE;
+            return false;
+        }
+        // View is okay, freshen heartbeat time
         lastHeartBeatTime_ = GetMicrosecondTimestamp();
+
+        // Check crashVector
+        CrashVectorStruct* masterCV = crashVectorInUse_[0];
+        for (int i = 0; i < cv.size(); i++) {
+            if (masterCV->cv_[i] > cv.at(i)) {
+                // The message has old cv, may be a stray message
+                return false;
+            }
+        }
         return true;
     }
     std::string Replica::ApplicationExecute(Request* req) {
@@ -969,23 +1017,23 @@ namespace nezha {
     bool Replica::AmLeader() {
         return (viewNum_ % replicaNum_ == replicaId_);
     }
-    bool Replica::CheckMsgLength(const char* msgBuffer, const int msgLen) {
+    MessageHeader* Replica::CheckMsgLength(const char* msgBuffer, const int msgLen) {
         if (msgLen < 0) {
             LOG(WARNING) << "\tmsgLen=" << msgLen;
-            return false;
+            return NULL;
         }
         if ((uint32_t)msgLen < sizeof(MessageHeader)) {
             LOG(WARNING) << "\tmsgLen=" << msgLen;
-            return false;
+            return NULL;
         }
-        const MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
+        MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
 
         if (msgHdr->msgLen == msgLen - sizeof(MessageHeader)) {
-            return true;
+            return msgHdr;
         }
         else {
             LOG(WARNING) << "Incomplete message: expected length " << msgHdr->msgLen + sizeof(MessageHeader) << "\tbut got " << msgLen;
-            return false;
+            return NULL;
         }
 
     }

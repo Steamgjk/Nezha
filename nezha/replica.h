@@ -47,6 +47,7 @@ namespace nezha {
         YAML::Node replicaConfig_;
 
         std::atomic<uint32_t> viewNum_;
+        std::atomic<uint32_t> lastNormalView_;
         std::atomic<uint32_t> replicaId_;
         std::atomic<uint32_t> replicaNum_;
         std::atomic<int> status_; // Worker threads check status to decide whether they should stop (for view change)
@@ -102,11 +103,12 @@ namespace nezha {
         uint32_t roundRobinIndexAskIdx_;
         uint32_t roundRobinRequestAskIdx_;
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector
-        std::atomic<uint32_t>* cvVersionInUse_;
+        std::atomic<CrashVectorStruct*>* crashVectorInUse_;
+        uint32_t indexRecvCVIdx_;
+        uint32_t indexAckCVIdx_;
         std::map<uint32_t, IndexSync> pendingIndexSync_;
         std::set<uint32_t> missedReqKeys_; // Missed Request during index synchronization
         std::pair<uint32_t, uint32_t> missedIndices_; // Missed Indices during index synchronization
-
 
 
         ConcurrentMap<uint64_t, Address*> proxyAddressMap_; // Inserted by receiver threads, and looked up by fast/slow reply threads
@@ -126,10 +128,13 @@ namespace nezha {
         void LaunchThreads();
         void StartViewChange();
         void InitiateViewChange();
+
+        void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
         std::string ApplicationExecute(Request* req);
         bool AmLeader();
-        bool CheckMsgLength(const char* msgBuffer, const int msgLen);
-        bool CheckViewAndCV();
+        MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
+        bool CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv);
+
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.yaml"));
         ~Replica();
@@ -154,9 +159,8 @@ namespace nezha {
 
         void FollowerIndexSyncReceive(int id = -1, int fd = -1);
         void LeaderIndexSyncReceive(int id = -1, int fd = -1);
-        bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void RequestReceive(int id = -1, int fd = -1);
-
+        bool ProcessIndexSync(const IndexSync& idxSyncMsg);
 
         void Master();
         void MasterReceive(int fd = -1);
