@@ -118,8 +118,6 @@ namespace nezha {
 
 
         ConcurrentMap<uint64_t, Request*> requestMap_;
-        ConcurrentMap<uint64_t, Reply*> fastReplyMap_;
-        ConcurrentMap<uint64_t, Reply*> slowReplyMap_;
         ConcurrentQueue<Request*> processQu_;
         std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
         std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
@@ -133,6 +131,7 @@ namespace nezha {
         void InitiateViewChange(const uint32_t view);
         void SendStartView(const int toReplicaId);
 
+        bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
         void ProcessViewChange(const ViewChange& viewChange);
         std::string ApplicationExecute(Request* req);
@@ -162,14 +161,6 @@ namespace nezha {
         void IndexRecvTd();
         void MissedIndexAckTd();
         void MissedReqAckTd();
-
-        void FollowerIndexSyncReceive(int id = -1, int fd = -1);
-        void LeaderIndexSyncReceive(int id = -1, int fd = -1);
-        void RequestReceive(int id = -1, int fd = -1);
-        bool ProcessIndexSync(const IndexSync& idxSyncMsg);
-
-        void Master();
-        void MasterReceive(int fd = -1);
     };
 
 
