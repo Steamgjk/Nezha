@@ -57,8 +57,13 @@ message ViewChange {
     uint32 view = 1;
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
-    uint32 syncpoint = 4;
-    uint32 lastnormalview= 5;
+    uint32 lastnormalview= 4;
+    // In the algo, we should include the logs in the viewchange msg
+    // But that is too large. As an implementation optimization, Let's use the following 3 attributes, and later do state transfer to get the necessary entries
+    uint32 syncpoint = 5;
+    uint32 unsyncedlogbegin= 6;
+    uint32 unsyncedlogend = 7;
+
 }
 
 message StartView {
@@ -66,4 +71,20 @@ message StartView {
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
     uint32 syncpoint = 4;
+}
+
+message StateTransferRequest {
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    repeated uint32 logbegin = 3;
+    repeated uint32 logend = 4;
+}
+
+message StateTransferReply {
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    repeated uint32 cv = 3;
+    uint32 logbegin = 4;
+    uint32 logend = 5;
+    repeated Request reqs = 6;
 }

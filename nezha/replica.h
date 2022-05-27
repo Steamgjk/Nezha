@@ -46,7 +46,7 @@ namespace nezha {
     private:
         YAML::Node replicaConfig_;
 
-        std::atomic<uint32_t> viewNum_;
+        std::atomic<uint32_t> viewId_;
         std::atomic<uint32_t> lastNormalView_;
         std::atomic<uint32_t> replicaId_;
         std::atomic<uint32_t> replicaNum_;
@@ -110,6 +110,12 @@ namespace nezha {
         std::set<uint32_t> missedReqKeys_; // Missed Request during index synchronization
         std::pair<uint32_t, uint32_t> missedIndices_; // Missed Indices during index synchronization
 
+        std::set < std::pair<uint32_t, uint32_t>> stateTransferIndices_;
+        uint32_t stateTransferTargetReplica_;
+        std::function<void(void)> stateTransferCallback_;
+        // TODO: There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
+
+        std::map<uint32_t, ViewChange> viewChangeSet_;
 
         ConcurrentMap<uint64_t, Address*> proxyAddressMap_; // Inserted by receiver threads, and looked up by fast/slow reply threads
 
@@ -130,15 +136,24 @@ namespace nezha {
         void SendViewChange();
         void InitiateViewChange(const uint32_t view);
         void SendStartView(const int toReplicaId);
+        void EnterNewView();
 
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
         void ProcessViewChange(const ViewChange& viewChange);
+        void ProcessStateTransferReq(const StateTransferRequest& stateTransferReq);
+        void ProcessStateTransferRep(const StateTransferReply& stateTransferRep);
+
+
         std::string ApplicationExecute(Request* req);
         bool AmLeader();
         MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
         bool CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv);
         bool CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv);
+        bool Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv);
+        void MergeLog();
+        void MergeSyncedLog();
+        void MergeUnSyncedLog();
 
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.yaml"));
@@ -148,7 +163,7 @@ namespace nezha {
         void ReceiveIndexSyncMessage(char* msgBuffer, int msgLen);
         void ReceiveAskMissedReq(char* msgBuffer, int msgLen);
         void ReceiveAskMissedIdx(char* msgBuffer, int msgLen);
-        void ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
+        void ReceiveMasterMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
         void AskMissedIndex();
         void AskMissedRequest();
         void CheckHeartBeat();

@@ -6,7 +6,7 @@ namespace nezha {
         // Load Config
         replicaConfig_ = YAML::LoadFile(configFile);
 
-        viewNum_ = 0;
+        viewId_ = 0;
         lastNormalView_ = 0;
         replicaId_ = replicaConfig_["replica-id"].as<int>();
         replicaNum_ = replicaConfig_["replica-ips"].size();
@@ -25,7 +25,7 @@ namespace nezha {
 
 
         status_ = ReplicaStatus::NORMAL;
-        LOG(INFO) << "viewNum_=" << viewNum_
+        LOG(INFO) << "viewId_=" << viewId_
             << "\treplicaId=" << replicaId_
             << "\treplicaNum=" << replicaNum_
             << "\tkeyNum=" << keyNum;
@@ -55,7 +55,7 @@ namespace nezha {
         int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
         masterContext_.endPoint_ = new UDPSocketEndpoint(ip, port, true);
         masterContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->ReceiverOtherMessage(msgBuffer, bufferLen, sender, receiverEP);
+            ((Replica*)ctx)->ReceiveMasterMessage(msgBuffer, bufferLen, sender, receiverEP);
             }, this);
         // Register a timer to monitor replica status
         masterContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
@@ -412,7 +412,7 @@ namespace nezha {
         workerCounter_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
-        reply.set_view(viewNum_);
+        reply.set_view(viewId_);
         reply.set_replytype(MessageType::FAST_REPLY);
         reply.set_replicaid(replicaId_);
         bool amLeader = AmLeader();
@@ -501,7 +501,7 @@ namespace nezha {
         char buffer[UDP_BUFFER_SIZE];
         LogEntry* entry = NULL;
         Reply reply;
-        reply.set_view(viewNum_);
+        reply.set_view(viewId_);
         reply.set_replytype(MessageType::SLOW_REPLY);
         reply.set_replicaid(replicaId_);
         reply.set_hash("");
@@ -548,7 +548,7 @@ namespace nezha {
             uint32_t logEnd = maxSyncedLogId_;
             if (lastSyncedLogId < logEnd) {
                 // Leader has some indices to sync
-                indexSyncMsg.set_view(this->viewNum_);
+                indexSyncMsg.set_view(this->viewId_);
                 indexSyncMsg.set_logidbegin(lastSyncedLogId + 1);
                 logEnd = (lastSyncedLogId + 50 < logEnd) ? (lastSyncedLogId + 50) : logEnd;
                 indexSyncMsg.set_logidend(logEnd);
@@ -565,9 +565,8 @@ namespace nezha {
                     cv = masterCV;
                 }
                 // Add cv to broadcast
-                for (uint32_t i = 0; i < 5; i++) {
-                    indexSyncMsg.add_cv(cv->cvHash_.item[i]);
-                }
+                indexSyncMsg.clear_cv();
+                indexSyncMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
 
                 std::string serializedString = indexSyncMsg.SerializeAsString();
                 msgHdr->msgLen = serializedString.length();
@@ -755,7 +754,7 @@ namespace nezha {
             while (logBegin <= maxSyncedLogId_) {
                 // I can help
                 IndexSync indexSyncMsg;
-                indexSyncMsg.set_view(this->viewNum_);
+                indexSyncMsg.set_view(this->viewId_);
                 indexSyncMsg.set_logidbegin(logBegin);
                 uint32_t logEnd = maxSyncedLogId_;
                 if (logEnd > askIndex.logidend()) {
@@ -774,9 +773,8 @@ namespace nezha {
                 crashVectorInUse_[indexAckCVIdx_] = crashVectorInUse_[0].load();
                 CrashVectorStruct* cv = crashVectorInUse_[indexAckCVIdx_].load();
 
-                for (uint32_t i = 0; i < replicaNum_; i++) {
-                    indexSyncMsg.add_cv(cv->cv_[i]);
-                }
+                indexSyncMsg.clear_cv();
+                indexSyncMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
 
                 char buffer[UDP_BUFFER_SIZE];
                 std::string serializedString = indexSyncMsg.SerializeAsString();
@@ -913,15 +911,22 @@ namespace nezha {
         }
     }
 
-    void Replica::ReceiverOtherMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
+    void Replica::ReceiveMasterMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
         MessageHeader* msgHdr = CheckMsgLength(msgBuffer, msgLen);
         if (!msgHdr) {
             return;
         }
-        if (msgBuffer[0] == MessageType::VIEWCHANGE_REQ) {
+        if (msgHdr->msgType == MessageType::VIEWCHANGE_REQ) {
             ViewChangeRequest viewChangeReq;
             if (viewChangeReq.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
                 ProcessViewChangeReq(viewChangeReq);
+            }
+
+        }
+        else if (msgHdr->msgType == MessageType::VIEWCHANGE) {
+            ViewChange viewChangeMsg;
+            if (viewChangeMsg.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessViewChange(viewChangeMsg);
             }
 
         }
@@ -944,7 +949,7 @@ namespace nezha {
             usleep(1000);
         }
         // Every other threads have stopped, no worry about data race any more
-        viewNum_++;
+        viewId_++;
         // Initiate the ViewChange
         masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
 
@@ -952,12 +957,10 @@ namespace nezha {
 
     void Replica::SendViewChangeRequest(const int toReplicaId) {
         ViewChangeRequest viewChangeReq;
-        viewChangeReq.set_view(viewNum_);
+        viewChangeReq.set_view(viewId_);
         viewChangeReq.set_replicaid(replicaId_);
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
-        for (uint32_t i = 0; i < replicaNum_; i++) {
-            viewChangeReq.add_cv(cv->cv_[i]);
-        }
+        viewChangeReq.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
 
         std::string serializedString = viewChangeReq.SerializeAsString();
         char buffer[UDP_BUFFER_SIZE];
@@ -982,13 +985,13 @@ namespace nezha {
 
     void Replica::SendViewChange() {
         ViewChange viewChangeMsg;
-        viewChangeMsg.set_view(viewNum_);
+        viewChangeMsg.set_view(viewId_);
         viewChangeMsg.set_replicaid(replicaId_);
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
-        for (uint32_t i = 0; i < replicaNum_; i++) {
-            viewChangeMsg.add_cv(cv->cv_[i]);
-        }
+        viewChangeMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         viewChangeMsg.set_syncpoint(maxSyncedLogId_);
+        viewChangeMsg.set_unsyncedlogbegin(minUnSyncedLogId_);
+        viewChangeMsg.set_unsyncedlogend(maxUnSyncedLogId_);
         viewChangeMsg.set_lastnormalview(lastNormalView_);
 
         std::string serializedString = viewChangeMsg.SerializeAsString();
@@ -998,12 +1001,12 @@ namespace nezha {
         msgHdr->msgLen = serializedString.length();
         memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), serializedString.length());
 
-        masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewNum_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
+        masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewId_ % replicaNum_]), buffer, msgHdr->msgLen + sizeof(MessageHeader));
 
     }
 
     void Replica::InitiateViewChange(const uint32_t view) {
-        viewNum_ = view;
+        viewId_ = view;
         status_ = ReplicaStatus::VIEWCHANGE;
         // Launch the timer
         if (masterContext_.endPoint_->isRegistered(viewChangeTimer_) == false) {
@@ -1038,12 +1041,25 @@ namespace nezha {
             // stray message
             return;
         }
-        if (viewChangeReq.view() > viewNum_) {
+        if (Aggregated(viewChangeReq.cv())) {
+            // If cv is updated, then it is likely that some messages in viewChangeSet_ become stray, so remove them 
+            CrashVectorStruct* cv = crashVectorInUse_[0];
+            for (uint32_t i = 0; i < replicaNum_; i++) {
+                auto iter = viewChangeSet_.find(i);
+                if (iter != viewChangeSet_.end() && iter->second.cv(i) < cv->cv_[i]) {
+                    viewChangeSet_.erase(i);
+                }
+            }
+        }
+        if (viewChangeReq.view() > viewId_) {
             InitiateViewChange(viewChangeReq.view());
         }
         else {
             if (status_ == ReplicaStatus::NORMAL) {
                 SendStartView(viewChangeReq.replicaid());
+            }
+            else {
+                SendViewChange();
             }
         }
     }
@@ -1057,8 +1073,11 @@ namespace nezha {
             // stray message
             return;
         }
+
+        Aggregated(viewChange.cv());
+
         if (status_ == ReplicaStatus::NORMAL) {
-            if (viewChange.view() > viewNum_) {
+            if (viewChange.view() > viewId_) {
                 InitiateViewChange(viewChange.view());
             }
             else {
@@ -1067,21 +1086,100 @@ namespace nezha {
             }
         }
         else if (status_ == ReplicaStatus::VIEWCHANGE) {
-            if (viewChange.view() > viewNum_) {
+            if (viewChange.view() > viewId_) {
                 InitiateViewChange(viewChange.view());
             }
-            else if (viewChange.view() < viewNum_) {
+            else if (viewChange.view() < viewId_) {
                 SendViewChangeRequest(viewChange.replicaid());
             }
+            else {
+                viewChangeSet_[viewChange.replicaid()] = viewChange;
+                // If cv is updated, then it is likely that some messages in viewChangeSet_ become stray, so remove them 
+                CrashVectorStruct* cv = crashVectorInUse_[0];
+                for (uint32_t i = 0; i < replicaNum_; i++) {
+                    auto iter = viewChangeSet_.find(i);
+                    if (iter != viewChangeSet_.end() && iter->second.cv(i) < cv->cv_[i]) {
+                        viewChangeSet_.erase(i);
+                    }
+                }
+                if (viewChangeSet_.size() >= replicaNum_ / 2) {
+                    assert(viewChangeSet_.find(replicaId_) == viewChangeSet_.end());
+                    // Got f viewChange
+                    // Plus myself, got f+1 viewChange messages 
+                    ViewChange myvc;
+                    CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+                    myvc.mutable_cv()->Add(masterCV->cv_.begin(), masterCV->cv_.end());
+                    myvc.set_view(viewId_);
+                    myvc.set_replicaid(replicaId_);
+                    myvc.set_syncpoint(maxSyncedLogId_);
+                    myvc.set_unsyncedlogbegin(minUnSyncedLogId_);
+                    myvc.set_unsyncedlogend(maxUnSyncedLogId_);
+                    myvc.set_lastnormalview(lastNormalView_);
+                    viewChangeSet_[replicaId_] = myvc;
+                    MergeSyncedLog();
+                }
+
+            }
+        }
+        else {
+            LOG(WARNING) << "Unexpected Status " << status_;
         }
     }
 
+    void Replica::MergeSyncedLog() {
+        uint32_t largestNormalView = viewChangeSet_.begin()->second.lastnormalview();
+        uint32_t largestSyncPoint = 2;
+        for (auto& kv : viewChangeSet_) {
+            if (largestNormalView < kv.second.view()) {
+                largestNormalView = kv.second.view();
+            }
+        }
+
+        stateTransferTargetReplica_ = replicaId_;
+        for (auto& kv : viewChangeSet_) {
+            if (kv.second.lastnormalview() == largestNormalView && largestSyncPoint < kv.second.syncpoint()) {
+                largestSyncPoint = kv.second.syncpoint();
+                stateTransferTargetReplica_ = kv.second.replicaid();
+            }
+        }
+
+        // Directly copy the synced entries
+        stateTransferIndices_.clear();
+        if (largestNormalView == this->lastNormalView_) {
+            if (maxSyncedLogId_ < largestSyncPoint) {
+                stateTransferIndices_.insert(std::pair<uint32_t, uint32_t>(maxSyncedLogId_ + 1, largestSyncPoint));
+            }
+            // else: no need to do state transfer, because this replica has all synced entries
+        }
+        else {
+            stateTransferIndices_.insert(std::pair<uint32_t, uint32_t>(committedLogId_ + 1, largestSyncPoint));
+        }
+
+        if (!stateTransferIndices_.empty()) {
+            // Start state transfer
+            // After this state transfer has been completed, continue to execute the callback (MergeUnsyncedLog)
+            stateTransferCallback_ = std::bind(&Replica::MergeUnSyncedLog, this);
+        }
+        else {
+            // Directly go to the second stage of merge log
+            MergeUnSyncedLog();
+        }
+    }
+
+    void Replica::MergeUnSyncedLog() {
+        stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
+    }
+
+    void Replica::EnterNewView() {
+
+    }
+
     bool Replica::CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv) {
-        if (view < this->viewNum_) {
+        if (view < this->viewId_) {
             // old message
             return false;
         }
-        if (view > this->viewNum_) {
+        if (view > this->viewId_) {
             // new view, update status and wait for master thread to handle the situation
             status_ = ReplicaStatus::VIEWCHANGE;
             return false;
@@ -1101,14 +1199,14 @@ namespace nezha {
     }
 
     bool Replica::CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv) {
-        // This will check and Update crashVector
-        bool isStray = false;
-        bool needAggregate = false;
+        CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+        return (cv.at(senderId) < masterCV->cv_[senderId]);
+    }
+
+    bool Replica::Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv) {
         CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
         std::vector<uint32_t> maxCV(masterCV->cv_);
-        if (cv.at(senderId) < maxCV[senderId]) {
-            isStray = true;
-        }
+        bool needAggregate = false;
         for (uint32_t i = 0; i < replicaNum_; i++) {
             if (maxCV[i] < cv.at(i)) {
                 // The incoming cv has fresher elements
@@ -1121,15 +1219,14 @@ namespace nezha {
             crashVector_.assign(newCV->version_, newCV);
             crashVectorInUse_[0] = newCV;
         }
-        return isStray;
-
+        return needAggregate;
     }
 
     std::string Replica::ApplicationExecute(Request* req) {
         return "";
     }
     bool Replica::AmLeader() {
-        return (viewNum_ % replicaNum_ == replicaId_);
+        return (viewId_ % replicaNum_ == replicaId_);
     }
     MessageHeader* Replica::CheckMsgLength(const char* msgBuffer, const int msgLen) {
         if (msgLen < 0) {
