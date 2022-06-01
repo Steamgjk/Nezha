@@ -33,10 +33,15 @@ namespace MessageType {
     extern char MISSED_REQ;
     extern char VIEWCHANGE_REQ;
     extern char VIEWCHANGE;
-    extern char STARTVIEW;
+    extern char START_VIEW;
+    extern char STATE_TRANSFER_REQUEST;
+    extern char STATE_TRANSFER_REPLY;
 };
 
-
+namespace StateTransferType {
+    extern char SYNCED_ENTRY;
+    extern char UNSYNCED_ENTRY;
+}
 
 
 union SHA_HASH {

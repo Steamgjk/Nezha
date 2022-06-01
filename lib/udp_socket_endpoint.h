@@ -9,9 +9,10 @@
 #include <functional>
 #include <set>
 #include "lib/address.h"
+#include "lib/utils.h"
+#include "nezha/nezha-proto.pb.h"
 
-
-
+using namespace nezha::proto;
 
 // TODO: In the future, we will extract a base class, and from that class, we derive two sub-classes: one for UDP and the other for TCP
 
@@ -33,7 +34,7 @@ public:
 
     int SendMsgTo(const Address& dstAddr, const std::string& msg);
     int SendMsgTo(const Address& dstAddr, const char* buffer, const uint32_t bufferLen);
-
+    int SendMsgTo(const Address& dstAddr, const google::protobuf::Message& msg, const char msgType);
 
     bool RegisterMsgHandler(MsgHandlerStruct* msgHdl);
     bool UnregisterMsgHandler(MsgHandlerStruct* msgHdl);

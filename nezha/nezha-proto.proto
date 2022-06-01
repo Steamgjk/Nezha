@@ -63,28 +63,33 @@ message ViewChange {
     uint32 syncpoint = 5;
     uint32 unsyncedlogbegin= 6;
     uint32 unsyncedlogend = 7;
-
 }
+
+
+message StateTransferRequest {
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    bool issynced = 3;
+    uint32 logbegin = 4;
+    uint32 logend = 5;
+    repeated uint64 syncpoint = 6; // optional
+}
+
+
+message StateTransferReply {
+    uint32 view = 1;
+    uint32 replicaid = 2;
+    repeated uint32 cv = 3;
+    bool issynced = 4;
+    uint32 logbegin = 5;
+    uint32 logend = 6;
+    repeated Request reqs = 7;
+}
+
 
 message StartView {
     uint32 view = 1;
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
     uint32 syncpoint = 4;
-}
-
-message StateTransferRequest {
-    uint32 view = 1;
-    uint32 replicaid = 2;
-    repeated uint32 logbegin = 3;
-    repeated uint32 logend = 4;
-}
-
-message StateTransferReply {
-    uint32 view = 1;
-    uint32 replicaid = 2;
-    repeated uint32 cv = 3;
-    uint32 logbegin = 4;
-    uint32 logend = 5;
-    repeated Request reqs = 6;
 }

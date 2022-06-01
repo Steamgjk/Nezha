@@ -21,8 +21,16 @@ namespace MessageType {
     char MISSED_REQ = 9;
     char VIEWCHANGE_REQ = 10;
     char VIEWCHANGE = 11;
-    char STARTVIEW = 12;
+    char START_VIEW = 12;
+    char STATE_TRANSFER_REQUEST = 13;
+    char STATE_TRANSFER_REPLY = 14;
 };
+
+
+namespace StateTransferType {
+    char SYNCED_ENTRY = 1;
+    char UNSYNCED_ENTRY = 2;
+}
 
 
 SHA_HASH CalculateHash(uint64_t deadline, uint64_t reqKey) {

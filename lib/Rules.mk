@@ -7,9 +7,9 @@ LIB-address :=  $(o)address.o
 
 LIB-utils := $(o)utils.o
 
-LIB-udp-socket := $(o)udp_socket_endpoint.o $(LIB-address)
+LIB-udp-socket := $(o)udp_socket_endpoint.o $(LIB-address) $(LIB-utils)
 
 
-$(info LIB-udp-socket is $(LIB-udp-socket))
+$(info LIB-udp-socket is $(LIB-udp-socket)) 
 
 # include $(d)tests/Rules.mk

@@ -189,6 +189,14 @@ namespace nezha {
             ((Replica*)ctx)->BroadcastViewChange();
             }, this, replicaConfig_["view-change-period-ms"].as<int>());
 
+
+        roundRobinRequestProcessIdx_ = 0;
+
+        stateTransferTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->SendStateTransferRequest();
+            }, this, replicaConfig_["state-transfer-period-ms"].as<int>());
+
+        stateRequestTransferBatch_ = replicaConfig_["request-transfer-max-batch"].as<uint32_t>();
     }
 
 
@@ -357,55 +365,65 @@ namespace nezha {
 
             // Polling early-buffer
             uint64_t nowTime = GetMicrosecondTimestamp();
-            uint64_t opKeyAndId = 0ul;
+
             while ((!earlyBuffer_.empty()) && nowTime >= earlyBuffer_.begin()->first.first) {
                 uint64_t deadline = earlyBuffer_.begin()->first.first;
                 uint64_t reqKey = earlyBuffer_.begin()->first.second;
                 Request* req = earlyBuffer_.begin()->second;
-                SHA_HASH myHash = CalculateHash(deadline, reqKey);
-                SHA_HASH hash = myHash;
-                if (amLeader) {
-                    if (maxSyncedLogIdByKey_[req->key()] > 1) {
-                        // There are previous (non-commutative) requests appended
-                        opKeyAndId = req->key();
-                        opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[req->key()]));
-                        LogEntry* prev = syncedEntriesByKey_.get(opKeyAndId);
-                        hash.XOR(prev->hash);
-                    }
-                    std::string result = ApplicationExecute(req);
-                    LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), result, req->proxyid());
-                    fastReplyQu_[(roundRobin++) % replyShard].enqueue(entry);
-                    uint32_t logId = maxSyncedLogId_ + 1;
-                    syncedEntries_.assign(logId, entry);
-                    syncedReq2LogId_.assign(reqKey, logId);
-                    maxSyncedLogIdByKey_[req->key()]++;
-                    opKeyAndId = req->key();
-                    opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[req->key()]));
-                    syncedEntriesByKey_.assign(opKeyAndId, entry);
-                    maxSyncedLogId_++;
-                }
-                else {
-                    if (maxUnSyncedLogIdByKey_[req->key()] > 1) {
-                        // There are previous (non-commutative) requests appended
-                        opKeyAndId = req->key();
-                        opKeyAndId = ((opKeyAndId << 32u) | (maxUnSyncedLogIdByKey_[req->key()]));
-                        LogEntry* prev = unsyncedEntries_.get(opKeyAndId);
-                        hash.XOR(prev->hash);
-                    }
-                    LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, req->key(), "", req->proxyid());
-                    fastReplyQu_[(roundRobin++) % replyShard].enqueue(entry);
-                    uint32_t logId = maxUnSyncedLogId_ + 1;
-                    unsyncedEntries_.assign(logId, entry);
-                    unsyncedReq2LogId_.assign(reqKey, logId);
-                    maxUnSyncedLogIdByKey_[req->key()]++;
-                    unsyncedEntriesByKey_.assign(opKeyAndId, entry);
-                    maxUnSyncedLogId_++;
-                }
+                ProcessRequest(deadline, reqKey, *req, AmLeader(), true);
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
         }
         // When this thread exits (for view change), decrease the atomic variable workerCounter_
         workerCounter_.fetch_sub(1);
+    }
+
+    void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq, const bool sendReply) {
+        SHA_HASH myHash = CalculateHash(deadline, reqKey);
+        SHA_HASH hash = myHash;
+        uint64_t opKeyAndId = 0ul;
+        LogEntry* entry = NULL;
+        if (isSynedReq) {
+            if (maxSyncedLogIdByKey_[request.key()] > 1) {
+                // There are previous (non-commutative) requests appended
+                opKeyAndId = request.key();
+                opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[request.key()]));
+                LogEntry* prev = syncedEntriesByKey_.get(opKeyAndId);
+                hash.XOR(prev->hash);
+            }
+            std::string result = ApplicationExecute(request);
+            entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), result, request.proxyid());
+            if (sendReply) {
+                fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
+            }
+            uint32_t logId = maxSyncedLogId_ + 1;
+            syncedEntries_.assign(logId, entry);
+            syncedReq2LogId_.assign(reqKey, logId);
+            maxSyncedLogIdByKey_[request.key()]++;
+            opKeyAndId = request.key();
+            opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[request.key()]));
+            syncedEntriesByKey_.assign(opKeyAndId, entry);
+            maxSyncedLogId_++;
+        }
+        else {
+            if (maxUnSyncedLogIdByKey_[request.key()] > 1) {
+                // There are previous (non-commutative) requests appended
+                opKeyAndId = request.key();
+                opKeyAndId = ((opKeyAndId << 32u) | (maxUnSyncedLogIdByKey_[request.key()]));
+                LogEntry* prev = unsyncedEntries_.get(opKeyAndId);
+                hash.XOR(prev->hash);
+            }
+            entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), "", request.proxyid());
+            if (sendReply) {
+                fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
+            }
+            uint32_t logId = maxUnSyncedLogId_ + 1;
+            unsyncedEntries_.assign(logId, entry);
+            unsyncedReq2LogId_.assign(reqKey, logId);
+            maxUnSyncedLogIdByKey_[request.key()]++;
+            unsyncedEntriesByKey_.assign(opKeyAndId, entry);
+            maxUnSyncedLogId_++;
+        }
     }
 
     void Replica::FastReplyTd(int id, int cvId) {
@@ -930,6 +948,19 @@ namespace nezha {
             }
 
         }
+        else if (msgHdr->msgType == MessageType::STATE_TRANSFER_REQUEST) {
+            StateTransferRequest stateTransferReq;
+            if (stateTransferReq.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessStateTransferRequest(stateTransferReq);
+            }
+        }
+        else if (msgHdr->msgType == MessageType::STATE_TRANSFER_REPLY) {
+            StateTransferReply stateTransferRep;
+            if (stateTransferRep.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessStateTransferReply(stateTransferRep);
+            }
+        }
+
         else {
             LOG(WARNING) << "Unexpected message type " << (int)msgBuffer[0];
         }
@@ -1116,7 +1147,7 @@ namespace nezha {
                     myvc.set_unsyncedlogend(maxUnSyncedLogId_);
                     myvc.set_lastnormalview(lastNormalView_);
                     viewChangeSet_[replicaId_] = myvc;
-                    MergeSyncedLog();
+                    TransferSyncedLog();
                 }
 
             }
@@ -1126,7 +1157,8 @@ namespace nezha {
         }
     }
 
-    void Replica::MergeSyncedLog() {
+    void Replica::TransferSyncedLog() {
+
         uint32_t largestNormalView = viewChangeSet_.begin()->second.lastnormalview();
         uint32_t largestSyncPoint = 2;
         for (auto& kv : viewChangeSet_) {
@@ -1135,44 +1167,250 @@ namespace nezha {
             }
         }
 
-        stateTransferTargetReplica_ = replicaId_;
+        uint32_t targetReplicaId = replicaId_;
+        transferSyncedEntry_ = true;
         for (auto& kv : viewChangeSet_) {
             if (kv.second.lastnormalview() == largestNormalView && largestSyncPoint < kv.second.syncpoint()) {
                 largestSyncPoint = kv.second.syncpoint();
-                stateTransferTargetReplica_ = kv.second.replicaid();
+                targetReplicaId = kv.second.replicaid();
             }
         }
 
-        // Directly copy the synced entries
         stateTransferIndices_.clear();
+        // Directly copy the synced entries
         if (largestNormalView == this->lastNormalView_) {
             if (maxSyncedLogId_ < largestSyncPoint) {
-                stateTransferIndices_.insert(std::pair<uint32_t, uint32_t>(maxSyncedLogId_ + 1, largestSyncPoint));
+                stateTransferIndices_[targetReplicaId] = std::pair<uint32_t, uint32_t>(maxSyncedLogId_ + 1, largestSyncPoint);
             }
-            // else: no need to do state transfer, because this replica has all synced entries
+            // Else: no need to do state transfer, because this replica has all synced entries
         }
         else {
-            stateTransferIndices_.insert(std::pair<uint32_t, uint32_t>(committedLogId_ + 1, largestSyncPoint));
+            stateTransferIndices_[targetReplicaId] = std::pair<uint32_t, uint32_t>(committedLogId_ + 1, largestSyncPoint);
         }
 
         if (!stateTransferIndices_.empty()) {
             // Start state transfer
             // After this state transfer has been completed, continue to execute the callback (MergeUnsyncedLog)
-            stateTransferCallback_ = std::bind(&Replica::MergeUnSyncedLog, this);
+
+            stateTransferCallback_ = std::bind(&Replica::TransferUnSyncedLog, this);
+            // Start the state tranfer timer
+            masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
         }
         else {
-            // Directly go to the second stage of merge log
-            MergeUnSyncedLog();
+            // Directly go to the second stage: transfer unsynced log
+            TransferUnSyncedLog();
         }
+    }
+
+    void Replica::TransferUnSyncedLog() {
+        // Get the unsynced logs from the f+1 remaining replicas
+        // TODO: If this process cannot be completed, rollback to view change
+        stateTransferIndices_.clear();
+        for (auto& kv : viewChangeSet_) {
+            stateTransferIndices_[kv.first] = std::pair<uint32_t, uint32_t>(kv.second.unsyncedlogbegin(), kv.second.unsyncedlogend());
+        }
+        transferSyncedEntry_ = false;
+        // After this state transfer is completed, this replica will enter the new view
+        stateTransferCallback_ = std::bind(&Replica::MergeUnSyncedLog, this);
+        masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
     }
 
     void Replica::MergeUnSyncedLog() {
-        stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
+        int f = replicaNum_ / 2;
+        int quorum = (f % 2 == 0) ? (f / 2 + 1) : (f / 2 + 2);
+        for (auto& kv : requestsToMerge_) {
+            uint64_t deadline = kv.first.first;
+            uint64_t reqKey = kv.first.second;
+            Request* request = kv.second.first;
+            int count = kv.second.second;
+            if (count >= quorum) {
+                if (syncedRequestMap_.get(reqKey) != NULL) {
+                    // at-most once
+                    delete request;
+                    continue;
+                }
+                syncedRequestMap_.assign(reqKey, request);
+                ProcessRequest(deadline, reqKey, *request);
+            }
+        }
+        requestsToMerge_.clear();
+        EnterNewView();
     }
 
     void Replica::EnterNewView() {
+        // Leader sends StartView to all the others
+        if (AmLeader()) {
+            StartView startView;
+            startView.set_replicaid(replicaId_);
+            startView.set_view(viewId_);
+            CrashVectorStruct* cv = crashVectorInUse_[0];
+            startView.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+            startView.set_syncpoint(maxSyncedLogId_);
+            for (uint32_t i = 0; i < replicaNum_; i++) {
+                if (i == replicaId_) {
+                    // No need to send to self
+                    continue;
+                }
+                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), startView, MessageType::STATE_TRANSFER_REQUEST);
+            }
+        }
+        else {
+            // Follower Directly start
+        }
+
 
     }
+
+    void Replica::SendStateTransferRequest() {
+        // TODO: If statetransfer cannot be completed within a certain amount of time, rollback to view change
+        StateTransferRequest request;
+        request.set_view(viewId_);
+        request.set_replicaid(replicaId_);
+        request.set_issynced(transferSyncedEntry_);
+        if (!transferSyncedEntry_) {
+            LogEntry* entry = syncedEntries_.get(maxSyncedLogId_);
+            request.add_syncpoint(entry->deadline);
+            request.add_syncpoint(entry->reqKey);
+        }
+        for (auto& stateTransferInfo : stateTransferIndices_) {
+            // Do not request too many entries at one time, otherwise, UDP packet cannot handle that
+            request.set_logbegin(stateTransferInfo.second.first);
+            if (stateTransferInfo.second.first + stateRequestTransferBatch_ <= stateTransferInfo.second.second) {
+                request.set_logend(stateTransferInfo.second.first + stateRequestTransferBatch_);
+            }
+            else {
+                request.set_logend(stateTransferInfo.second.second);
+            }
+
+            masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[stateTransferInfo.first]), request, MessageType::STATE_TRANSFER_REQUEST);
+        }
+
+    }
+
+    void Replica::ProcessStateTransferRequest(const StateTransferRequest& stateTransferRequest) {
+        if (!CheckView(stateTransferRequest.view())) {
+            return;
+        }
+        StateTransferReply reply;
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        const Address* requesterAddr = masterReceiver_[stateTransferRequest.replicaid()];
+        reply.set_replicaid(replicaId_);
+        reply.set_view(viewId_);
+        reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        reply.set_issynced(stateTransferRequest.issynced());
+        reply.set_logbegin(stateTransferRequest.logbegin());
+        reply.set_logend(stateTransferRequest.logend());
+        ConcurrentMap<uint64_t, Request*>& requestMap = reply.issynced() ? syncedRequestMap_ : unsyncedRequestMap_;
+        ConcurrentMap<uint32_t, LogEntry*>& entryMap = reply.issynced() ? syncedEntries_ : unsyncedEntries_;
+
+        // For Debug: Should be deleted after testing
+        if (reply.issynced()) {
+            assert(maxSyncedLogId_ >= reply.logend());
+        }
+        else {
+            assert(maxUnSyncedLogId_ >= reply.logend() && minUnSyncedLogId_ <= reply.logbegin());
+        }
+
+        std::pair<uint64_t, uint64_t> syncPoint(0, 0);
+        if (stateTransferRequest.syncpoint().size() >= 2) {
+            syncPoint.first = stateTransferRequest.syncpoint(0);
+            syncPoint.second = stateTransferRequest.syncpoint(1);
+        }
+
+        for (uint32_t j = reply.logbegin(); j <= reply.logend(); j++) {
+            LogEntry* entry = NULL;
+            Request* request = NULL;
+            do {
+                entry = entryMap.get(j);
+            } while (entry == NULL);
+            do {
+                request = requestMap.get(entry->reqKey);
+            } while (request == NULL);
+
+            std::pair<uint64_t, uint64_t> key(entry->deadline, entry->reqKey);
+            if (key <= syncPoint) {
+                assert(reply.issynced() == false);
+                continue;
+            }
+            reply.add_reqs()->CopyFrom(*request);
+            // Also piggyback the deadline
+            reply.mutable_reqs()->rbegin()->set_sendtime(entry->deadline);
+            reply.mutable_reqs()->rbegin()->set_bound(0);
+        }
+        masterContext_.endPoint_->SendMsgTo(*requesterAddr, reply, MessageType::STATE_TRANSFER_REPLY);
+
+    }
+
+    void Replica::ProcessStateTransferReply(const StateTransferReply& stateTransferReply) {
+        if (!CheckCV(stateTransferReply.replicaid(), stateTransferReply.cv())) {
+            return;
+        }
+        else {
+            Aggregated(stateTransferReply.cv());
+        }
+        if (!CheckView(stateTransferReply.view())) {
+            return;
+        }
+        if (!(masterContext_.endPoint_->isRegistered(stateTransferTimer_))) {
+            // We are not doing state transfer, so ignore this message
+            return;
+        }
+        if (transferSyncedEntry_ != stateTransferReply.issynced()) {
+            return;
+        }
+
+        const auto& iter = stateTransferIndices_.find(stateTransferReply.replicaid());
+        if (iter == stateTransferIndices_.end() || stateTransferReply.logend() < iter->second.first) {
+            // We do not need these log entries
+            return;
+        }
+
+        if (stateTransferReply.issynced()) {
+            // This is the state-transfer for synced requests
+            for (uint32_t i = iter->second.first; i <= stateTransferReply.logend(); i++) {
+                assert(syncedRequestMap_.get(i) == NULL);
+                Request* request = new Request(stateTransferReply.reqs(i - iter->second.first));
+                syncedRequestMap_.assign(i, request);
+                uint64_t deadline = request->sendtime();
+                uint64_t reqKey = request->clientid();
+                reqKey = ((reqKey << 32u) | (request->reqid()));
+                ProcessRequest(deadline, reqKey, *request, true, false);
+            }
+        }
+        else {
+            // This is the state-transfer for unsynced request (log merge)
+            for (int i = 0; i < stateTransferReply.reqs().size(); i++) {
+                uint64_t deadline = stateTransferReply.reqs(i).sendtime();
+                uint64_t reqKey = stateTransferReply.reqs(i).clientid();
+                reqKey = ((reqKey << 32u) | (stateTransferReply.reqs(i).reqid()));
+                std::pair<uint64_t, uint64_t> key(deadline, reqKey);
+                if (requestsToMerge_.find(key) != requestsToMerge_.end()) {
+                    Request* request = new Request(stateTransferReply.reqs(i));
+                    requestsToMerge_[key] = std::pair<Request*, uint32_t>(request, 1);
+                }
+                else {
+                    requestsToMerge_[key].second++;
+                }
+            }
+        }
+
+        iter->second.first = stateTransferReply.logend();
+        if (iter->second.first >= iter->second.second) {
+            // We have completed the state transfer for this target replica
+            stateTransferIndices_.erase(iter->first);
+        }
+
+        if (stateTransferIndices_.empty()) {
+            // This state transfer is completed, unregister the timer
+            masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
+            // If we have a callback, then call it
+            if (stateTransferCallback_) {
+                stateTransferCallback_();
+            }
+        }
+
+    }
+
 
     bool Replica::CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv) {
         if (view < this->viewId_) {
@@ -1194,6 +1432,19 @@ namespace nezha {
                 // The message has old cv, may be a stray message
                 return false;
             }
+        }
+        return true;
+    }
+
+    bool Replica::CheckView(const uint32_t view) {
+        if (view < this->viewId_) {
+            // old message
+            return false;
+        }
+        if (view > this->viewId_) {
+            // new view, update status and wait for master thread to handle the situation
+            InitiateViewChange(view);
+            return false;
         }
         return true;
     }
@@ -1222,7 +1473,7 @@ namespace nezha {
         return needAggregate;
     }
 
-    std::string Replica::ApplicationExecute(Request* req) {
+    std::string Replica::ApplicationExecute(const Request& req) {
         return "";
     }
     bool Replica::AmLeader() {

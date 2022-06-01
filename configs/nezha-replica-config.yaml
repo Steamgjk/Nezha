@@ -20,4 +20,8 @@ heartbeat-threshold-ms: 500
 index-ask-period-ms: 5 # When missing indices, we launch a timer to periodically ask indices
 request-ask-period-ms: 5 # When missing logs, we launch a timer to periodically ask logs(requests)
 view-change-period-ms: 5
+state-transfer-period-ms: 10
+index-transfer-max-batch: 30
+request-transfer-max-batch: 5
+
 key-num: 1000000 # when commutativity is enabled for test, we need the specified key number to detect commutativity

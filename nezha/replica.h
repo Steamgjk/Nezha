@@ -100,6 +100,7 @@ namespace nezha {
         std::vector<Address*> indexAskReceiver_;
         std::vector<Address*> requestAskReceiver_;
         std::vector<Address*> masterReceiver_;
+        uint32_t roundRobinRequestProcessIdx_;
         uint32_t roundRobinIndexAskIdx_;
         uint32_t roundRobinRequestAskIdx_;
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector, used for garbage-collection
@@ -110,8 +111,12 @@ namespace nezha {
         std::set<uint32_t> missedReqKeys_; // Missed Request during index synchronization
         std::pair<uint32_t, uint32_t> missedIndices_; // Missed Indices during index synchronization
 
-        std::set < std::pair<uint32_t, uint32_t>> stateTransferIndices_;
-        uint32_t stateTransferTargetReplica_;
+
+        std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
+        std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
+        uint32_t transferSyncedEntry_;
+        uint32_t stateRequestTransferBatch_;
+
         std::function<void(void)> stateTransferCallback_;
         // TODO: There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
 
@@ -122,8 +127,6 @@ namespace nezha {
         std::atomic<uint64_t> lastHeartBeatTime_; // for master to check whether it should issue view change
         std::atomic<uint32_t> workerCounter_; // for master to check whether everybody has stopped
 
-
-        ConcurrentMap<uint64_t, Request*> requestMap_;
         ConcurrentQueue<Request*> processQu_;
         std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
         std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
@@ -137,22 +140,25 @@ namespace nezha {
         void InitiateViewChange(const uint32_t view);
         void SendStartView(const int toReplicaId);
         void EnterNewView();
+        void SendStateTransferRequest();
 
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
         void ProcessViewChange(const ViewChange& viewChange);
-        void ProcessStateTransferReq(const StateTransferRequest& stateTransferReq);
-        void ProcessStateTransferRep(const StateTransferReply& stateTransferRep);
+        void ProcessStateTransferRequest(const StateTransferRequest& stateTransferReq);
+        void ProcessStateTransferReply(const StateTransferReply& stateTransferRep);
+        void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq = true, const bool sendReply = true);
 
 
-        std::string ApplicationExecute(Request* req);
+        std::string ApplicationExecute(const Request& request);
         bool AmLeader();
         MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
         bool CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv);
+        bool CheckView(const uint32_t view);
         bool CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv);
         bool Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv);
-        void MergeLog();
-        void MergeSyncedLog();
+        void TransferSyncedLog();
+        void TransferUnSyncedLog();
         void MergeUnSyncedLog();
 
     public:

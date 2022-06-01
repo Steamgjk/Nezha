@@ -54,6 +54,20 @@ int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr, const std::string& msg)
     return this->SendMsgTo(dstAddr, msg.c_str(), msg.length());
 }
 
+int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr, const google::protobuf::Message& msg, char msgType) {
+    char buffer[UDP_BUFFER_SIZE];
+    MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
+    msgHdr->msgType = msgType;
+    std::string serializedString = msg.SerializeAsString();
+    msgHdr->msgLen = serializedString.length();
+    if (msgHdr->msgLen > 0) {
+        // serialization succeed
+        memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), msgHdr->msgLen);
+        return this->SendMsgTo(dstAddr, buffer, msgHdr->msgLen + sizeof(MessageHeader));
+    }
+    return -1;
+
+}
 
 bool UDPSocketEndpoint::RegisterMsgHandler(MsgHandlerStruct* msgHdl) {
     if (evLoop_ == NULL) {
