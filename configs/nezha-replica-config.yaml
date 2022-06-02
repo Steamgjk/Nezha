@@ -23,5 +23,7 @@ view-change-period-ms: 5
 state-transfer-period-ms: 10
 index-transfer-max-batch: 30
 request-transfer-max-batch: 5
+crash-vector-request-period-ms: 50 # make it longer, becasue it will clear all previous replies
+recovery-request-period-ms: 5
 
 key-num: 1000000 # when commutativity is enabled for test, we need the specified key number to detect commutativity

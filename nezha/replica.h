@@ -13,9 +13,13 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <condition_variable>
 #include <glog/logging.h>
 #include <junction/ConcurrentMap_Leapfrog.h>
 #include <yaml-cpp/yaml.h>
+#include <boost/uuid/uuid.hpp>            
+#include <boost/uuid/uuid_generators.hpp> 
+#include <boost/uuid/uuid_io.hpp>         
 #include "nezha/nezha-proto.pb.h"
 #include "lib/utils.h"
 #include "lib/concurrentqueue.hpp"
@@ -89,6 +93,8 @@ namespace nezha {
         TimerStruct* requestAskTimer_;
         TimerStruct* viewChangeTimer_;
         TimerStruct* stateTransferTimer_;
+        TimerStruct* crashVectorRequestTimer_;
+        TimerStruct* recoveryRequestTimer_;
         std::vector<UDPSocketEndpoint*> indexSender_;
         std::vector<UDPSocketEndpoint*> fastReplySender_;
         std::vector<UDPSocketEndpoint*> slowReplySender_;
@@ -105,6 +111,9 @@ namespace nezha {
         uint32_t roundRobinRequestAskIdx_;
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector, used for garbage-collection
         std::atomic<CrashVectorStruct*>* crashVectorInUse_;
+        uint32_t crashVectorVecSize_;
+
+
         uint32_t indexRecvCVIdx_;
         uint32_t indexAckCVIdx_;
         std::map<uint32_t, IndexSync> pendingIndexSync_;
@@ -114,18 +123,24 @@ namespace nezha {
 
         std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
         std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
-        uint32_t transferSyncedEntry_;
+        bool transferSyncedEntry_;
         uint32_t stateRequestTransferBatch_;
-
         std::function<void(void)> stateTransferCallback_;
         // TODO: There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
+
+        std::string nonce_;
+        std::map<uint32_t, CrashVectorReply> crashVectorReplySet_;
+        std::map<uint32_t, RecoveryReply> recoveryReplySet_;
 
         std::map<uint32_t, ViewChange> viewChangeSet_;
 
         ConcurrentMap<uint64_t, Address*> proxyAddressMap_; // Inserted by receiver threads, and looked up by fast/slow reply threads
 
         std::atomic<uint64_t> lastHeartBeatTime_; // for master to check whether it should issue view change
-        std::atomic<uint32_t> workerCounter_; // for master to check whether everybody has stopped
+        std::atomic<uint32_t> activeWorkerNum_; // for master to check whether everybody has stopped
+        uint32_t totalWorkerNum_;
+        std::condition_variable waitVar_; // for worker threads to block during view change
+        std::mutex waitMutext_;
 
         ConcurrentQueue<Request*> processQu_;
         std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
@@ -138,15 +153,26 @@ namespace nezha {
         void SendViewChangeRequest(const int toReplicaId);
         void SendViewChange();
         void InitiateViewChange(const uint32_t view);
+        void InitiateRecovery();
+        void BroadcastCrashVectorRequest();
+        void BroadcastRecoveryRequest();
         void SendStartView(const int toReplicaId);
         void EnterNewView();
         void SendStateTransferRequest();
+
+        void BlockWhenStatusIs(char targetStatus);
 
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
         void ProcessViewChange(const ViewChange& viewChange);
         void ProcessStateTransferRequest(const StateTransferRequest& stateTransferReq);
         void ProcessStateTransferReply(const StateTransferReply& stateTransferRep);
+        void ProcessStartView(const StartView& startView);
+        void ProcessCrashVectorRequest(const CrashVectorRequest& request);
+        void ProcessCrashVectorReply(const CrashVectorReply& reply);
+        void ProcessRecoveryRequest(const RecoveryRequest& request);
+        void ProcessRecoveryReply(const RecoveryReply& reply);
+
         void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq = true, const bool sendReply = true);
 
 

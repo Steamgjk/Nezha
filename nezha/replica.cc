@@ -36,6 +36,7 @@ namespace nezha {
         LaunchThreads();
 
         // Master thread run
+        masterContext_.Register();
         masterContext_.endPoint_->LoopRun();
 
     }
@@ -61,7 +62,6 @@ namespace nezha {
         masterContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->CheckHeartBeat();
             }, this, monitorPeriodMs);
-        masterContext_.Register();
 
         // Create request-receiver endpoints and context
         requestContext_.resize(replicaConfig_["receiver-shards"].as<int>());
@@ -78,7 +78,6 @@ namespace nezha {
                     receiverEP->LoopBreak();
                 }
                 }, this, monitorPeriodMs);
-            requestContext_[i].Register();
         }
 
         // (Leader) Use these endpoints to broadcast indices
@@ -116,7 +115,6 @@ namespace nezha {
                 receiverEP->LoopBreak();
             }
             }, this, monitorPeriodMs);
-        indexSyncContext_.Register();
 
         // Create an endpoint to handle others' requests for missed index
         port = replicaConfig_["ack-missed-index-port"].as<int>();
@@ -131,7 +129,6 @@ namespace nezha {
                 receiverEP->LoopBreak();
             }
             }, this, monitorPeriodMs);
-        missedIndexAckContext_.Register();
 
         // Create an endpoint to handle others' requests for missed req
         port = replicaConfig_["ack-missed-req-port"].as<int>();
@@ -146,7 +143,6 @@ namespace nezha {
                 receiverEP->LoopBreak();
             }
             }, this, monitorPeriodMs);
-        missedReqAckContext_.Register();
 
         // Create reply endpoints
         int replyShardNum = replicaConfig_["reply-shards"].as<int>();
@@ -162,11 +158,11 @@ namespace nezha {
         std::vector<uint32_t> cvVec(replicaNum_, 0);
         CrashVectorStruct* cv = new CrashVectorStruct(cvVec, 2);
         crashVector_.assign(cv->version_, cv);
-        uint32_t cvVecSize = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>() + 2;
-        indexRecvCVIdx_ = cvVecSize - 2;
-        indexAckCVIdx_ = cvVecSize - 1;
-        crashVectorInUse_ = new std::atomic<CrashVectorStruct*>[cvVecSize];
-        for (uint32_t i = 0; i < cvVecSize; i++) {
+        crashVectorVecSize_ = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>() + 2;
+        indexRecvCVIdx_ = crashVectorVecSize_ - 2;
+        indexAckCVIdx_ = crashVectorVecSize_ - 1;
+        crashVectorInUse_ = new std::atomic<CrashVectorStruct*>[crashVectorVecSize_];
+        for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
             crashVectorInUse_[i] = cv;
         }
 
@@ -197,12 +193,23 @@ namespace nezha {
             }, this, replicaConfig_["state-transfer-period-ms"].as<int>());
 
         stateRequestTransferBatch_ = replicaConfig_["request-transfer-max-batch"].as<uint32_t>();
+
+        crashVectorRequestTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->BroadcastCrashVectorRequest();
+            }, this, replicaConfig_["crash-vector-request-period-ms"].as<int>());
+
+        recoveryRequestTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->BroadcastRecoveryRequest();
+            }, this, replicaConfig_["recovery-request-period-ms"].as<int>());
+
     }
 
 
     void Replica::LaunchThreads() {
+        activeWorkerNum_ = 0;
         // RequestReceive
         for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
+            activeWorkerNum_.fetch_add(1);
             std::thread* td = new std::thread(&Replica::ReceiveTd, this, i);
             std::string key("ReceiveTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -211,6 +218,7 @@ namespace nezha {
 
         // RequestProcess
         for (int i = 0; i < replicaConfig_["process-shards"].as<int>(); i++) {
+            activeWorkerNum_.fetch_add(1);
             std::thread* td = new std::thread(&Replica::ProcessTd, this, i);
             std::string key("ProcessTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -220,12 +228,14 @@ namespace nezha {
         // RequestReply
         int replyShardNum = replicaConfig_["reply-shards"].as<int>();
         for (int i = 0; i < replyShardNum; i++) {
+            activeWorkerNum_.fetch_add(1);
             std::thread* td = new std::thread(&Replica::FastReplyTd, this, i, i + 1);
             std::string key("FastReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
         for (int i = 0; i < replyShardNum; i++) {
+            activeWorkerNum_.fetch_add(1);
             std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i, i + replyShardNum + 1);
             std::string key("SlowReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -234,6 +244,7 @@ namespace nezha {
 
         // IndexSync
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
+            activeWorkerNum_.fetch_add(1);
             std::thread* td = new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum * 2 + 1);
             std::string key("IndexSendTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -244,14 +255,20 @@ namespace nezha {
             }
         }
 
+        activeWorkerNum_.fetch_add(1);
         threadPool_["IndexRecvTd"] = new std::thread(&Replica::IndexRecvTd, this);
         LOG(INFO) << "Launched IndexRecvTd\t" << threadPool_["IndexRecvTd"]->native_handle();
 
+        activeWorkerNum_.fetch_add(1);
         threadPool_["MissedIndexAckTd"] = new std::thread(&Replica::MissedIndexAckTd, this);
         LOG(INFO) << "Launched MissedIndexAckTd\t" << threadPool_["MissedIndexAckTd"]->native_handle();
 
+        activeWorkerNum_.fetch_add(1);
         threadPool_["MissedReqAckTd"] = new std::thread(&Replica::MissedReqAckTd, this);
         LOG(INFO) << "Launched MissedReqAckTd\t" << threadPool_["MissedReqAckTd"]->native_handle();
+
+        totalWorkerNum_ = activeWorkerNum_;
+        LOG(INFO) << "totalWorkerNum_=" << totalWorkerNum_;
     }
 
     void Replica::ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
@@ -284,20 +301,39 @@ namespace nezha {
 
     }
 
+    void Replica::BlockWhenStatusIs(char targetStatus) {
+        if (status_ == targetStatus) {
+            activeWorkerNum_.fetch_sub(1);
+            std::unique_lock<std::mutex> lk(waitMutext_);
+            waitVar_.wait(lk, [this, targetStatus] {
+                if (status_ == ReplicaStatus::TERMINATED || status_ != targetStatus) {
+                    // unlock 
+                    activeWorkerNum_.fetch_add(1);
+                    return true;
+                }
+                else {
+                    return false;
+                }
+                });
+        }
+    }
+
     void Replica::ReceiveTd(int id) {
-        workerCounter_.fetch_add(1);
-        requestContext_[id].endPoint_->LoopRun();
-        workerCounter_.fetch_sub(1);
+        while (status_ != ReplicaStatus::TERMINATED) {
+            requestContext_[id].Register();
+            requestContext_[id].endPoint_->LoopRun();
+            // Normally, it should be blocked in LoopRun, if it comes here, then there are 2 possible cases: (1) Terminated (2) ViewChange
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+        }
     }
 
     void Replica::ProcessTd(int id) {
-        workerCounter_.fetch_add(1);
         uint64_t reqKey = 0;
         Request* req = NULL;
-        uint32_t roundRobin = 0;
-        uint32_t replyShard = replicaConfig_["reply-shards"].as<uint32_t>();
         bool amLeader = AmLeader();
-        while (status_ == ReplicaStatus::NORMAL) {
+        while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+
             if (processQu_.try_dequeue(req)) {
                 reqKey = req->clientid();
                 reqKey = ((reqKey << 32u) | (req->reqid()));
@@ -325,7 +361,7 @@ namespace nezha {
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
                         // update proxy id in case the client has changed its proxy
                         entry->proxyId = req->proxyid();
-                        fastReplyQu_[(roundRobin++) % replyShard].enqueue(entry);
+                        fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
                         // free this req
                         delete req;
                     }
@@ -336,7 +372,7 @@ namespace nezha {
                         // Duplicate: resend slow-reply for this request
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
                         entry->proxyId = req->proxyid();
-                        slowReplyQu_[(roundRobin++) % replyShard].enqueue(entry);
+                        slowReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
                     }
                     else {
                         duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
@@ -345,7 +381,7 @@ namespace nezha {
                             LogEntry* entry = unsyncedEntries_.get(duplicateLogIdx);
                             // Update proxy id in case the client has changed its proxy
                             entry->proxyId = req->proxyid();
-                            fastReplyQu_[(roundRobin++) % replyShard].enqueue(entry);
+                            fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
                             delete req;
                         }
                         else {
@@ -374,8 +410,6 @@ namespace nezha {
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
         }
-        // When this thread exits (for view change), decrease the atomic variable workerCounter_
-        workerCounter_.fetch_sub(1);
     }
 
     void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq, const bool sendReply) {
@@ -427,7 +461,6 @@ namespace nezha {
     }
 
     void Replica::FastReplyTd(int id, int cvId) {
-        workerCounter_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
         reply.set_view(viewId_);
@@ -439,7 +472,8 @@ namespace nezha {
         MessageHeader* replyHeader = (MessageHeader*)(void*)buffer;
         replyHeader->msgType = MessageType::FAST_REPLY;
         uint64_t opKeyAndId = 0ul;
-        while (status_ == ReplicaStatus::NORMAL) {
+        while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             if (fastReplyQu_[id].try_dequeue(entry)) {
                 reply.set_clientid((entry->reqKey) >> 32);
                 reply.set_reqid((uint32_t)(entry->reqKey));
@@ -507,7 +541,6 @@ namespace nezha {
                 // else (unlikely): this replica does not have the addr of the proxy
             }
         }
-        workerCounter_.fetch_sub(1);
     }
 
     void Replica::SlowReplyTd(int id, int cvId) {
@@ -515,7 +548,6 @@ namespace nezha {
             // Leader does not send slow replies
             return;
         }
-        workerCounter_.fetch_add(1);
         char buffer[UDP_BUFFER_SIZE];
         LogEntry* entry = NULL;
         Reply reply;
@@ -526,8 +558,8 @@ namespace nezha {
         reply.set_result("");
         MessageHeader* replyHeader = (MessageHeader*)(void*)buffer;
         replyHeader->msgType = MessageType::SLOW_REPLY;
-
         while (status_ == ReplicaStatus::NORMAL) {
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             if (slowReplyQu_[id].try_dequeue(entry)) {
                 reply.set_clientid((entry->reqKey) >> 32);
                 reply.set_reqid((uint32_t)(entry->reqKey));
@@ -546,8 +578,6 @@ namespace nezha {
                 }
             }
         }
-
-        workerCounter_.fetch_sub(1);
     }
 
     void Replica::IndexSendTd(int id, int cvId) {
@@ -555,7 +585,6 @@ namespace nezha {
             // Followers do not broadcast indices
             return;
         }
-        workerCounter_.fetch_add(1);
         uint32_t lastSyncedLogId = 2;
         IndexSync indexSyncMsg;
         CrashVectorStruct* cv = crashVectorInUse_[cvId].load();
@@ -563,6 +592,7 @@ namespace nezha {
         MessageHeader* msgHdr = (MessageHeader*)buffer;
         msgHdr->msgType = MessageType::SYNC_INDEX;
         while (status_ == ReplicaStatus::NORMAL) {
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             uint32_t logEnd = maxSyncedLogId_;
             if (lastSyncedLogId < logEnd) {
                 // Leader has some indices to sync
@@ -599,13 +629,14 @@ namespace nezha {
             }
             usleep(20);
         }
-        workerCounter_.fetch_sub(1);
     }
 
     void Replica::IndexRecvTd() {
-        workerCounter_.fetch_add(1);
-        indexSyncContext_.endPoint_->LoopRun();
-        workerCounter_.fetch_sub(1);
+        while (status_ != ReplicaStatus::TERMINATED) {
+            indexSyncContext_.Register();
+            indexSyncContext_.endPoint_->LoopRun();
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+        }
     }
 
     void Replica::ReceiveIndexSyncMessage(char* msgBuffer, int msgLen) {
@@ -620,7 +651,6 @@ namespace nezha {
                 if (!CheckViewAndCV(idxSyncMsg.view(), idxSyncMsg.cv())) {
                     return;
                 }
-
                 if (maxSyncedLogId_ + 1 < idxSyncMsg.logidbegin()) {
                     pendingIndexSync_[idxSyncMsg.logidbegin()] = idxSyncMsg;
                     if (this->missedIndices_.first == 0) {
@@ -756,9 +786,11 @@ namespace nezha {
     }
 
     void Replica::MissedIndexAckTd() {
-        workerCounter_.fetch_add(1);
-        missedIndexAckContext_.endPoint_->LoopRun();
-        workerCounter_.fetch_sub(1);
+        while (status_ != ReplicaStatus::TERMINATED) {
+            missedIndexAckContext_.Register();
+            missedIndexAckContext_.endPoint_->LoopRun();
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+        }
     }
 
     void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
@@ -810,9 +842,11 @@ namespace nezha {
     }
 
     void Replica::MissedReqAckTd() {
-        workerCounter_.fetch_add(1);
-        missedReqAckContext_.endPoint_->LoopRun();
-        workerCounter_.fetch_sub(1);
+        while (status_ != ReplicaStatus::TERMINATED) {
+            missedReqAckContext_.Register();
+            missedReqAckContext_.endPoint_->LoopRun();
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+        }
     }
 
 
@@ -960,6 +994,36 @@ namespace nezha {
                 ProcessStateTransferReply(stateTransferRep);
             }
         }
+        else if (msgHdr->msgType == MessageType::START_VIEW) {
+            StartView startView;
+            if (startView.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessStartView(startView);
+            }
+        }
+        else if (msgHdr->msgType == MessageType::CRASH_VECTOR_REQUEST) {
+            CrashVectorRequest request;
+            if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessCrashVectorRequest(request);
+            }
+        }
+        else if (msgHdr->msgType == MessageType::CRASH_VECTOR_REPLY) {
+            CrashVectorReply reply;
+            if (reply.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessCrashVectorReply(reply);
+            }
+        }
+        else if (msgHdr->msgType == MessageType::RECOVERY_REQUEST) {
+            RecoveryRequest request;
+            if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessRecoveryRequest(request);
+            }
+        }
+        else if (msgHdr->msgType == MessageType::RECOVERY_REPLY) {
+            RecoveryReply reply;
+            if (reply.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessRecoveryReply(reply);
+            }
+        }
 
         else {
             LOG(WARNING) << "Unexpected message type " << (int)msgBuffer[0];
@@ -975,8 +1039,8 @@ namespace nezha {
         }
 
         // ViewChange has not been initiated, so let's do that
-        while (workerCounter_ > 0) {
-            // Wait until all workers have exit
+        while (activeWorkerNum_ > 0) {
+            // Wait until all workers have been blocked
             usleep(1000);
         }
         // Every other threads have stopped, no worry about data race any more
@@ -1059,6 +1123,26 @@ namespace nezha {
     }
 
     void Replica::SendStartView(const int toReplicaId) {
+        StartView startView;
+        startView.set_replicaid(replicaId_);
+        startView.set_view(viewId_);
+        CrashVectorStruct* cv = crashVectorInUse_[0];
+        startView.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        startView.set_syncedlogid(maxSyncedLogId_);
+        if (toReplicaId >= 0) {
+            // send to one
+            masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[toReplicaId]), startView, MessageType::STATE_TRANSFER_REQUEST);
+        }
+        else {
+            // send to all 
+            for (uint32_t i = 0; i < replicaNum_; i++) {
+                if (i == replicaId_) {
+                    // No need to send to self
+                    continue;
+                }
+                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), startView, MessageType::STATE_TRANSFER_REQUEST);
+            }
+        }
 
     }
 
@@ -1240,26 +1324,38 @@ namespace nezha {
     void Replica::EnterNewView() {
         // Leader sends StartView to all the others
         if (AmLeader()) {
-            StartView startView;
-            startView.set_replicaid(replicaId_);
-            startView.set_view(viewId_);
-            CrashVectorStruct* cv = crashVectorInUse_[0];
-            startView.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
-            startView.set_syncpoint(maxSyncedLogId_);
-            for (uint32_t i = 0; i < replicaNum_; i++) {
-                if (i == replicaId_) {
-                    // No need to send to self
-                    continue;
-                }
-                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), startView, MessageType::STATE_TRANSFER_REQUEST);
-            }
-        }
-        else {
-            // Follower Directly start
-        }
+            SendStartView(-1);
+        } // Else: followers directly start
 
+        status_ = ReplicaStatus::NORMAL;
+        lastNormalView_.store(viewId_);
+        // Update crashVector, all synced with master
+        CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+        for (uint32_t i = 1; i < crashVectorVecSize_; i++) {
+            crashVectorInUse_[i] = masterCV;
+        }
+        // Clean CrashVectorMap;
+        ConcurrentMap<uint32_t, CrashVectorStruct*>::Iterator iter(crashVector_);
+        std::vector<uint32_t> keysToDel;
+        keysToDel.reserve(1000);
+        while (iter.isValid()) {
+            keysToDel.push_back(iter.getKey());
+        }
+        for (auto& key : keysToDel) {
+            crashVector_.erase(key);
+        }
+        crashVector_.assign(masterCV->version_, masterCV);
+        // TODO: mark gc start version
+
+
+        // Notify the blocking workers until all workers become active 
+        while (activeWorkerNum_ < totalWorkerNum_) {
+            waitVar_.notify_all();
+            usleep(1000);
+        }
 
     }
+
 
     void Replica::SendStateTransferRequest() {
         // TODO: If statetransfer cannot be completed within a certain amount of time, rollback to view change
@@ -1288,7 +1384,10 @@ namespace nezha {
     }
 
     void Replica::ProcessStateTransferRequest(const StateTransferRequest& stateTransferRequest) {
-        if (!CheckView(stateTransferRequest.view())) {
+        if (stateTransferRequest.view() != viewId_) {
+            if (stateTransferRequest.view() > viewId_) {
+                InitiateViewChange(stateTransferRequest.view());
+            }
             return;
         }
         StateTransferReply reply;
@@ -1342,19 +1441,43 @@ namespace nezha {
     }
 
     void Replica::ProcessStateTransferReply(const StateTransferReply& stateTransferReply) {
+        if (status_ == ReplicaStatus::NORMAL) {
+            // Normal replicas do not need state transfer
+            return;
+        }
         if (!CheckCV(stateTransferReply.replicaid(), stateTransferReply.cv())) {
             return;
         }
         else {
             Aggregated(stateTransferReply.cv());
         }
-        if (!CheckView(stateTransferReply.view())) {
-            return;
-        }
+
         if (!(masterContext_.endPoint_->isRegistered(stateTransferTimer_))) {
             // We are not doing state transfer, so ignore this message
             return;
         }
+
+        if (stateTransferReply.view() < viewId_) {
+            // Old View: ignore
+            return;
+        }
+        else if (stateTransferReply.view() > viewId_) {
+            masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
+            if (status_ == ReplicaStatus::RECOVERING) {
+                // This state transfer is useless, stop it and restart recovery request
+                masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
+            }
+            else if (status_ == ReplicaStatus::VIEWCHANGE) {
+                InitiateViewChange(stateTransferReply.view());
+            }
+            else {
+                LOG(ERROR) << "Unknown replica status " << (uint32_t)status_;
+            }
+            return;
+        }
+
+        // Else: Same view
+
         if (transferSyncedEntry_ != stateTransferReply.issynced()) {
             return;
         }
@@ -1412,6 +1535,200 @@ namespace nezha {
     }
 
 
+    void Replica::ProcessStartView(const StartView& startView) {
+        if (!CheckCV(startView.replicaid(), startView.cv())) {
+            return;
+        }
+        else {
+            Aggregated(startView.cv());
+        }
+
+        if (status_ == ReplicaStatus::VIEWCHANGE) {
+            if (startView.view() > viewId_) {
+                InitiateViewChange(startView.view());
+            }
+            else if (startView.view() == viewId_) {
+                if (committedLogId_ < startView.syncedlogid()) {
+                    // Start StateTransfer
+                    stateTransferIndices_.clear();
+                    stateTransferIndices_[startView.replicaid()] = std::pair<uint32_t, uint32_t>(committedLogId_ + 1, startView.syncedlogid());
+                    stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
+                    transferSyncedEntry_ = true;
+                    SendStateTransferRequest();
+                }
+                else {
+                    EnterNewView();
+                }
+
+            } // else: startView.view()<viewId_, old message, ignore it
+        }
+        else if (status_ == ReplicaStatus::NORMAL) {
+            if (startView.view() > viewId_) {
+                InitiateViewChange(startView.view());
+            }
+            else if (startView.view() < viewId_) {
+                // My view is fresher
+                SendStartView(startView.replicaid());
+            }
+            // Else: We are in the same view and this replica is normal, no need startView
+        }
+        // If status == RECOVERING, it does not participate in view change
+
+    }
+
+
+    void Replica::BroadcastCrashVectorRequest() {
+        CrashVectorRequest request;
+        boost::uuids::random_generator generator;
+        boost::uuids::uuid uuid = generator();
+        nonce_ = boost::uuids::to_string(uuid);
+        request.set_nonce(nonce_);
+        request.set_replicaid(replicaId_);
+        crashVectorReplySet_.clear();
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            if (i == replicaId_) {
+                continue;
+            }
+            masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::CRASH_VECTOR_REQUEST);
+        }
+
+    }
+
+    void Replica::BroadcastRecoveryRequest() {
+        RecoveryRequest request;
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        request.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        request.set_replicaid(replicaId_);
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            if (i == replicaId_) {
+                continue;
+            }
+            masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::RECOVERY_REQUEST);
+        }
+    }
+
+    void Replica::ProcessCrashVectorRequest(const CrashVectorRequest& request) {
+        if (status_ != ReplicaStatus::NORMAL) {
+            return;
+        }
+
+        CrashVectorReply reply;
+        reply.set_nonce(request.nonce());
+        reply.set_replicaid(replicaId_);
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]), reply, MessageType::CRASH_VECTOR_REPLY);
+    }
+
+    void Replica::ProcessCrashVectorReply(const CrashVectorReply& reply) {
+        if (status_ != ReplicaStatus::RECOVERING) {
+            return;
+        }
+
+        if (nonce_ != reply.nonce()) {
+            return;
+        }
+
+        crashVectorReplySet_[reply.replicaid()] = reply;
+
+        if (crashVectorReplySet_.size() >= replicaNum_ / 2 + 1) {
+            // Got enough quorum
+            CrashVectorStruct* oldCV = crashVectorInUse_[0].load();
+            CrashVectorStruct* newCV = new CrashVectorStruct(*oldCV);
+            newCV->version_++;
+            for (const auto& kv : crashVectorReplySet_) {
+                for (uint32_t i = 0; i < replicaNum_; i++) {
+                    if (kv.second.cv(i) > newCV->cv_[i]) {
+                        newCV->cv_[i] = kv.second.cv(i);
+                    }
+                }
+            }
+            // Increment self counter 
+            newCV->cv_[replicaId_]++;
+            crashVector_.assign(newCV->version_, newCV);
+            for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
+                crashVectorInUse_[i] = newCV;
+            }
+
+        }
+        masterContext_.endPoint_->UnregisterTimer(crashVectorRequestTimer_);
+        // Start Recovery Request
+        masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
+    }
+
+    void Replica::ProcessRecoveryRequest(const RecoveryRequest& request) {
+        if (status_ != ReplicaStatus::NORMAL) {
+            return;
+        }
+
+        if (!CheckCV(request.replicaid(), request.cv())) {
+            return;
+        }
+        else {
+            Aggregated(request.cv());
+        }
+
+        RecoveryReply reply;
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        reply.set_replicaid(request.replicaid());
+        reply.set_view(viewId_);
+        reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        reply.set_syncedlogid(maxSyncedLogId_);
+        masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]), reply, MessageType::RECOVERY_REPLY);
+
+    }
+
+    void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
+        if (!CheckCV(reply.replicaid(), reply.cv())) {
+            return;
+        }
+        else {
+            if (Aggregated(reply.cv())) {
+                // If cv is updated, then it is likely that some messages in recoveryReplySet_ become stray, so remove them 
+                CrashVectorStruct* cv = crashVectorInUse_[0];
+                for (uint32_t i = 0; i < replicaNum_; i++) {
+                    auto iter = recoveryReplySet_.find(i);
+                    if (iter != recoveryReplySet_.end() && iter->second.cv(i) < cv->cv_[i]) {
+                        recoveryReplySet_.erase(i);
+                    }
+                }
+            }
+        }
+        if (recoveryReplySet_.size() >= replicaNum_ / 2 + 1) {
+            // Got enough quorum
+            masterContext_.endPoint_->UnregisterTimer(recoveryRequestTimer_);
+            uint32_t maxView = 0;
+            uint32_t syncedLogId = 0;
+            for (const auto& kv : recoveryReplySet_) {
+                if (kv.second.view() > maxView) {
+                    maxView = kv.second.view();
+                    syncedLogId = kv.second.syncedlogid();
+                }
+            }
+            // Get the maxView, launch state transfer with the corresponding leader
+            viewId_ = maxView;
+            if (AmLeader()) {
+                // If the recoverying replica happens to be the leader of the new view, don't participate. Wait until the healthy replicas elect a new leader
+                recoveryReplySet_.clear();
+                usleep(1000); // sleep some time and restart the recovery process
+                masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
+            }
+            else {
+                // Launch state transfer
+                stateTransferIndices_.clear();
+                stateTransferIndices_[maxView % replicaNum_] = std::pair<uint32_t, uint32_t>(2, syncedLogId);
+                stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
+                transferSyncedEntry_ = true;
+                masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
+            }
+
+
+        }
+
+
+
+    }
+
     bool Replica::CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv) {
         if (view < this->viewId_) {
             // old message
@@ -1466,9 +1783,28 @@ namespace nezha {
             }
         }
         if (needAggregate) {
+
             CrashVectorStruct* newCV = new CrashVectorStruct(maxCV, masterCV->version_ + 1);
             crashVector_.assign(newCV->version_, newCV);
             crashVectorInUse_[0] = newCV;
+            if (status_ == ReplicaStatus::NORMAL) {
+                // Wait until the reply threads has known the new cv
+                while (true) {
+                    bool ready = true;
+                    for (uint32_t i = 1; i <= fastReplyQu_.size() + slowReplyQu_.size(); i++) {
+                        if (crashVectorInUse_[i].load()->version_ < newCV->version_) {
+                            ready = false;
+                        }
+                    }
+                    if (ready) {
+                        break;
+                    }
+                    else {
+                        usleep(1000);
+                    }
+                }
+            } // Else (status_=ViewChange), then there is only master thread alive, no need to wait for reply thread
+
         }
         return needAggregate;
     }

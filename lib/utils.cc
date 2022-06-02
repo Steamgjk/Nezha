@@ -6,6 +6,7 @@ namespace  ReplicaStatus {
     char NORMAL = 1;
     char VIEWCHANGE = 2;
     char RECOVERING = 3;
+    char TERMINATED = 4;
 };
 
 
@@ -24,6 +25,10 @@ namespace MessageType {
     char START_VIEW = 12;
     char STATE_TRANSFER_REQUEST = 13;
     char STATE_TRANSFER_REPLY = 14;
+    char CRASH_VECTOR_REQUEST = 15;
+    char CRASH_VECTOR_REPLY = 16;
+    char RECOVERY_REQUEST = 17;
+    char RECOVERY_REPLY = 18;
 };
 
 

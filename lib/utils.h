@@ -18,6 +18,7 @@ namespace  ReplicaStatus {
     extern char NORMAL;
     extern char VIEWCHANGE;
     extern char RECOVERING;
+    extern char TERMINATED;
 };
 
 
@@ -36,6 +37,10 @@ namespace MessageType {
     extern char START_VIEW;
     extern char STATE_TRANSFER_REQUEST;
     extern char STATE_TRANSFER_REPLY;
+    extern char CRASH_VECTOR_REQUEST;
+    extern char CRASH_VECTOR_REPLY;
+    extern char RECOVERY_REQUEST;
+    extern char RECOVERY_REPLY;
 };
 
 namespace StateTransferType {

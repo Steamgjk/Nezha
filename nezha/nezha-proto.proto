@@ -91,5 +91,29 @@ message StartView {
     uint32 view = 1;
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
-    uint32 syncpoint = 4;
+    uint32 syncedlogid = 4;
+}
+
+
+message CrashVectorRequest {
+    bytes nonce = 1;
+    uint32 replicaid = 2;
+}
+
+message CrashVectorReply {
+    bytes nonce = 1;
+    uint32 replicaid = 2;
+    repeated uint32 cv = 3;
+}
+
+message RecoveryRequest {
+    repeated uint32 cv = 1;
+    uint32 replicaid = 2;
+}
+
+message RecoveryReply {
+    uint32 view = 1;
+    repeated uint32 cv = 2;
+    uint32 replicaid = 3;
+    uint32 syncedlogid = 4;
 }
