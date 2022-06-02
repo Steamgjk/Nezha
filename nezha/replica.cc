@@ -10,25 +10,24 @@ namespace nezha {
         lastNormalView_ = 0;
         replicaId_ = replicaConfig_["replica-id"].as<int>();
         replicaNum_ = replicaConfig_["replica-ips"].size();
-        uint32_t keyNum = replicaConfig_["key-num"].as<uint32_t>();
-        lastReleasedEntryByKeys_.resize(keyNum, std::pair<uint64_t, uint64_t>(0, 0));
+        keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
+        lastReleasedEntryByKeys_.resize(keyNum_, std::pair<uint64_t, uint64_t>(0, 0));
         // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
-        maxSyncedLogId_ = 1;
-        minUnSyncedLogId_ = 2;
-        maxUnSyncedLogId_ = 1;
-        // syncedLogIdByKey_.resize(keyNum, 1);
-        // unsyncedLogIdByKey_.resize(keyNum, 1);
+        maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
+        maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
-        maxSyncedLogIdByKey_.resize(keyNum, 1);
-        minUnSyncedLogIdByKey_.resize(keyNum, 2);
-        maxUnSyncedLogIdByKey_.resize(keyNum, 1);
+        maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+        maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+        unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
 
 
         status_ = ReplicaStatus::NORMAL;
         LOG(INFO) << "viewId_=" << viewId_
             << "\treplicaId=" << replicaId_
             << "\treplicaNum=" << replicaNum_
-            << "\tkeyNum=" << keyNum;
+            << "\tkeyNum=" << keyNum_;
 
 
         CreateContext();
@@ -267,6 +266,10 @@ namespace nezha {
         threadPool_["MissedReqAckTd"] = new std::thread(&Replica::MissedReqAckTd, this);
         LOG(INFO) << "Launched MissedReqAckTd\t" << threadPool_["MissedReqAckTd"]->native_handle();
 
+        activeWorkerNum_.fetch_add(1);
+        threadPool_["GarbageCollectTd"] = new std::thread(&Replica::GarbageCollectTd, this);
+        LOG(INFO) << "Launch  GarbageCollectTd " << threadPool_["GarbageCollectTd"]->native_handle();
+
         totalWorkerNum_ = activeWorkerNum_;
         LOG(INFO) << "totalWorkerNum_=" << totalWorkerNum_;
     }
@@ -376,7 +379,8 @@ namespace nezha {
                     }
                     else {
                         duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
-                        if (duplicateLogIdx > 0) {
+                        // If  duplicateLogIdx < minUnSyncedLogId_, just consider it as non-duplicate, because it will soon be cleared by GarbageCollect-Td
+                        if (duplicateLogIdx >= minUnSyncedLogId_) {
                             // Duplicate: resend fast-reply for this request
                             LogEntry* entry = unsyncedEntries_.get(duplicateLogIdx);
                             // Update proxy id in case the client has changed its proxy
@@ -585,7 +589,7 @@ namespace nezha {
             // Followers do not broadcast indices
             return;
         }
-        uint32_t lastSyncedLogId = 2;
+        uint32_t lastSyncedLogId = CONCURRENT_MAP_START_INDEX - 1;
         IndexSync indexSyncMsg;
         CrashVectorStruct* cv = crashVectorInUse_[cvId].load();
         char buffer[UDP_BUFFER_SIZE];
@@ -946,6 +950,63 @@ namespace nezha {
 
     }
 
+
+    void Replica::GarbageCollectTd() {
+        while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            // Reclaim stale crashVector
+            uint32_t masterCVVersion = crashVectorInUse_[0].load()->version_;
+            while (cvVersionToClear_ <= masterCVVersion) {
+                bool canDelete = true;
+                for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
+                    if (crashVectorInUse_[i].load()->version_ <= cvVersionToClear_) {
+                        canDelete = false;
+                        break;
+                    }
+                }
+                if (canDelete) {
+                    CrashVectorStruct* cvToClear = crashVector_.get(cvVersionToClear_);
+                    crashVector_.erase(cvVersionToClear_);
+                    delete cvToClear;
+                    cvVersionToClear_++;
+                }
+                else {
+                    break;
+                }
+
+            }
+            // Reclaim stale (unsynced) log entry and requests
+            if (!AmLeader()) {
+                for (uint32_t i = 0; i < keyNum_; i++) {
+                    while (unsyncedLogIdByKeyToClear_[i] < minUnSyncedLogIdByKey_[i]) {
+                        uint64_t opKeyAndId = i;
+                        opKeyAndId = ((opKeyAndId << 32u) | unsyncedLogIdByKeyToClear_[i]);
+                        LogEntry* entry = unsyncedEntriesByKey_.get(opKeyAndId);
+                        if (entry) {
+                            uint32_t logId = unsyncedReq2LogId_.get(entry->reqKey);
+                            unsyncedEntries_.erase(logId);
+                            unsyncedReq2LogId_.erase(entry->reqKey);
+                            if (syncedRequestMap_.get(entry->reqKey) == NULL) {
+                                // We can delete the unsynced request
+                                Request* request = unsyncedRequestMap_.get(entry->reqKey);
+                                assert(request != NULL);
+                                delete request;
+                            }
+                            unsyncedEntriesByKey_.erase(opKeyAndId);
+                            delete entry;
+                        }
+                        else {
+                            LOG(ERROR) << "Entry not found " << i << ":" << unsyncedLogIdByKeyToClear_[i];
+                        }
+                        unsyncedLogIdByKeyToClear_[i]++;
+                    }
+                }
+            }
+
+            usleep(10000);
+        }
+    }
+
     void Replica::CheckHeartBeat() {
         if (AmLeader()) {
             return;
@@ -1244,7 +1305,7 @@ namespace nezha {
     void Replica::TransferSyncedLog() {
 
         uint32_t largestNormalView = viewChangeSet_.begin()->second.lastnormalview();
-        uint32_t largestSyncPoint = 2;
+        uint32_t largestSyncPoint = CONCURRENT_MAP_START_INDEX;
         for (auto& kv : viewChangeSet_) {
             if (largestNormalView < kv.second.view()) {
                 largestNormalView = kv.second.view();
@@ -1808,6 +1869,8 @@ namespace nezha {
         }
         return needAggregate;
     }
+
+
 
     std::string Replica::ApplicationExecute(const Request& req) {
         return "";

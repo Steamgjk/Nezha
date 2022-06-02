@@ -74,10 +74,12 @@ namespace nezha {
         std::atomic<uint32_t> committedLogId_;
 
         //  To support commutativity optimization
+        uint32_t keyNum_;
         std::vector<uint32_t> maxSyncedLogIdByKey_; // per-key based log-id
         std::vector<uint32_t> minUnSyncedLogIdByKey_; // per-key based log-id, starts with 2
         std::vector<uint32_t> maxUnSyncedLogIdByKey_; // per-key based log-id
-        ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id), entry>
+
+        ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id(consecutive)), entry>
         ConcurrentMap<uint64_t, LogEntry*> unsyncedEntriesByKey_; // <(Key|Id), entry>
 
         // Use <threadName> as the key (for search), <threadPtr, threadId> as the value
@@ -146,6 +148,11 @@ namespace nezha {
         std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
         std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
 
+        // Garbage-Collection related variables
+        uint32_t cvVersionToClear_;
+        uint32_t unsyncedLogIdToClear_;
+        std::vector<uint32_t> unsyncedLogIdByKeyToClear_;
+
         void CreateContext();
         void LaunchThreads();
         void StartViewChange();
@@ -172,8 +179,8 @@ namespace nezha {
         void ProcessCrashVectorReply(const CrashVectorReply& reply);
         void ProcessRecoveryRequest(const RecoveryRequest& request);
         void ProcessRecoveryReply(const RecoveryReply& reply);
-
         void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq = true, const bool sendReply = true);
+
 
 
         std::string ApplicationExecute(const Request& request);
@@ -208,6 +215,7 @@ namespace nezha {
         void IndexRecvTd();
         void MissedIndexAckTd();
         void MissedReqAckTd();
+        void GarbageCollectTd();
     };
 
 

@@ -13,6 +13,7 @@
 #include <openssl/sha.h>
 #include <glog/logging.h>
 
+#define CONCURRENT_MAP_START_INDEX (2)
 
 namespace  ReplicaStatus {
     extern char NORMAL;
