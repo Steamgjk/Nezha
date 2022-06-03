@@ -184,9 +184,13 @@ namespace nezha {
         viewChangeTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->BroadcastViewChange();
             }, this, replicaConfig_["view-change-period-ms"].as<int>());
-
-
         roundRobinRequestProcessIdx_ = 0;
+
+
+        periodicSyncTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            ((Replica*)ctx)->SendSyncStatusReport();
+            }, this, replicaConfig_["sync-report-period-ms"].as<int>());
+
 
         stateTransferTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->SendStateTransferRequest();
@@ -1165,6 +1169,18 @@ namespace nezha {
                 ProcessRecoveryReply(reply);
             }
         }
+        else if (msgHdr->msgType == MessageType::SYNC_STATUS_REPORT) {
+            SyncStatusReport report;
+            if (report.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessSyncStatusReport(report);
+            }
+        }
+        else if (msgHdr->msgType == MessageType::COMMIT_INSTRUCTION) {
+            CommitInstruction commit;
+            if (commit.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                ProcessCommitInstruction(commit);
+            }
+        }
 
         else {
             LOG(WARNING) << "Unexpected message type " << (int)msgBuffer[0];
@@ -1287,6 +1303,40 @@ namespace nezha {
 
     }
 
+    void Replica::SendSyncStatusReport() {
+        SyncStatusReport report;
+        report.set_view(viewId_);
+        report.set_replicaid(replicaId_);
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        report.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        report.set_syncedlogid(maxSyncedLogId_);
+        if (AmLeader()) {
+            // leader directly process its own report
+            ProcessSyncStatusReport(report);
+        }
+        else {
+            // send to leader
+            masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewId_ % replicaNum_]), report, MessageType::SYNC_STATUS_REPORT);
+        }
+
+    }
+
+    void Replica::SendCommit() {
+        CommitInstruction commit;
+        commit.set_view(viewId_);
+        commit.set_replicaid(replicaId_);
+        CrashVectorStruct* cv = crashVectorInUse_[0].load();
+        commit.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+        commit.set_committedlogid(committedLogId_);
+        for (uint32_t i = 0; i < replicaNum_; i++) {
+            if (i != replicaId_) {
+                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewId_ % replicaNum_]), commit, MessageType::COMMIT_INSTRUCTION);
+            }
+        }
+
+    }
+
+
     void Replica::ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq)
     {
         if (status_ == ReplicaStatus::RECOVERING) {
@@ -1299,10 +1349,9 @@ namespace nezha {
         }
         if (Aggregated(viewChangeReq.cv())) {
             // If cv is updated, then it is likely that some messages in viewChangeSet_ become stray, so remove them 
-            CrashVectorStruct* cv = crashVectorInUse_[0];
             for (uint32_t i = 0; i < replicaNum_; i++) {
                 auto iter = viewChangeSet_.find(i);
-                if (iter != viewChangeSet_.end() && iter->second.cv(i) < cv->cv_[i]) {
+                if (iter != viewChangeSet_.end() && (!CheckCV(i, iter->second.cv()))) {
                     viewChangeSet_.erase(i);
                 }
             }
@@ -1351,10 +1400,9 @@ namespace nezha {
             else {
                 viewChangeSet_[viewChange.replicaid()] = viewChange;
                 // If cv is updated, then it is likely that some messages in viewChangeSet_ become stray, so remove them 
-                CrashVectorStruct* cv = crashVectorInUse_[0];
                 for (uint32_t i = 0; i < replicaNum_; i++) {
                     auto iter = viewChangeSet_.find(i);
-                    if (iter != viewChangeSet_.end() && iter->second.cv(i) < cv->cv_[i]) {
+                    if (iter != viewChangeSet_.end() && (!CheckCV(i, iter->second.cv()))) {
                         viewChangeSet_.erase(i);
                     }
                 }
@@ -1827,10 +1875,9 @@ namespace nezha {
         else {
             if (Aggregated(reply.cv())) {
                 // If cv is updated, then it is likely that some messages in recoveryReplySet_ become stray, so remove them 
-                CrashVectorStruct* cv = crashVectorInUse_[0];
                 for (uint32_t i = 0; i < replicaNum_; i++) {
                     auto iter = recoveryReplySet_.find(i);
-                    if (iter != recoveryReplySet_.end() && iter->second.cv(i) < cv->cv_[i]) {
+                    if (iter != recoveryReplySet_.end() && (!CheckCV(i, iter->second.cv()))) {
                         recoveryReplySet_.erase(i);
                     }
                 }
@@ -1890,6 +1937,62 @@ namespace nezha {
             }
         }
         return true;
+    }
+
+    void Replica::ProcessSyncStatusReport(const SyncStatusReport& report) {
+        if (!CheckCV(report.replicaid(), report.cv())) {
+            // Stray message
+            return;
+        }
+        else {
+            if (Aggregated(report.cv())) {
+                // Possibly make existing msg become stray
+                for (uint32_t i = 0; i < replicaId_; i++) {
+                    auto iter = syncStatusSet_.find(i);
+                    if (iter != syncStatusSet_.end() && (!CheckCV(i, iter->second.cv()))) {
+                        syncStatusSet_.erase(i);
+                    }
+                }
+            }
+        }
+
+        if (!CheckView(report.view())) {
+            return;
+        }
+
+        auto iter = syncStatusSet_.find(report.replicaid());
+        if (iter != syncStatusSet_.end() && iter->second.syncedlogid() < report.syncedlogid()) {
+            syncStatusSet_[report.replicaid()] = report;
+        }
+
+        if (syncStatusSet_.size() >= replicaNum_ / 2 + 1) {
+            uint32_t minLogId = UINT32_MAX;
+            for (const auto& kv : syncStatusSet_) {
+                if (minLogId > kv.second.syncedlogid()) {
+                    minLogId = kv.second.syncedlogid();
+                }
+            }
+            if (minLogId >= committedLogId_) {
+                committedLogId_ = minLogId;
+                SendCommit();
+            }
+        }
+
+    }
+
+    void Replica::ProcessCommitInstruction(const CommitInstruction& commit) {
+        if (!CheckCV(commit.replicaid(), commit.cv())) {
+            return;
+        }
+        else {
+            Aggregated(commit.cv());
+        }
+        if (!CheckView(commit.view())) {
+            return;
+        }
+        if (commit.committedlogid() > committedLogId_) {
+            committedLogId_ = commit.committedlogid();
+        }
     }
 
     bool Replica::CheckView(const uint32_t view) {

@@ -95,6 +95,7 @@ namespace nezha {
         TimerStruct* requestAskTimer_;
         TimerStruct* viewChangeTimer_;
         TimerStruct* stateTransferTimer_;
+        TimerStruct* periodicSyncTimer_;
         TimerStruct* crashVectorRequestTimer_;
         TimerStruct* recoveryRequestTimer_;
         std::vector<UDPSocketEndpoint*> indexSender_;
@@ -137,8 +138,8 @@ namespace nezha {
         std::string nonce_;
         std::map<uint32_t, CrashVectorReply> crashVectorReplySet_;
         std::map<uint32_t, RecoveryReply> recoveryReplySet_;
-
         std::map<uint32_t, ViewChange> viewChangeSet_;
+        std::map<uint32_t, SyncStatusReport> syncStatusSet_;
 
         ConcurrentMap<uint64_t, Address*> proxyAddressMap_; // Inserted by receiver threads, and looked up by fast/slow reply threads
 
@@ -159,6 +160,8 @@ namespace nezha {
 
         void CreateContext();
         void LaunchThreads();
+        void EnterNewView();
+        void ResetContext();
         void StartViewChange();
         void BroadcastViewChange();
         void SendViewChangeRequest(const int toReplicaId);
@@ -168,9 +171,9 @@ namespace nezha {
         void BroadcastCrashVectorRequest();
         void BroadcastRecoveryRequest();
         void SendStartView(const int toReplicaId);
-        void EnterNewView();
-        void ResetContext();
         void SendStateTransferRequest();
+        void SendSyncStatusReport();
+        void SendCommit();
 
         void RollbackToViewChange();
         void RollbackToRecovery();
@@ -187,6 +190,8 @@ namespace nezha {
         void ProcessCrashVectorReply(const CrashVectorReply& reply);
         void ProcessRecoveryRequest(const RecoveryRequest& request);
         void ProcessRecoveryReply(const RecoveryReply& reply);
+        void ProcessSyncStatusReport(const SyncStatusReport& report);
+        void ProcessCommitInstruction(const CommitInstruction& commit);
         void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq = true, const bool sendReply = true);
 
 

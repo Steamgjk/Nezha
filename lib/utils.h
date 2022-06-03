@@ -42,6 +42,8 @@ namespace MessageType {
     extern char CRASH_VECTOR_REPLY;
     extern char RECOVERY_REQUEST;
     extern char RECOVERY_REPLY;
+    extern char SYNC_STATUS_REPORT;
+    extern char COMMIT_INSTRUCTION;
 };
 
 namespace StateTransferType {

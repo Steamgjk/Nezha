@@ -117,3 +117,17 @@ message RecoveryReply {
     uint32 replicaid = 3;
     uint32 syncedlogid = 4;
 }
+
+message SyncStatusReport {
+    uint32 view = 1;
+    repeated uint32 cv = 2;
+    uint32 replicaid = 3;
+    uint32 syncedlogid = 4;
+}
+
+message CommitInstruction {
+    uint32 view = 1;
+    repeated uint32 cv = 2;
+    uint32 replicaid = 3;
+    uint32 committedlogid = 4;
+}
