@@ -425,7 +425,6 @@ namespace nezha {
         bool amLeader = AmLeader();
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
-
             if (processQu_.try_dequeue(req)) {
                 reqKey = req->clientid();
                 reqKey = ((reqKey << 32u) | (req->reqid()));
@@ -506,6 +505,7 @@ namespace nezha {
     }
 
     void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq, const bool sendReply) {
+        lastReleasedEntryByKeys_[request.key()] = std::pair<uint64_t, uint64_t>(deadline, reqKey);
         SHA_HASH myHash = CalculateHash(deadline, reqKey);
         SHA_HASH hash = myHash;
         uint64_t opKeyAndId = 0ul;

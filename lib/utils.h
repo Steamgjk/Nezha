@@ -102,6 +102,9 @@ struct LogEntry {
     bool LessThan(const LogEntry& bigger) {
         return (deadline < bigger.deadline || (deadline == bigger.deadline && reqKey < bigger.reqKey));
     }
+    bool LessThan(const std::pair<uint64_t, uint64_t>& bigger) {
+        return (deadline < bigger.first || (deadline == bigger.first && reqKey < bigger.second));
+    }
 
 };
 

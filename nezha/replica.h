@@ -42,6 +42,7 @@ namespace nezha {
         }
     };
 
+    // TODO: How to update lastReleasedEntryByKeys_?
     class Replica
     {
     private:
