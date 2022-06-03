@@ -123,12 +123,16 @@ namespace nezha {
         std::pair<uint32_t, uint32_t> missedIndices_; // Missed Indices during index synchronization
 
 
+        uint32_t stateRequestTransferBatch_;
+        uint64_t stateTransferTimeout_;
         std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
+        std::uint64_t stateTransferTerminateTime_; // When it comes to thsi time, the state transfer is forced to be terminated
         std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
         bool transferSyncedEntry_;
-        uint32_t stateRequestTransferBatch_;
+
         std::function<void(void)> stateTransferCallback_;
         // TODO: There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
+        std::function<void(void)> stateTransferTerminateCallback_;
 
         std::string nonce_;
         std::map<uint32_t, CrashVectorReply> crashVectorReplySet_;
@@ -165,7 +169,11 @@ namespace nezha {
         void BroadcastRecoveryRequest();
         void SendStartView(const int toReplicaId);
         void EnterNewView();
+        void ResetContext();
         void SendStateTransferRequest();
+
+        void RollbackToViewChange();
+        void RollbackToRecovery();
 
         void BlockWhenStatusIs(char targetStatus);
 

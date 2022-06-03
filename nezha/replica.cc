@@ -1,41 +1,22 @@
 #include "nezha/replica.h"
 
 namespace nezha {
-    Replica::Replica(const std::string& configFile)
+    Replica::Replica(const std::string& configFile) :viewId_(0), lastNormalView_(0)
     {
         // Load Config
         replicaConfig_ = YAML::LoadFile(configFile);
-
-        viewId_ = 0;
-        lastNormalView_ = 0;
-        replicaId_ = replicaConfig_["replica-id"].as<int>();
-        replicaNum_ = replicaConfig_["replica-ips"].size();
-        keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
-        lastReleasedEntryByKeys_.resize(keyNum_, std::pair<uint64_t, uint64_t>(0, 0));
-        // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
-        maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
-        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
-        maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
-
-        maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
-        maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-        unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
-
-
-        status_ = ReplicaStatus::NORMAL;
+        CreateContext();
         LOG(INFO) << "viewId_=" << viewId_
             << "\treplicaId=" << replicaId_
             << "\treplicaNum=" << replicaNum_
             << "\tkeyNum=" << keyNum_;
-
-
-        CreateContext();
         // Launch Threads (based on Config)
         LaunchThreads();
-
         // Master thread run
         masterContext_.Register();
+        if (status_ == ReplicaStatus::RECOVERING) {
+            masterContext_.endPoint_->RegisterTimer(crashVectorRequestTimer_);
+        }
         masterContext_.endPoint_->LoopRun();
 
     }
@@ -49,6 +30,26 @@ namespace nezha {
     }
 
     void Replica::CreateContext() {
+        replicaId_ = replicaConfig_["replica-id"].as<int>();
+        replicaNum_ = replicaConfig_["replica-ips"].size();
+        keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
+        lastReleasedEntryByKeys_.resize(keyNum_, std::pair<uint64_t, uint64_t>(0, 0));
+        // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
+        maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
+        maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+        maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+        maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+        unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+
+        if (replicaConfig_["recovering"].as<uint32_t>() > 0) {
+            status_ = ReplicaStatus::RECOVERING;
+        }
+        else {
+            status_ = ReplicaStatus::NORMAL;
+        }
+
         // Create master endpoints and context
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         int port = replicaConfig_["master-port"].as<int>();
@@ -192,6 +193,7 @@ namespace nezha {
             }, this, replicaConfig_["state-transfer-period-ms"].as<int>());
 
         stateRequestTransferBatch_ = replicaConfig_["request-transfer-max-batch"].as<uint32_t>();
+        stateTransferTimeout_ = replicaConfig_["state-transfer-timeout-ms"].as<uint64_t>();
 
         crashVectorRequestTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->BroadcastCrashVectorRequest();
@@ -203,6 +205,85 @@ namespace nezha {
 
     }
 
+    void Replica::ResetContext() {
+        // Clear reply queues 
+        for (uint32_t i = 0; i < fastReplyQu_.size(); i++) {
+            LogEntry* entry;
+            while (fastReplyQu_[i].try_dequeue(entry)) {}
+            while (slowReplyQu_[i].try_dequeue(entry)) {}
+        }
+
+        // Clear UnSyncedLogs
+        // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
+        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
+        maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+        minUnSyncedLogIdByKey_.clear();
+        maxUnSyncedLogIdByKey_.clear();
+        unsyncedLogIdByKeyToClear_.clear();
+        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+        maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+        unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+        ConcurrentMap<uint32_t, LogEntry*>::Iterator iter(unsyncedEntries_);
+        std::vector<uint64_t> keysToRemove;
+        while (iter.isValid()) {
+            keysToRemove.push_back(iter.getKey());
+            iter.next();
+        }
+        for (auto& k : keysToRemove) {
+            unsyncedEntries_.erase(k);
+        }
+
+        ConcurrentMap<uint64_t, LogEntry*>::Iterator iter2(unsyncedEntriesByKey_);
+        keysToRemove.clear();
+        while (iter2.isValid()) {
+            keysToRemove.push_back(iter2.getKey());
+            LogEntry* entry = iter2.getValue();
+            delete entry;
+            iter2.next();
+        }
+        for (auto& k : keysToRemove) {
+            unsyncedEntries_.erase(k);
+        }
+
+        ConcurrentMap<uint64_t, uint32_t>::Iterator iter3(unsyncedReq2LogId_);
+        keysToRemove.clear();
+        while (iter3.isValid()) {
+            keysToRemove.push_back(iter3.getKey());
+            iter3.next();
+        }
+        for (auto& k : keysToRemove) {
+            unsyncedReq2LogId_.erase(k);
+        }
+
+        ConcurrentMap<uint64_t, Request*>::Iterator iter4(unsyncedRequestMap_);
+        keysToRemove.clear();
+        while (iter4.isValid()) {
+            keysToRemove.push_back(iter4.getKey());
+            iter4.next();
+            if (syncedRequestMap_.get(iter4.getKey()) == NULL) {
+                // This request is useless, free it
+                Request* request = iter4.getValue();
+                delete request;
+            }
+        }
+        for (auto& k : keysToRemove) {
+            unsyncedRequestMap_.erase(k);
+        }
+
+
+        roundRobinIndexAskIdx_ = 0;
+        // Initially, no missed indices, so we make first > second
+        missedIndices_.first = 1;
+        missedIndices_.second = 0;
+        roundRobinRequestAskIdx_ = 0;
+        missedReqKeys_.clear();
+        roundRobinRequestProcessIdx_ = 0;
+
+        stateTransferIndices_.clear();
+        viewChangeSet_.clear();
+        crashVectorReplySet_.clear();
+        recoveryReplySet_.clear();
+    }
 
     void Replica::LaunchThreads() {
         activeWorkerNum_ = 0;
@@ -854,7 +935,6 @@ namespace nezha {
     }
 
 
-    // TODO: ack to request receiver
     void Replica::ReceiveAskMissedReq(char* msgBuffer, int msgLen) {
         if (!CheckMsgLength(msgBuffer, msgLen)) {
             return;
@@ -1338,6 +1418,8 @@ namespace nezha {
             // After this state transfer has been completed, continue to execute the callback (MergeUnsyncedLog)
 
             stateTransferCallback_ = std::bind(&Replica::TransferUnSyncedLog, this);
+            stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
+            stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToViewChange, this);
             // Start the state tranfer timer
             masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
         }
@@ -1357,6 +1439,8 @@ namespace nezha {
         transferSyncedEntry_ = false;
         // After this state transfer is completed, this replica will enter the new view
         stateTransferCallback_ = std::bind(&Replica::MergeUnSyncedLog, this);
+        stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
+        stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToViewChange, this);
         masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
     }
 
@@ -1395,31 +1479,26 @@ namespace nezha {
         for (uint32_t i = 1; i < crashVectorVecSize_; i++) {
             crashVectorInUse_[i] = masterCV;
         }
-        // Clean CrashVectorMap;
-        ConcurrentMap<uint32_t, CrashVectorStruct*>::Iterator iter(crashVector_);
-        std::vector<uint32_t> keysToDel;
-        keysToDel.reserve(1000);
-        while (iter.isValid()) {
-            keysToDel.push_back(iter.getKey());
-        }
-        for (auto& key : keysToDel) {
-            crashVector_.erase(key);
-        }
         crashVector_.assign(masterCV->version_, masterCV);
-        // TODO: mark gc start version
 
-
+        // More lightweight than CreateContext
+        ResetContext();
         // Notify the blocking workers until all workers become active 
         while (activeWorkerNum_ < totalWorkerNum_) {
             waitVar_.notify_all();
             usleep(1000);
         }
-
     }
 
 
     void Replica::SendStateTransferRequest() {
         // TODO: If statetransfer cannot be completed within a certain amount of time, rollback to view change
+        if (GetMicrosecondTimestamp() >= stateTransferTerminateTime_) {
+            masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
+            stateTransferTerminateCallback_();
+            return;
+        }
+
         StateTransferRequest request;
         request.set_view(viewId_);
         request.set_replicaid(replicaId_);
@@ -1614,8 +1693,10 @@ namespace nezha {
                     stateTransferIndices_.clear();
                     stateTransferIndices_[startView.replicaid()] = std::pair<uint32_t, uint32_t>(committedLogId_ + 1, startView.syncedlogid());
                     stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
+                    stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
+                    stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToViewChange, this);
                     transferSyncedEntry_ = true;
-                    SendStateTransferRequest();
+                    masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
                 }
                 else {
                     EnterNewView();
@@ -1780,14 +1861,11 @@ namespace nezha {
                 stateTransferIndices_[maxView % replicaNum_] = std::pair<uint32_t, uint32_t>(2, syncedLogId);
                 stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
                 transferSyncedEntry_ = true;
+                stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
+                stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToRecovery, this);
                 masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
             }
-
-
         }
-
-
-
     }
 
     bool Replica::CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv) {
@@ -1870,6 +1948,21 @@ namespace nezha {
         return needAggregate;
     }
 
+    void Replica::RollbackToViewChange() {
+        status_ = ReplicaStatus::VIEWCHANGE;
+        viewChangeSet_.clear();
+        if (false == masterContext_.endPoint_->isRegistered(viewChangeTimer_)) {
+            masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
+        }
+    }
+
+    void Replica::RollbackToRecovery() {
+        status_ = ReplicaStatus::RECOVERING;
+        recoveryReplySet_.clear();
+        if (false == masterContext_.endPoint_->isRegistered(recoveryRequestTimer_)) {
+            masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
+        }
+    }
 
 
     std::string Replica::ApplicationExecute(const Request& req) {
