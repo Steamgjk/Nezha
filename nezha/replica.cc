@@ -287,6 +287,7 @@ namespace nezha {
         viewChangeSet_.clear();
         crashVectorReplySet_.clear();
         recoveryReplySet_.clear();
+        syncStatusSet_.clear();
     }
 
     void Replica::LaunchThreads() {
@@ -1096,7 +1097,9 @@ namespace nezha {
             return;
         }
         if (status_ != ReplicaStatus::NORMAL) {
-            StartViewChange();
+            // Some worker threads have detected viewchange and switch status_ to VIEWCHANGE
+            // But workers have no priviledge to increment viewId_ and initiate view change process, so the master will do that
+            InitiateViewChange(viewId_ + 1);
             return;
         }
         uint64_t nowTime = GetMicrosecondTimestamp();
@@ -1104,7 +1107,7 @@ namespace nezha {
         if (lastHeartBeatTime_ + threashold < nowTime) {
             // I haven't heard from the leader for too long, it probably has died
             // Before start view change, clear context
-            StartViewChange();
+            InitiateViewChange(viewId_ + 1);
         }
     }
 
@@ -1188,25 +1191,6 @@ namespace nezha {
 
     }
 
-    void Replica::StartViewChange() {
-        status_ = ReplicaStatus::VIEWCHANGE;
-        if (masterContext_.endPoint_->isRegistered(viewChangeTimer_)) {
-            // Already launched viewchange timer
-            return;
-        }
-
-        // ViewChange has not been initiated, so let's do that
-        while (activeWorkerNum_ > 0) {
-            // Wait until all workers have been blocked
-            usleep(1000);
-        }
-        // Every other threads have stopped, no worry about data race any more
-        viewId_++;
-        // Initiate the ViewChange
-        masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
-
-    }
-
     void Replica::SendViewChangeRequest(const int toReplicaId) {
         ViewChangeRequest viewChangeReq;
         viewChangeReq.set_view(viewId_);
@@ -1258,8 +1242,22 @@ namespace nezha {
     }
 
     void Replica::InitiateViewChange(const uint32_t view) {
+        if (viewId_ > view) {
+            LOG(ERROR) << "Invalid view change initiation currentView=" << viewId_ << "\ttargetView=" << view;
+            return;
+        }
+
+        if (viewId_ == view && status_ == ReplicaStatus::VIEWCHANGE) {
+            // Already in viewchange
+            return;
+        }
         viewId_ = view;
         status_ = ReplicaStatus::VIEWCHANGE;
+
+        // Wait until every worker stop
+        while (activeWorkerNum_ > 0) {
+            usleep(1000);
+        }
         // Launch the timer
         if (masterContext_.endPoint_->isRegistered(viewChangeTimer_) == false) {
             masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);

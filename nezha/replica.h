@@ -30,9 +30,6 @@ namespace nezha {
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
 
-
-
-
     struct Context
     {
         UDPSocketEndpoint* endPoint_;
@@ -162,11 +159,11 @@ namespace nezha {
         void LaunchThreads();
         void EnterNewView();
         void ResetContext();
-        void StartViewChange();
+        void InitiateViewChange(const uint32_t view);
         void BroadcastViewChange();
         void SendViewChangeRequest(const int toReplicaId);
         void SendViewChange();
-        void InitiateViewChange(const uint32_t view);
+
         void InitiateRecovery();
         void BroadcastCrashVectorRequest();
         void BroadcastRecoveryRequest();
