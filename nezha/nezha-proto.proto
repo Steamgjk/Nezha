@@ -19,6 +19,8 @@ message Reply {
     bytes hash = 5;
     bytes result = 6;
     uint32 replytype = 7;
+    uint32 owd = 8;
+    uint32 syncedlogid = 9; // use this value to piggyback slow-reply
 }
 
 message IndexSync {

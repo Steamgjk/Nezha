@@ -1,0 +1,253 @@
+#include "nezha/proxy.h"
+
+namespace nezha
+{
+    Proxy::Proxy(const std::string& configFile)
+    {
+        proxyConfig_ = YAML::LoadFile(configFile);
+        CreateContext();
+        LaunchThreads();
+    }
+
+    Proxy::~Proxy()
+    {
+        for (const auto& kv : threadPool_) {
+            kv.second->join();
+        }
+    }
+
+    int Proxy::CreateSocketFd(const std::string& sip, const int sport) {
+        int fd = socket(PF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) {
+            LOG(ERROR) << "Receiver Fd fail ";
+            return -1;
+        }
+        // Set Non-Blocking
+        int status = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+        if (status < 0) {
+            LOG(ERROR) << " Set NonBlocking Fail";
+            return -1;
+        }
+
+        if (sip != "") {
+            struct sockaddr_in addr;
+            bzero(&addr, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(sport);
+            addr.sin_addr.s_addr = inet_addr(sip.c_str());
+            // Bind socket to Address
+            int bindRet = bind(fd, (struct sockaddr*)&addr, sizeof(addr));
+            if (bindRet != 0) {
+                LOG(ERROR) << "bind error\t" << bindRet;
+                return -1;
+            }
+        }
+        return fd;
+    }
+
+
+    void Proxy::LaunchThreads() {
+        int shardNum = proxyConfig_["shard-num"].as<int>();
+
+        for (int i = 0; i < shardNum; i++) {
+            std::string key = "CheckQuorum-" + std::to_string(i);
+            threadPool_[key] = new std::thread(&Proxy::CheckQuorum, this, i);
+        }
+
+        for (int i = 0; i < shardNum; i++) {
+            std::string key = "ForwardRequests-" + std::to_string(i);
+            threadPool_[key] = new std::thread(&Proxy::ForwardRequests, this, i);
+        }
+    }
+
+    void Proxy::CheckQuorum(const int id) {
+        std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
+        int sz = 0;
+        char buffer[UDP_BUFFER_SIZE];
+        MessageHeader* msghdr = (MessageHeader*)(void*)buffer;
+        struct sockaddr_in recvAddr;
+        socklen_t sockLen;
+        Reply reply;
+        Reply* committedAck = NULL;
+        while (running_) {
+            if (stopForwarding_) {
+                usleep(1000);
+                continue;
+            }
+            if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
+                if ((uint32_t)sz <= sizeof(MessageHeader)) {
+                    continue;
+                }
+                if (msghdr->msgLen + sizeof(MessageHeader) > (uint32_t)sz) {
+                    continue;
+                }
+                if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
+                    uint64_t reqKey = reply.clientid();
+                    reqKey = ((reqKey << 32) | reply.reqid());
+                    if (committedReply_.get(reqKey) != NULL) {
+                        // already committed;  ignore this repluy
+                        continue;
+                    }
+                    committedAck = NULL;
+                    if (reply.replytype() == (uint32_t)MessageType::COMMIT_REPLY) {
+                        committedAck = new Reply(reply);
+                        committedReply_.assign(reqKey, committedAck);
+
+                    }
+                    else if (replyQuorum[reqKey].find(reply.replicaid()) == replyQuorum[reqKey].end()) {
+                        replyQuorum[reqKey][reply.replicaid()] = reply;
+                        committedAck = QuorumReady(replyQuorum[reqKey]);
+                    }
+                    else if (reply.view() > replyQuorum[reqKey].begin()->second.view()) {
+                        // New view has come, clear existing replies for this request
+                        replyQuorum[reqKey].clear();
+                        replyQuorum[reqKey][reply.replicaid()] = reply;
+                        committedAck = QuorumReady(replyQuorum[reqKey]);
+                    }
+                    else if (reply.view() == replyQuorum[reqKey].begin()->second.view()) {
+                        const Reply& existedReply = replyQuorum[reqKey][reply.replicaid()];
+                        if (existedReply.view() < reply.view()) {
+                            replyQuorum[reqKey][reply.replicaid()] = reply;
+                        }
+                        else if (existedReply.view() == reply.view() && existedReply.replytype() < reply.replytype()) {
+                            // FAST_REPLY < SLOW_REPLY < COMMIT_REPLY
+                            replyQuorum[reqKey][reply.replicaid()] = reply;
+                        }
+                        committedAck = QuorumReady(replyQuorum[reqKey]);
+                    } // else: reply.view()< replyQuorum[reqKey].begin()->second.view(), ignore it
+
+                    if (committedAck != NULL) {
+                        // Ack to client
+                        struct sockaddr_in* clientAddr = clientAddrs_.get(reply.clientid());
+                        std::string replyMsg = committedAck->SerializeAsString();
+                        sendto(replyFds_[id], replyMsg.c_str(), replyMsg.length(), 0, (struct sockaddr*)clientAddr, sizeof(sockaddr));
+                        // Add to cache
+                        committedReply_.assign(reqKey, committedAck);
+                        replyQuorum.erase(reqKey);
+                    }
+                }
+
+            }
+
+        }
+
+    }
+
+    Reply* Proxy::QuorumReady(std::map<uint32_t, Reply>& quorum) {
+        // These replies are of the same view for sure (we have previously forbidden inconsistency)
+        uint32_t view = quorum.begin()->second.view();
+        uint32_t leaderId = view % replicaNum_;
+        if (quorum.find(leaderId) == quorum.end()) {
+            return NULL;
+        }
+
+        if (quorum.size() >= (uint32_t)fastQuorum_) {
+            Reply* committedReply = new Reply(quorum[leaderId]);
+            return committedReply;
+        }
+
+        int slowReplyNum = 1; // Leader's fast-reply is counted
+        for (const auto& kv : quorum) {
+            if (kv.first != leaderId && kv.second.replytype() == (uint32_t)MessageType::SLOW_REPLY) {
+                slowReplyNum++;
+            }
+        }
+        if (slowReplyNum >= f_ + 1) {
+            Reply* committedReply = new Reply(quorum[leaderId]);
+            return committedReply;
+        }
+        return NULL;
+    }
+
+
+    void Proxy::ForwardRequests(const int id) {
+        char buffer[UDP_BUFFER_SIZE];
+        MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
+        int sz = -1;
+        struct sockaddr_in receiverAddr;
+        socklen_t len;
+        Request request;
+        uint32_t roundRobinIdx = 0;
+        while (running_) {
+            if (stopForwarding_) {
+                // TODO: Ack some signal back to clients
+                usleep(1000);
+                continue;
+            }
+            if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)&receiverAddr, &len)) > 0) {
+                if (request.ParseFromArray(buffer, sz)) {
+                    request.set_bound(latencyBound_);
+                    request.set_proxyid(proxyIds_[id]);
+                    request.set_sendtime(GetMicrosecondTimestamp());
+                    std::string msg = request.SerializeAsString();
+                    msgHdr->msgType = MessageType::CLIENT_REQUEST;
+                    msgHdr->msgLen = msg.length();
+                    memcpy(buffer + sizeof(MessageHeader), msg.c_str(), msg.length());
+                    if (clientAddrs_.get(request.clientid()) == NULL) {
+                        struct sockaddr_in* addr = new sockaddr_in(receiverAddr);
+                        clientAddrs_.assign(request.clientid(), addr);
+                    }
+
+                    uint64_t reqKey = request.clientid();
+                    reqKey = ((reqKey << 32) | request.reqid());
+                    Reply* commitAck = committedReply_.get(reqKey);
+                    if (commitAck != NULL) {
+                        std::string replyStr = commitAck->SerializeAsString();
+                        sendto(requestReceiveFds_[id], replyStr.c_str(), replyStr.length(), 0, (struct sockaddr*)&receiverAddr, len);
+                        continue;
+                    }
+                    // Send to every replica
+                    for (int i = 0; i < replicaNum_; i++) {
+                        struct sockaddr_in* replicaAddr = replicaAddrs_[i][roundRobinIdx % replicaAddrs_[i].size()];
+                        sendto(forwardFds_[id], buffer, msgHdr->msgLen + sizeof(MessageHeader), 0, (struct sockaddr*)replicaAddr, sizeof(sockaddr_in));
+                    }
+
+                    roundRobinIdx++;
+                }
+            }
+
+        }
+    }
+
+
+    void Proxy::CreateContext() {
+        stopForwarding_ = false;
+        running_ = true;
+        int shardNum = proxyConfig_["shard-num"].as<int>();
+        std::string sip = proxyConfig_["proxy-ip"].as<std::string>();
+        int requestPortBase = proxyConfig_["request-port-base"].as<int>();
+        int replyPortBase = proxyConfig_["reply-port-base"].as<int>();
+        int replicaReceiverPortBase = proxyConfig_["receiver-port"].as<int>();
+        int replicaReceiverShard = proxyConfig_["receiver-shards"].as<int>();
+        uint32_t proxyId = proxyConfig_["proxy-id"].as<uint32_t>();
+        forwardFds_.resize(shardNum, -1);
+        requestReceiveFds_.resize(shardNum, -1);
+        replyFds_.resize(shardNum, -1);
+        proxyIds_.resize(shardNum, proxyId);
+        for (int i = 0; i < shardNum; i++) {
+            forwardFds_[i] = CreateSocketFd(sip, replyPortBase + i);
+            requestReceiveFds_[i] = CreateSocketFd(sip, requestPortBase + i);
+            replyFds_[i] = CreateSocketFd("", -1);
+            proxyIds_[i] = ((proxyIds_[i] << 32) | (uint32_t)i);
+        }
+        replicaNum_ = proxyConfig_["replica-ips"].size();
+        assert(replicaNum_ % 2 == 1);
+        f_ = replicaNum_ / 2;
+        fastQuorum_ = (f_ % 2 == 1) ? (f_ + (f_ + 1) / 2 + 1) : (f_ + f_ / 2 + 1);
+        replicaAddrs_.resize(replicaNum_);
+        for (int i = 0; i < replicaNum_; i++) {
+            std::string replicaIP = proxyConfig_["replica-ips"][i].as<std::string>();
+            for (int j = 0; j < replicaReceiverShard; j++) {
+                struct sockaddr_in* addr = new sockaddr_in();
+                bzero(addr, sizeof(struct sockaddr_in));
+                addr->sin_family = AF_INET;
+                addr->sin_port = htons(replicaReceiverPortBase + j);
+                addr->sin_addr.s_addr = inet_addr(replicaIP.c_str());
+                replicaAddrs_[i].push_back(addr);
+            }
+        }
+
+    }
+
+
+} // namespace nezha

@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <functional>
 #include <set>
+#include <fcntl.h>
 #include "lib/address.h"
 #include "lib/utils.h"
 #include "nezha/nezha-proto.pb.h"

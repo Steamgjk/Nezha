@@ -47,7 +47,6 @@ namespace nezha {
     {
     private:
         YAML::Node replicaConfig_;
-
         std::atomic<uint32_t> viewId_;
         std::atomic<uint32_t> lastNormalView_;
         std::atomic<uint32_t> replicaId_;
@@ -207,7 +206,7 @@ namespace nezha {
         void MergeUnSyncedLog();
 
     public:
-        Replica(const std::string& configFile = std::string("../configs/nezha-replica.config.yaml"));
+        Replica(const std::string& configFile = std::string("../configs/nezha-replica-config.yaml"));
         ~Replica();
 
         void ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);

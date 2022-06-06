@@ -1,6 +1,13 @@
 #include "nezha/replica.h"
 
 namespace nezha {
+#define GJK_DEBUG
+#ifdef GJK_DEBUG
+#define ASSERT(x) assert(x)
+#else 
+#define ASSERT(x) {}
+#endif
+
     Replica::Replica(const std::string& configFile) :viewId_(0), lastNormalView_(0)
     {
         // Load Config
@@ -23,7 +30,9 @@ namespace nezha {
 
     Replica::~Replica()
     {
+        status_ = ReplicaStatus::TERMINATED;
         for (auto& kv : threadPool_) {
+            kv.second->join();
             delete kv.second;
             LOG(INFO) << "Deleted\t" << kv.first;
         }
@@ -33,7 +42,7 @@ namespace nezha {
         replicaId_ = replicaConfig_["replica-id"].as<int>();
         replicaNum_ = replicaConfig_["replica-ips"].size();
         keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
-        lastReleasedEntryByKeys_.resize(keyNum_, std::pair<uint64_t, uint64_t>(0, 0));
+        lastReleasedEntryByKeys_.resize(keyNum_, { 0ul,0ul });
         // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
         maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
@@ -229,6 +238,20 @@ namespace nezha {
         maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+
+        // Reset lastReleasedEntryByKeys_, no need to care about UnSyncedLogs, because they are all cleared
+        for (uint32_t key = 0; key < keyNum_; key++) {
+            if (maxSyncedLogIdByKey_[key] < CONCURRENT_MAP_START_INDEX) {
+                lastReleasedEntryByKeys_[key] = { 0ul, 0ul };
+            }
+            else {
+                uint64_t opKeyAndId = key;
+                opKeyAndId = ((opKeyAndId << 32u) | maxSyncedLogIdByKey_[key]);
+                LogEntry* entry = syncedEntriesByKey_.get(opKeyAndId);
+                ASSERT(entry != NULL);
+                lastReleasedEntryByKeys_[key] = { entry->deadline, entry->reqKey };
+            }
+        }
 
         ConcurrentMap<uint32_t, LogEntry*>::Iterator iter(unsyncedEntries_);
         std::vector<uint64_t> keysToRemove;
@@ -498,6 +521,7 @@ namespace nezha {
                 uint64_t deadline = earlyBuffer_.begin()->first.first;
                 uint64_t reqKey = earlyBuffer_.begin()->first.second;
                 Request* req = earlyBuffer_.begin()->second;
+                lastReleasedEntryByKeys_[req->key()] = { deadline, reqKey };
                 ProcessRequest(deadline, reqKey, *req, AmLeader(), true);
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
@@ -505,7 +529,6 @@ namespace nezha {
     }
 
     void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq, const bool sendReply) {
-        lastReleasedEntryByKeys_[request.key()] = std::pair<uint64_t, uint64_t>(deadline, reqKey);
         SHA_HASH myHash = CalculateHash(deadline, reqKey);
         SHA_HASH hash = myHash;
         uint64_t opKeyAndId = 0ul;
@@ -598,7 +621,7 @@ namespace nezha {
                                 opKeyAndId = entry->opKey;
                                 opKeyAndId = ((opKeyAndId << 32u) | unsyncedPointStart);
                                 unsyncedEntryBoundary = unsyncedEntriesByKey_.get(opKeyAndId);
-                                assert(unsyncedEntryBoundary != NULL);
+                                ASSERT(unsyncedEntryBoundary != NULL);
                                 if (unsyncedEntryBoundary->LessThan(*syncedEntry)) {
                                     unsyncedPointStart++;
                                 }
@@ -677,7 +700,7 @@ namespace nezha {
                 indexSyncMsg.set_logidend(logEnd);
                 for (uint32_t i = indexSyncMsg.logidbegin(); i <= indexSyncMsg.logidend(); i++) {
                     LogEntry* entry = syncedEntries_.get(i);
-                    assert(entry != NULL);
+                    ASSERT(entry != NULL);
                     indexSyncMsg.add_deadlines(entry->deadline);
                     indexSyncMsg.add_reqkeys(entry->reqKey);
                 }
@@ -826,7 +849,7 @@ namespace nezha {
                     opKeyAndId = req->key();
                     opKeyAndId = ((opKeyAndId << 32u) | m);
                     LogEntry* minEntry = unsyncedEntriesByKey_.get(opKeyAndId);
-                    assert(minEntry != NULL);
+                    ASSERT(minEntry != NULL);
                     if (minEntry->LessThan(*entry)) {
                         // This minEntry is useless
                         m++;
@@ -1016,7 +1039,7 @@ namespace nezha {
                             if (syncedRequestMap_.get(entry->reqKey) == NULL) {
                                 // We can delete the unsynced request
                                 Request* request = unsyncedRequestMap_.get(entry->reqKey);
-                                assert(request != NULL);
+                                ASSERT(request != NULL);
                                 delete request;
                             }
                             unsyncedEntriesByKey_.erase(opKeyAndId);
@@ -1035,6 +1058,10 @@ namespace nezha {
     }
 
     void Replica::CheckHeartBeat() {
+        if (status_ == ReplicaStatus::TERMINATED) {
+            masterContext_.endPoint_->LoopBreak();
+            return;
+        }
         if (AmLeader()) {
             return;
         }
@@ -1333,7 +1360,7 @@ namespace nezha {
                     }
                 }
                 if (viewChangeSet_.size() >= replicaNum_ / 2) {
-                    assert(viewChangeSet_.find(replicaId_) == viewChangeSet_.end());
+                    ASSERT(viewChangeSet_.find(replicaId_) == viewChangeSet_.end());
                     // Got f viewChange
                     // Plus myself, got f+1 viewChange messages 
                     ViewChange myvc;
@@ -1379,12 +1406,12 @@ namespace nezha {
         // Directly copy the synced entries
         if (largestNormalView == this->lastNormalView_) {
             if (maxSyncedLogId_ < largestSyncPoint) {
-                stateTransferIndices_[targetReplicaId] = std::pair<uint32_t, uint32_t>(maxSyncedLogId_ + 1, largestSyncPoint);
+                stateTransferIndices_[targetReplicaId] = { maxSyncedLogId_ + 1, largestSyncPoint };
             }
             // Else: no need to do state transfer, because this replica has all synced entries
         }
         else {
-            stateTransferIndices_[targetReplicaId] = std::pair<uint32_t, uint32_t>(committedLogId_ + 1, largestSyncPoint);
+            stateTransferIndices_[targetReplicaId] = { committedLogId_ + 1, largestSyncPoint };
         }
 
         if (!stateTransferIndices_.empty()) {
@@ -1408,7 +1435,7 @@ namespace nezha {
         // TODO: If this process cannot be completed, rollback to view change
         stateTransferIndices_.clear();
         for (auto& kv : viewChangeSet_) {
-            stateTransferIndices_[kv.first] = std::pair<uint32_t, uint32_t>(kv.second.unsyncedlogbegin(), kv.second.unsyncedlogend());
+            stateTransferIndices_[kv.first] = { kv.second.unsyncedlogbegin(), kv.second.unsyncedlogend() };
         }
         transferSyncedEntry_ = false;
         // After this state transfer is completed, this replica will enter the new view
@@ -1518,10 +1545,10 @@ namespace nezha {
 
         // For Debug: Should be deleted after testing
         if (reply.issynced()) {
-            assert(maxSyncedLogId_ >= reply.logend());
+            ASSERT(maxSyncedLogId_ >= reply.logend());
         }
         else {
-            assert(maxUnSyncedLogId_ >= reply.logend() && minUnSyncedLogId_ <= reply.logbegin());
+            ASSERT(maxUnSyncedLogId_ >= reply.logend() && minUnSyncedLogId_ <= reply.logbegin());
         }
 
         std::pair<uint64_t, uint64_t> syncPoint(0, 0);
@@ -1542,7 +1569,7 @@ namespace nezha {
 
             std::pair<uint64_t, uint64_t> key(entry->deadline, entry->reqKey);
             if (key <= syncPoint) {
-                assert(reply.issynced() == false);
+                ASSERT(reply.issynced() == false);
                 continue;
             }
             reply.add_reqs()->CopyFrom(*request);
@@ -1605,7 +1632,7 @@ namespace nezha {
         if (stateTransferReply.issynced()) {
             // This is the state-transfer for synced requests
             for (uint32_t i = iter->second.first; i <= stateTransferReply.logend(); i++) {
-                assert(syncedRequestMap_.get(i) == NULL);
+                ASSERT(syncedRequestMap_.get(i) == NULL);
                 Request* request = new Request(stateTransferReply.reqs(i - iter->second.first));
                 syncedRequestMap_.assign(i, request);
                 uint64_t deadline = request->sendtime();
@@ -1623,7 +1650,7 @@ namespace nezha {
                 std::pair<uint64_t, uint64_t> key(deadline, reqKey);
                 if (requestsToMerge_.find(key) != requestsToMerge_.end()) {
                     Request* request = new Request(stateTransferReply.reqs(i));
-                    requestsToMerge_[key] = std::pair<Request*, uint32_t>(request, 1);
+                    requestsToMerge_[key] = { request, 1 };
                 }
                 else {
                     requestsToMerge_[key].second++;
@@ -1664,7 +1691,7 @@ namespace nezha {
                 uint64_t keyAndId = key;
                 keyAndId = ((keyAndId << 32u) | maxSyncedLogIdByKey_[key]);
                 LogEntry* entry = syncedEntriesByKey_.get(keyAndId);
-                assert(entry != NULL);
+                ASSERT(entry != NULL);
                 uint32_t logId = syncedReq2LogId_.get(entry->reqKey);
                 if (logId > maxSyncedLogId_) {
                     // Should be cleared
@@ -1707,7 +1734,7 @@ namespace nezha {
                     // Start StateTransfer
                     RewindSyncedLogTo(committedLogId_);
                     stateTransferIndices_.clear();
-                    stateTransferIndices_[startView.replicaid()] = std::pair<uint32_t, uint32_t>(committedLogId_ + 1, startView.syncedlogid());
+                    stateTransferIndices_[startView.replicaid()] = { committedLogId_ + 1, startView.syncedlogid() };
                     stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
                     stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
                     stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToViewChange, this);
@@ -1874,7 +1901,7 @@ namespace nezha {
             else {
                 // Launch state transfer
                 stateTransferIndices_.clear();
-                stateTransferIndices_[maxView % replicaNum_] = std::pair<uint32_t, uint32_t>(2, syncedLogId);
+                stateTransferIndices_[maxView % replicaNum_] = { 2, syncedLogId };
                 stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
                 transferSyncedEntry_ = true;
                 stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;

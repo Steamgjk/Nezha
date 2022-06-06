@@ -7,6 +7,11 @@ UDPSocketEndpoint::UDPSocketEndpoint() :addr_("", -1) {
     if (fd_ < 0) {
         LOG(ERROR) << "Receiver Fd fail ";
     }
+    // Set Non-Blocking
+    int status = fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL, 0) | O_NONBLOCK);
+    if (status < 0) {
+        LOG(ERROR) << " Set NonBlocking Fail";
+    }
     evLoop_ = ev_loop_new();
 }
 UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver) :addr_(sip, sport) {
@@ -14,6 +19,11 @@ UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport, co
     if (fd_ < 0) {
         LOG(ERROR) << "Receiver Fd fail ";
         return;
+    }
+    // Set Non-Blocking
+    int status = fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL, 0) | O_NONBLOCK);
+    if (status < 0) {
+        LOG(ERROR) << " Set NonBlocking Fail";
     }
     struct sockaddr_in addr;
     bzero(&addr, sizeof(addr));

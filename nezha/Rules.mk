@@ -4,16 +4,18 @@ d := $(dir $(lastword $(MAKEFILE_LIST)))
 $(info   d is $(d))
 
 SRCS += $(addprefix $(d), \
-		replica-run.cc replica.cc)
+		replica-run.cc replica.cc proxy-run.cc proxy.cc)
 
 PROTOS += $(addprefix $(d), \
 	    nezha-proto.proto)
 
 
+$(b)nezha-proxy: $(o)proxy-run.o $(o)proxy.o  $(o)nezha-proto.o $(LIB-udp-socket) $(LIB-utils)
+
 
 $(b)nezha-replica: $(o)replica-run.o $(o)replica.o  $(o)nezha-proto.o $(LIB-udp-socket) $(LIB-utils)
 
 
-BINS += $(b)nezha-replica 
+BINS += $(b)nezha-replica $(b)nezha-proxy 
 
 # include $(d)tests/Rules.mk
