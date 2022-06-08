@@ -61,10 +61,11 @@ namespace nezha {
         void CloseLoopSubmissionTd();
         void LogTd();
         void ReceiveReply(char* msgBuffer, int bufferLen, Address* sender);
-
+        void PrintConfig();
     public:
         Client(const std::string& configFile = std::string("../configs/nezha-client-config.yaml"));
         void Run();
+        void Terminate();
         ~Client();
     };
 
