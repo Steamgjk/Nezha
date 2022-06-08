@@ -45,6 +45,7 @@ namespace MessageType {
     extern char RECOVERY_REPLY;
     extern char SYNC_STATUS_REPORT;
     extern char COMMIT_INSTRUCTION;
+    extern char SUSPEND_REPLY;
 };
 
 namespace StateTransferType {

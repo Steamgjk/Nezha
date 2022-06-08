@@ -5,14 +5,78 @@ namespace nezha
     Proxy::Proxy(const std::string& configFile)
     {
         proxyConfig_ = YAML::LoadFile(configFile);
+        PrintConfig();
         CreateContext();
+    }
+
+    void Proxy::PrintConfig() {
+        if (proxyConfig_["print-config"].as<bool>()) {
+            LOG(INFO) << "Print configs as follows";
+            LOG(INFO) << "Replica Information";
+            YAML::Node replicaConfig = proxyConfig_["replica-info"];
+            LOG(INFO) << "\t" << "Replica IPs";
+            for (uint32_t i = 0; i < replicaConfig["replica-ips"].size(); i++) {
+                LOG(INFO) << "\t\t" << replicaConfig["replica-ips"][i].as<std::string>();
+            }
+            LOG(INFO) << "\t" << "Replica Receiver Shards:" << replicaConfig["receiver-shards"].as<int>();
+            LOG(INFO) << "\t" << "Replica Receiver Port:" << replicaConfig["receiver-port"].as<int>();
+            YAML::Node proxyConfig = proxyConfig_["proxy-info"];
+            LOG(INFO) << "Proxy Information";
+            LOG(INFO) << "\t" << "Proxy ID:" << proxyConfig["proxy-id"].as<int>();
+            LOG(INFO) << "\t" << "Proxy IP:" << proxyConfig["proxy-ip"].as<std::string>();
+            LOG(INFO) << "\t" << "Shard Number:" << proxyConfig["shard-num"].as<int>();
+            LOG(INFO) << "\t" << "Request Port Base:" << proxyConfig["request-port-base"].as<int>();
+            LOG(INFO) << "\t" << "Reply Port Base:" << proxyConfig["reply-port-base"].as<int>();
+        }
+    }
+
+    void Proxy::Terminate() {
+        LOG(INFO) << "Terminating...";
+        running_ = false;
+    }
+
+    void Proxy::Run() {
+        running_ = true;
         LaunchThreads();
+        for (auto& kv : threadPool_) {
+            LOG(INFO) << "Join " << kv.first;
+            kv.second->join();
+            LOG(INFO) << "Join Complete " << kv.first;
+        }
+        LOG(INFO) << "Run Terminated ";
+
     }
 
     Proxy::~Proxy()
     {
-        for (const auto& kv : threadPool_) {
-            kv.second->join();
+        for (auto& kv : threadPool_) {
+            delete kv.second;
+        }
+
+        for (uint32_t i = 0; i < replicaAddrs_.size(); i++) {
+            for (uint32_t j = 0; j < replicaAddrs_[0].size(); j++) {
+                if (replicaAddrs_[i][j]) {
+                    delete replicaAddrs_[i][j];
+                }
+            }
+        }
+
+        // Clear Context (free memory)
+        ConcurrentMap<uint32_t, struct sockaddr_in*>::Iterator clientIter(clientAddrs_);
+        while (clientIter.isValid()) {
+            if (clientIter.getValue()) {
+                delete clientIter.getValue();
+            }
+            clientIter.next();
+        }
+
+        ConcurrentMap<uint32_t, Reply*>::Iterator iter(committedReply_);
+        while (iter.isValid()) {
+            Reply* reply = iter.getValue();
+            if (reply) {
+                delete reply;
+            }
+            iter.next();
         }
     }
 
@@ -47,7 +111,7 @@ namespace nezha
 
 
     void Proxy::LaunchThreads() {
-        int shardNum = proxyConfig_["shard-num"].as<int>();
+        int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
 
         for (int i = 0; i < shardNum; i++) {
             std::string key = "CheckQuorum-" + std::to_string(i);
@@ -70,15 +134,15 @@ namespace nezha
         Reply reply;
         Reply* committedAck = NULL;
         while (running_) {
-            if (stopForwarding_) {
-                usleep(1000);
-                continue;
-            }
             if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
                 if ((uint32_t)sz <= sizeof(MessageHeader)) {
                     continue;
                 }
                 if (msghdr->msgLen + sizeof(MessageHeader) > (uint32_t)sz) {
+                    continue;
+                }
+                if (msghdr->msgType == MessageType::SUSPEND_REPLY) {
+                    stopForwarding_ = true;
                     continue;
                 }
                 if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
@@ -143,6 +207,7 @@ namespace nezha
 
         if (quorum.size() >= (uint32_t)fastQuorum_) {
             Reply* committedReply = new Reply(quorum[leaderId]);
+            committedReply->set_replytype(MessageType::FAST_REPLY);
             return committedReply;
         }
 
@@ -154,6 +219,7 @@ namespace nezha
         }
         if (slowReplyNum >= f_ + 1) {
             Reply* committedReply = new Reply(quorum[leaderId]);
+            committedReply->set_replytype(MessageType::SLOW_REPLY);
             return committedReply;
         }
         return NULL;
@@ -203,6 +269,9 @@ namespace nezha
                     }
 
                     roundRobinIdx++;
+                    if (roundRobinIdx % 100 == 0) {
+                        LOG(INFO) << "ForwardId=" << id << "\t" << "count =" << roundRobinIdx;
+                    }
                 }
             }
 
@@ -213,13 +282,13 @@ namespace nezha
     void Proxy::CreateContext() {
         stopForwarding_ = false;
         running_ = true;
-        int shardNum = proxyConfig_["shard-num"].as<int>();
-        std::string sip = proxyConfig_["proxy-ip"].as<std::string>();
-        int requestPortBase = proxyConfig_["request-port-base"].as<int>();
-        int replyPortBase = proxyConfig_["reply-port-base"].as<int>();
-        int replicaReceiverPortBase = proxyConfig_["receiver-port"].as<int>();
-        int replicaReceiverShard = proxyConfig_["receiver-shards"].as<int>();
-        uint32_t proxyId = proxyConfig_["proxy-id"].as<uint32_t>();
+        int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
+        std::string sip = proxyConfig_["proxy-info"]["proxy-ip"].as<std::string>();
+        int requestPortBase = proxyConfig_["proxy-info"]["request-port-base"].as<int>();
+        int replyPortBase = proxyConfig_["proxy-info"]["reply-port-base"].as<int>();
+        int replicaReceiverPortBase = proxyConfig_["replica-info"]["receiver-port"].as<int>();
+        int replicaReceiverShard = proxyConfig_["replica-info"]["receiver-shards"].as<int>();
+        uint32_t proxyId = proxyConfig_["proxy-info"]["proxy-id"].as<uint32_t>();
         forwardFds_.resize(shardNum, -1);
         requestReceiveFds_.resize(shardNum, -1);
         replyFds_.resize(shardNum, -1);
@@ -230,13 +299,13 @@ namespace nezha
             replyFds_[i] = CreateSocketFd("", -1);
             proxyIds_[i] = ((proxyIds_[i] << 32) | (uint32_t)i);
         }
-        replicaNum_ = proxyConfig_["replica-ips"].size();
+        replicaNum_ = proxyConfig_["replica-info"]["replica-ips"].size();
         assert(replicaNum_ % 2 == 1);
         f_ = replicaNum_ / 2;
         fastQuorum_ = (f_ % 2 == 1) ? (f_ + (f_ + 1) / 2 + 1) : (f_ + f_ / 2 + 1);
         replicaAddrs_.resize(replicaNum_);
         for (int i = 0; i < replicaNum_; i++) {
-            std::string replicaIP = proxyConfig_["replica-ips"][i].as<std::string>();
+            std::string replicaIP = proxyConfig_["replica-info"]["replica-ips"][i].as<std::string>();
             for (int j = 0; j < replicaReceiverShard; j++) {
                 struct sockaddr_in* addr = new sockaddr_in();
                 bzero(addr, sizeof(struct sockaddr_in));

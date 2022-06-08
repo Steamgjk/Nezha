@@ -92,8 +92,8 @@ namespace nezha {
             }
             LOG(INFO) << "\t" << "Proxy Shards:" << proxyConfig["proxy-shards"].as<int>();
             LOG(INFO) << "\t" << "Request Port Base:" << proxyConfig["request-port-base"].as<int>();
-            YAML::Node clientConfig = clientConfig_["client-info"];
 
+            YAML::Node clientConfig = clientConfig_["client-info"];
             LOG(INFO) << "Client Information";
             LOG(INFO) << "\t" << "Client ID:" << clientConfig["client-id"].as<int>();
             LOG(INFO) << "\t" << "Client IP:" << clientConfig["client-ip"].as<std::string>();
@@ -101,7 +101,6 @@ namespace nezha {
             LOG(INFO) << "\t" << "Is OpenLoop?" << clientConfig["is-openloop"].as<bool>();
             LOG(INFO) << "\t" << "Poisson Rate:" << clientConfig["poisson-rate"].as<int>();
             LOG(INFO) << "\t" << "Duration (sec):" << clientConfig["duration-sec"].as<int>();
-
             LOG(INFO) << "\t" << "Key Num:" << clientConfig["key-num"].as<int>();
             LOG(INFO) << "\t" << "Skew Factor (0-0.99):" << clientConfig["skew-factor"].as<float>();
             LOG(INFO) << "\t" << "Request Retry Time (us):" << clientConfig["request-retry-time-us"].as<int>();
@@ -263,9 +262,28 @@ namespace nezha {
         LogInfo* log = NULL;
         uint32_t countCommitedReqs = 0; // this var is for stats, it is different from committedReqId_, committedReqId_ will only be advanced after all previous reqs have been committed
         uint64_t startTime, endTime;
-        uint32_t lastSubmitteddReqId;
+        uint32_t lastSubmitteddReqId = 0;
+        uint32_t lastCountCommitedReq = 0;
 
+        startTime = GetMicrosecondTimestamp();
         while (running_) {
+            endTime = GetMicrosecondTimestamp();
+            if (endTime - startTime >= 1000000) {
+                float duration = (endTime - startTime) * 1e-6;
+                uint32_t submittedReqNum = nextReqId_ - 1 - lastSubmitteddReqId;
+                uint32_t committedReqNum = countCommitedReqs - lastCountCommitedReq;
+                float submissionRate = submittedReqNum / duration;
+                float commitRate = committedReqNum / duration;
+                lastSubmitteddReqId = nextReqId_ - 1;
+                lastCountCommitedReq = countCommitedReqs;
+                startTime = endTime;
+                LOG(INFO) << "countCommitedReqs=" << countCommitedReqs << "\t"
+                    << "committedReqId_=" << committedReqId_ << "\t"
+                    << "nextReqId_=" << nextReqId_ << "\t"
+                    << "submissionRate=" << submissionRate << "\t"
+                    << "commitRate=" << commitRate;
+
+            }
             if (logQu_.try_dequeue(log)) {
                 // erase the footprint of commited requests
                 outstandingRequestSendTime_.erase(log->reqId);
@@ -282,37 +300,24 @@ namespace nezha {
 
                 delete log;
                 countCommitedReqs++;
-                if (countCommitedReqs == 1) {
-                    startTime = GetMicrosecondTimestamp();
-                    lastSubmitteddReqId = nextReqId_ - 1;
-                }
-                else if (countCommitedReqs > 0 && countCommitedReqs % 1000 == 0) {
-                    endTime = GetMicrosecondTimestamp();
-                    float duration = (endTime - startTime) * 1e-6;
-                    uint32_t submittedReqNum = nextReqId_ - 1 - lastSubmitteddReqId;
-                    float submissionRate = submittedReqNum / duration;
-                    float commitRate = 1000 / duration;
-                    LOG(INFO) << "countCommitedReqs=" << countCommitedReqs << "\t"
-                        << "committedReqId_=" << committedReqId_ << "\t"
-                        << "nextReqId_=" << nextReqId_ << "\t"
-                        << "submissionRate=" << submissionRate << "\t"
-                        << "commitRate=" << commitRate;
-                }
+
             }
 
-            for (uint32_t reqId = committedReqId_ + 1; reqId < nextReqId_; reqId++)
-            {
-                uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
-                if (sendTime > 0) {
-                    // Find it
-                    if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
-                        // timeout, should retry
-                        Request* request = outstandingRequests_.get(reqId);
-                        outstandingRequestSendTime_.erase(reqId);
-                        retryQu_.enqueue(request);
-                    }
-                }
-            }
+            // // Check whether any requests need retry
+            // for (uint32_t reqId = committedReqId_ + 1; reqId < nextReqId_; reqId++)
+            // {
+            //     uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
+            //     if (sendTime > 0) {
+            //         // Find it
+            //         if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
+            //             // timeout, should retry
+            //             Request* request = outstandingRequests_.get(reqId);
+            //             outstandingRequestSendTime_.erase(reqId);
+            //             retryQu_.enqueue(request);
+            //         }
+            //     }
+            // }
+
             while (reclaimedReqId_ + 1000 < committedReqId_) {
                 // do not reclaim request too aggressive
                 // If we reclaim too aggressive, there can be some edge case of dangling request pointer

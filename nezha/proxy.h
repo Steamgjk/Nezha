@@ -28,6 +28,7 @@ namespace nezha {
     private:
         std::map<std::string, std::thread*>threadPool_;
         YAML::Node proxyConfig_;
+        void PrintConfig();
         void LaunchThreads();
         void CheckQuorum(const int id = -1);
         void ForwardRequests(const int id = -1);
@@ -54,6 +55,8 @@ namespace nezha {
     public:
         Proxy(const std::string& configFile = std::string("../configs/nezha-proxy-config.yaml"));
         ~Proxy();
+        void Run();
+        void Terminate();
     };
 
 }

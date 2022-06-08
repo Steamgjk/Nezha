@@ -1,14 +1,17 @@
 ---
+print-config: true
 # Replica Info
-replica-ips:
-  - "127.0.0.1"
-  - "127.0.0.1"
-  - "127.0.0.1"
-receiver-shards: 1 # The number of threads to receive threads
-receiver-port: 33333 # The port is exposed to client/proxy and is used to receive client/proxy requests. When receiver-shards>1, the corresponding ports are receiver-ports + shard-index
+replica-info:
+  replica-ips:
+    - "127.0.0.1"
+    - "127.0.0.1"
+    - "127.0.0.1"
+  receiver-shards: 1 # The number of threads to receive threads
+  receiver-port: 33333 # The port is exposed to client/proxy and is used to receive client/proxy requests. When receiver-shards>1, the corresponding ports are receiver-ports + shard-index
 # Proxy Info
-proxy-id: 1
-proxy-ip: "127.0.0.1"
-shard-num: 1
-request-port-base: 32000
-reply-port-base: 33000
+proxy-info:
+  proxy-id: 1
+  proxy-ip: "127.0.0.1"
+  shard-num: 1
+  request-port-base: 32000
+  reply-port-base: 33000
