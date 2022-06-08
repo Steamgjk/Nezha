@@ -12,12 +12,27 @@ namespace nezha {
     {
         // Load Config
         replicaConfig_ = YAML::LoadFile(configFile);
+        PrintConfig();
         CreateContext();
         LOG(INFO) << "viewId_=" << viewId_
             << "\treplicaId=" << replicaId_
             << "\treplicaNum=" << replicaNum_
             << "\tkeyNum=" << keyNum_;
-        // Launch Threads (based on Config)
+    }
+
+    Replica::~Replica()
+    {
+        status_ = ReplicaStatus::TERMINATED;
+        for (auto& kv : threadPool_) {
+            delete kv.second;
+            LOG(INFO) << "Deleted\t" << kv.first;
+        }
+
+        // TODO: A more elegant way is to reclaim or dump all logs
+    }
+
+    void Replica::Run() {
+        // Launch Worker Threads (based on Config)
         LaunchThreads();
         // Master thread run
         masterContext_.Register();
@@ -26,16 +41,50 @@ namespace nezha {
         }
         masterContext_.endPoint_->LoopRun();
 
+        // Wait until all threads return
+        for (auto& kv : threadPool_) {
+            LOG(INFO) << "Joining " << kv.first;
+            kv.second->join();
+            LOG(INFO) << "Join Complete \t" << kv.first;
+        }
     }
 
-    Replica::~Replica()
-    {
-        status_ = ReplicaStatus::TERMINATED;
-        for (auto& kv : threadPool_) {
-            kv.second->join();
-            delete kv.second;
-            LOG(INFO) << "Deleted\t" << kv.first;
+
+    void Replica::PrintConfig() {
+        if (replicaConfig_["print-config"].as<bool>()) {
+            LOG(INFO) << "Replica IPs";
+            for (uint32_t i = 0; i < replicaConfig_["replica-ips"].size(); i++) {
+                LOG(INFO) << "\t" << replicaConfig_["replica-ips"][i].as<std::string>();
+            }
+            LOG(INFO) << "ReplicaID:" << replicaConfig_["replica-id"].as<int>();
+            LOG(INFO) << "Recovering?" << replicaConfig_["recovering"].as<bool>();
+            LOG(INFO) << "Request Receiver Shards:" << replicaConfig_["receiver-shards"].as<int>();
+            LOG(INFO) << "Process Shards:" << replicaConfig_["process-shards"].as<int>();
+            LOG(INFO) << "Reply Shards:" << replicaConfig_["reply-shards"].as<int>();
+            LOG(INFO) << "Receiver Port:" << replicaConfig_["receiver-port"].as<int>();
+            LOG(INFO) << "Index Sync Port:" << replicaConfig_["index-sync-port"].as<int>();
+            LOG(INFO) << "(Missing) Request Ask Port:" << replicaConfig_["request-ask-port"].as<int>();
+            LOG(INFO) << "(Missing) Index Ask Port:" << replicaConfig_["index-ask-port"].as<int>();
+            LOG(INFO) << "Master Port:" << replicaConfig_["master-port"].as<int>();
+            LOG(INFO) << "Monitor Period (ms):" << replicaConfig_["monitor-period-ms"].as<int>();
+            LOG(INFO) << "Heartbeat Threshold (ms):" << replicaConfig_["heartbeat-threshold-ms"].as<int>();
+            LOG(INFO) << "(Missing) Index Ask Period (ms):" << replicaConfig_["index-ask-period-ms"].as<int>();
+            LOG(INFO) << "(Missing) Request Ask Period (ms):" << replicaConfig_["request-ask-period-ms"].as<int>();
+            LOG(INFO) << "View Change Period (ms):" << replicaConfig_["view-change-period-ms"].as<int>();
+            LOG(INFO) << "State Transfer Period (ms):" << replicaConfig_["state-transfer-period-ms"].as<int>();
+            LOG(INFO) << "State Transfer Timeout (ms):" << replicaConfig_["state-transfer-timeout-ms"].as<int>();
+            LOG(INFO) << "Index Transfer Max Batch:" << replicaConfig_["index-transfer-max-batch"].as<int>();
+            LOG(INFO) << "Request Transfer Max Batch:" << replicaConfig_["request-transfer-max-batch"].as<int>();
+            LOG(INFO) << "Crash Vector Request Period (ms):" << replicaConfig_["crash-vector-request-period-ms"].as<int>();
+            LOG(INFO) << "Recovery Request Period (ms):" << replicaConfig_["recovery-request-period-ms"].as<int>();
+            LOG(INFO) << "Sync Report Period (ms):" << replicaConfig_["sync-report-period-ms"].as<int>();
+            LOG(INFO) << "Key Num:" << replicaConfig_["key-num"].as<int>();
         }
+
+    }
+
+    void Replica::Terminate() {
+        status_ = ReplicaStatus::TERMINATED;
     }
 
     void Replica::CreateContext() {
@@ -53,17 +102,18 @@ namespace nezha {
         unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
-        if (replicaConfig_["recovering"].as<uint32_t>() > 0) {
+        if (replicaConfig_["recovering"].as<bool>()) {
             status_ = ReplicaStatus::RECOVERING;
         }
         else {
             status_ = ReplicaStatus::NORMAL;
         }
-
+        LOG(WARNING) << "Replica Status " << status_;
         // Create master endpoints and context
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         int port = replicaConfig_["master-port"].as<int>();
         int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
+
         masterContext_.endPoint_ = new UDPSocketEndpoint(ip, port, true);
         masterContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->ReceiveMasterMessage(msgBuffer, bufferLen, sender, receiverEP);
@@ -94,14 +144,12 @@ namespace nezha {
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
             indexSender_.push_back(new UDPSocketEndpoint());
         }
-
         indexAcker_ = new UDPSocketEndpoint();
         reqAcker_ = new UDPSocketEndpoint();
         indexRequster_ = new UDPSocketEndpoint();
         reqRequester_ = new UDPSocketEndpoint();
-
         for (uint32_t i = 0; i < replicaNum_; i++) {
-            std::string ip = replicaConfig_["replica-ips"].as<std::string>();
+            std::string ip = replicaConfig_["replica-ips"][i].as<std::string>();
             int indexPort = replicaConfig_["index-sync-port"].as<int>();
             indexReceiver_.push_back(new Address(ip, indexPort));
             int indexAskPort = replicaConfig_["index-ask-port"].as<int>();
@@ -111,7 +159,6 @@ namespace nezha {
             int masterPort = replicaConfig_["master-port"].as<int>();
             masterReceiver_.push_back(new Address(ip, masterPort));
         }
-
         // (Followers:) Create index-sync endpoint to receive indices
         port = replicaConfig_["index-sync-port"].as<int>();
         indexSyncContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
@@ -125,9 +172,8 @@ namespace nezha {
                 receiverEP->LoopBreak();
             }
             }, this, monitorPeriodMs);
-
         // Create an endpoint to handle others' requests for missed index
-        port = replicaConfig_["ack-missed-index-port"].as<int>();
+        port = replicaConfig_["index-ask-port"].as<int>();
         missedIndexAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
         // Register message handler
         missedIndexAckContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
@@ -141,7 +187,7 @@ namespace nezha {
             }, this, monitorPeriodMs);
 
         // Create an endpoint to handle others' requests for missed req
-        port = replicaConfig_["ack-missed-req-port"].as<int>();
+        port = replicaConfig_["request-ask-port"].as<int>();
         missedReqAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
         // Register message handler
         missedReqAckContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
@@ -153,6 +199,7 @@ namespace nezha {
                 receiverEP->LoopBreak();
             }
             }, this, monitorPeriodMs);
+
 
         // Create reply endpoints
         int replyShardNum = replicaConfig_["reply-shards"].as<int>();

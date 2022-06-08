@@ -204,6 +204,18 @@ namespace nezha {
         void TransferSyncedLog();
         void TransferUnSyncedLog();
         void MergeUnSyncedLog();
+        void PrintConfig();
+
+        // Threads
+        void ReceiveTd(int id = -1);
+        void ProcessTd(int id = -1);
+        void FastReplyTd(int id = -1, int cvId = -1);
+        void SlowReplyTd(int id = -1, int cvId = -1);
+        void IndexSendTd(int id = -1, int cvId = -1);
+        void IndexRecvTd();
+        void MissedIndexAckTd();
+        void MissedReqAckTd();
+        void GarbageCollectTd();
 
     public:
         Replica(const std::string& configFile = std::string("../configs/nezha-replica-config.yaml"));
@@ -218,15 +230,8 @@ namespace nezha {
         void AskMissedRequest();
         void CheckHeartBeat();
 
-        void ReceiveTd(int id = -1);
-        void ProcessTd(int id = -1);
-        void FastReplyTd(int id = -1, int cvId = -1);
-        void SlowReplyTd(int id = -1, int cvId = -1);
-        void IndexSendTd(int id = -1, int cvId = -1);
-        void IndexRecvTd();
-        void MissedIndexAckTd();
-        void MissedReqAckTd();
-        void GarbageCollectTd();
+        void Run();
+        void Terminate();
     };
 
 

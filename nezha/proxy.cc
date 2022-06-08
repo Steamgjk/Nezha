@@ -194,7 +194,6 @@ namespace nezha
             }
 
         }
-
     }
 
     Reply* Proxy::QuorumReady(std::map<uint32_t, Reply>& quorum) {
