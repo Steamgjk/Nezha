@@ -147,6 +147,12 @@ bool UDPSocketEndpoint::UnregisterTimer(TimerStruct* timer) {
     return true;
 }
 
+void UDPSocketEndpoint::UnRegisterAllTimers() {
+    for (auto& t : eventTimers_) {
+        ev_timer_stop(evLoop_, t->evTimer_);
+    }
+    eventTimers_.clear();
+}
 
 bool UDPSocketEndpoint::isRegistered(TimerStruct* timer) {
     return (eventTimers_.find(timer) != eventTimers_.end());

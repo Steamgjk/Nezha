@@ -12,6 +12,13 @@ message Request {
     uint32 key = 7;
 }
 
+message TimeStats {
+    uint64 sendtime = 1;
+    uint64 proxytime1 =2;
+    uint64 replicatime1 = 3;
+    uint64 replicatime2= 4;
+    uint64 proxytime2 = 5;
+}
 message Reply {
     uint32 clientid = 1;
     uint32 reqid = 2;
@@ -22,6 +29,7 @@ message Reply {
     uint32 replytype = 7;
     uint32 owd = 8;
     uint32 syncedlogid = 9; // use this value to piggyback slow-reply
+    // TimeStats t = 10; // This is for debug, should be deleted after release
 }
 
 message IndexSync {

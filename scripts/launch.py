@@ -354,10 +354,15 @@ if __name__ == '__main__':
     #     start_ttcs_node(custom_ips[i],False)
     
     # del_instance_list(instance_list=vm_list)
-    # stop_instance_list(instance_list = vm_list)
-    # exit(0)
     # start_instance_list(instance_list = vm_list)
     # launch_ttcs(custom_ips)
+
+
+    # stop_instance_list(instance_list = vm_list)
+    # exit(0)
+
+
+
 
     custom_ips = custom_ips[0:3] + [ custom_ips[3], custom_ips[4] ]
     vm_list = vm_list[0:3] + [ vm_list[3], vm_list[4] ]

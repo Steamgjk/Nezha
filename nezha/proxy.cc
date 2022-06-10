@@ -214,6 +214,9 @@ namespace nezha
                     } // else: reply.view()< replyQuorum[reqKey].begin()->second.view(), ignore it
 
                     if (committedAck != NULL) {
+                        // LOG(INFO) << "Committed clientId=" << committedAck->clientid() << "\t"
+                        //     << "reqId=" << committedAck->reqid() << "\t"
+                        //     << "commitType=" << committedAck->replytype();
                         // Ack to client
                         struct sockaddr_in* clientAddr = clientAddrs_.get(reply.clientid());
                         std::string replyMsg = committedAck->SerializeAsString();

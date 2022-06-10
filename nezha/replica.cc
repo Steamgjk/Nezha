@@ -40,6 +40,13 @@ namespace nezha {
         if (status_ == ReplicaStatus::RECOVERING) {
             masterContext_.endPoint_->RegisterTimer(crashVectorRequestTimer_);
         }
+        else if (status_ == ReplicaStatus::NORMAL) {
+            if (!AmLeader()) {
+                masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
+            }
+        }
+        // TODO: Register periodicSyncTimer_
+
         masterContext_.endPoint_->LoopRun();
         LOG(INFO) << "Break LoopRun";
 
@@ -101,10 +108,10 @@ namespace nezha {
         lastReleasedEntryByKeys_.resize(keyNum_, { 0ul,0ul });
         // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
         maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
-        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
+        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1; // 
         maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1); //
         maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
@@ -127,7 +134,10 @@ namespace nezha {
             }, this);
         // Register a timer to monitor replica status
         masterContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->CheckHeartBeat();
+            if (((Replica*)ctx)->status_ == ReplicaStatus::TERMINATED) {
+                // Master thread will only break its loop when status comes to TERMINATED
+                receiverEP->LoopBreak();
+            }
             }, this, monitorPeriodMs);
 
         // Create request-receiver endpoints and context
@@ -231,6 +241,11 @@ namespace nezha {
         }
 
         // Create other useful timers
+        heartbeatCheckTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+            // Followers use this timer to check leader's heartbeat
+            ((Replica*)ctx)->CheckHeartBeat();
+            }, this, monitorPeriodMs);
+
         indexAskTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
             ((Replica*)ctx)->AskMissedIndex();
             }, this, replicaConfig_["index-ask-period-ms"].as<int>());
@@ -373,6 +388,15 @@ namespace nezha {
         // Reset OWD-Calc Related stuff
         slidingWindow_.clear();
         owdSampleNum_.clear();
+
+        // Reset Master's timers 
+        // No need to worry about other timers: worker thread will unregister their timers and msg handlers during LoopBreak
+        masterContext_.endPoint_->UnRegisterAllTimers();
+        masterContext_.endPoint_->RegisterTimer(masterContext_.monitorTimer_);
+        if (!AmLeader()) {
+            masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
+        }
+        // TODO: Register periodicSyncTimer_
 
     }
 
@@ -533,8 +557,8 @@ namespace nezha {
                 }
             }
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "OWDCalcTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
     }
 
     void Replica::ReceiveTd(int id) {
@@ -545,8 +569,8 @@ namespace nezha {
             // Normally, it should be blocked in LoopRun, if it comes here, then there are 2 possible cases: (1) Terminated (2) ViewChange
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "ReceiveTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";;
     }
 
     void Replica::ProcessTd(int id) {
@@ -599,7 +623,7 @@ namespace nezha {
                     }
                     else {
                         duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
-                        // If  duplicateLogIdx < minUnSyncedLogId_, just consider it as non-duplicate, because it will soon be cleared by GarbageCollect-Td
+                        // If  duplicateLogIdx < minUnSyncedLogId_, just regard it as non-duplicate, because it will soon be cleared by GarbageCollect-Td
                         if (duplicateLogIdx >= minUnSyncedLogId_) {
                             // Duplicate: resend fast-reply for this request
                             LogEntry* entry = unsyncedEntries_.get(duplicateLogIdx);
@@ -639,8 +663,8 @@ namespace nezha {
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "ProcessTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq, const bool sendReply) {
@@ -660,9 +684,7 @@ namespace nezha {
 
             std::string result = ApplicationExecute(request);
             entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), result, request.proxyid());
-            if (sendReply) {
-                fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
-            }
+
             uint32_t logId = maxSyncedLogId_ + 1;
             syncedEntries_.assign(logId, entry);
             syncedReq2LogId_.assign(reqKey, logId);
@@ -678,13 +700,12 @@ namespace nezha {
                 // There are previous (non-commutative) requests appended
                 opKeyAndId = request.key();
                 opKeyAndId = ((opKeyAndId << 32u) | (maxUnSyncedLogIdByKey_[request.key()]));
-                LogEntry* prev = unsyncedEntries_.get(opKeyAndId);
+                LogEntry* prev = unsyncedEntriesByKey_.get(opKeyAndId);
+                ASSERT(prev != NULL); // Problem!
                 hash.XOR(prev->hash);
             }
             entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), "", request.proxyid());
-            if (sendReply) {
-                fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
-            }
+
             uint32_t logId = maxUnSyncedLogId_ + 1;
             unsyncedEntries_.assign(logId, entry);
             unsyncedReq2LogId_.assign(reqKey, logId);
@@ -693,6 +714,10 @@ namespace nezha {
             unsyncedEntriesByKey_.assign(opKeyAndId, entry);
             maxUnSyncedLogIdByKey_[request.key()]++;
             maxUnSyncedLogId_++;
+
+        }
+        if (sendReply) {
+            fastReplyQu_[(roundRobinRequestProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
         }
     }
 
@@ -709,40 +734,74 @@ namespace nezha {
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             if (fastReplyQu_[id].try_dequeue(entry)) {
+                Address* addr = proxyAddressMap_.get(entry->proxyId);
+                if (addr == NULL) {
+                    // The replica cannot find the address to send reply
+                    // This can happen in very trivial edge cases, e.g.,
+                    // Step 1: This replica misses the entry 
+                    // Step 2: The other replica gives it the missing entry
+                    // Step 3: This replica has not received any entries from that proxy, so it does not have any addr info
+                    // Step 4: This replica wants to send reply for this entry
+                    LOG(ERROR) << "Cannot find the address of the proxy " << entry->proxyId;
+                    continue;
+                }
+
                 reply.set_clientid((entry->reqKey) >> 32);
                 reply.set_reqid((uint32_t)(entry->reqKey));
+                reply.set_result(entry->result);
+                // If the owdMap_ does not have the proxyId (i.e. the owd for this proxyId has not been estimated), it will return 0 (0 happens to be the dummy value of protobuf, and the proxy will not consider it as an estimated owd)
+                reply.set_owd(owdMap_.get(entry->proxyId));
+                // Before encoding crashVector into hash, check whether the crashVector (cv) is the freshest one
                 CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
                 if (cv->version_ < masterCV->version_) {
                     // My cv is stale, update it
                     crashVectorInUse_[cvId] = masterCV;
                     cv = masterCV;
                 }
+
+                SHA_HASH hash(entry->hash);
+                hash.XOR(cv->cvHash_);
                 if (amLeader) {
-                    SHA_HASH hash(entry->hash);
-                    hash.XOR(cv->cvHash_);
+                    // Leader's logic is very easy: After XORing the crashVector and the log entry hash together, it can directly reply
                     reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-                    LOG(INFO) << "reply =" << reply.reqid() << "\t" << hash.toString();
+                    fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
+                    // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
+                    //     << "opKey=" << entry->opKey << "\t"
+                    //     << "hash=" << hash.toString();
                 }
                 else {
-                    SHA_HASH hash(entry->hash);
-                    hash.XOR(cv->cvHash_);
-
-                    if (maxSyncedLogIdByKey_[entry->opKey] >= CONCURRENT_MAP_START_INDEX) {
+                    // But follower's hash needs some more processing because it needs to consider both synced entries and unsynced entries, i.e.
+                    // We need to (1) eliminate the part to the left of sync-point
+                    // and (2) use the remaining part (to the right of sync-point)
+                    // to XOR the part that has already been synced 
+                    if (maxSyncedLogIdByKey_[entry->opKey] < CONCURRENT_MAP_START_INDEX) {
+                        // This entry has no non-commutative entries previously
+                        // Then directly reply with the XORed hash (similar to the leader)
+                        reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+                        fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
+                        // LOG(INFO) << "Follower (No deps) " << reply.reqid() << "\t"
+                        //     << "opKey=" << entry->opKey << "\t"
+                        //     << "hash=" << hash.toString();
+                    }
+                    else {
+                        // The follower already gets some synced non-commutative logs (via index sync process)
                         uint32_t syncPoint = maxSyncedLogIdByKey_[entry->opKey];
                         opKeyAndId = entry->opKey;
                         opKeyAndId = ((opKeyAndId << 32u) | syncPoint);
-                        LogEntry* syncedEntry = NULL;
+                        LogEntry* syncedEntry = NULL; // Get sync-point
                         do {
                             // Normally, this do-while will break by just executing once
                             syncedEntry = syncedEntriesByKey_.get(opKeyAndId);
                         } while (syncedEntry == NULL);
-
-                        uint32_t unsyncedPointStart = minUnSyncedLogIdByKey_[entry->opKey];
-                        uint32_t unsyncedPointEnd = maxUnSyncedLogIdByKey_[entry->opKey];
-
-                        if (syncedEntry->LessThan(*entry) && unsyncedPointStart <= unsyncedPointEnd) {
+                        // Log entries up to syncedEntry are all synced
+                        // syncedEntry->hash represents them
+                        // Next, we need to get those unsynced ones up this entry
+                        if (syncedEntry->LessThan(*entry)) {
+                            uint32_t unsyncedPointStart = minUnSyncedLogIdByKey_[entry->opKey];
+                            uint32_t unsyncedPointEnd = maxUnSyncedLogIdByKey_[entry->opKey];
+                            // Get the first entry to the right of the sync-point (i.e.larger than syncedEntry)
                             LogEntry* unsyncedEntryBoundary = NULL;
-                            while (unsyncedPointStart <= unsyncedPointEnd) {
+                            while (unsyncedPointStart >= CONCURRENT_MAP_START_INDEX && unsyncedPointStart <= unsyncedPointEnd) {
                                 opKeyAndId = entry->opKey;
                                 opKeyAndId = ((opKeyAndId << 32u) | unsyncedPointStart);
                                 unsyncedEntryBoundary = unsyncedEntriesByKey_.get(opKeyAndId);
@@ -754,38 +813,45 @@ namespace nezha {
                                     break;
                                 }
                             }
-                            if (unsyncedPointStart <= unsyncedPointEnd) {
-                                // Remove the part to the left of the sync-point
+
+                            if (unsyncedEntryBoundary != NULL && unsyncedEntryBoundary->LessThan(*entry)) {
+                                // We have some remaining logs on the right of the sync-point, 
+                                // Remove the part on the left of the sync-point
                                 hash.XOR(unsyncedEntryBoundary->hash);
+                                // Add back the hash of unsyncedEntryBoundary
                                 hash.XOR(unsyncedEntryBoundary->myhash);
-                                // so far, hash encodes all unsynced info (these entries are to the right  of sync-point)
-                                hash.XOR(syncedEntry->hash);// plus the synced part
+                                // So far, the hash encodes all unsynced info (these entries are on the right  of sync-point), i.e. [unsyncBoundary, entry]
+                                // The last step: add the (accumulative hash) of syncedEntry
+                                hash.XOR(syncedEntry->hash);
                                 reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+                                fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
+                                // LOG(INFO) << "Folower Reply " << reply.reqid() << "\t"
+                                //     << "opKey=" << entry->opKey << "\t"
+                                //     << "hash=" << hash.toString();
                             }
+                            // else: the synced part has surpassed unsycned part
+
+                            // else {
+                            //     LOG(INFO) << reply.reqid() << "\t"
+                            //         << "unsyncedEntryBoundary is NULL?" << (unsyncedEntryBoundary == NULL);
+                            //     if (unsyncedEntryBoundary) {
+                            //         LOG(INFO) << reply.reqid() << "\t"
+                            //             << "Less Than Entry" << unsyncedEntryBoundary->LessThan(*entry);
+                            //     }
+
+                            // }
                         }
                         // else (very unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
-                    }
-                    else {
-                        reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-                        LOG(INFO) << "reply =" << reply.reqid() << "\t"
-                            << hash.toString();
+                        // else {
+                        //     LOG(INFO) << reply.reqid() << "\t"
+                        //         << "Synced Surpassed ";
+                        // }
                     }
                 }
-                reply.set_result(entry->result);
-                reply.set_owd(owdMap_.get(entry->proxyId)); // If the map does not have the proxyId, it will return 0 (0 happens to be the dummy value of protobuf)
-
-                Address* addr = proxyAddressMap_.get(entry->proxyId);
-                if (addr != NULL) {
-                    // LOG(INFO) << "proxyId=" << entry->proxyId << "\t" << addr->DecodeIP() << ":" << addr->DecodePort();
-
-                    fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
-                    // LOG(INFO) << "reply=" << reply.DebugString();
-                }
-                // else (unlikely): this replica does not have the addr of the proxy
             }
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "Fast Reply Terminated ";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::SlowReplyTd(int id, int cvId) {
@@ -809,8 +875,14 @@ namespace nezha {
                 continue;
             }
             entry = NULL;
-            if (repliedLogId < maxSyncedLogId_) {
+            // SlowReplyTd get entries from two sources 
+            // (1) (Mostly) IndexSync process will keep advancing maxSyncedLogId_, so that SlowReplyTd should send slow-replies for these entries prior to maxSyncedLogId_
+            // (2) Some clients retry some requests, and the corresponding entries have already been synced with the leader, so SlowReplyTd also resend slow-replies for these entries
+
+            // TODO: SlowReplyTd can be merged with FastReplyTd, just needs to piggyback the most recent synced-log-id on fast-reply, and that is enough for proxies to do quorum check, even without slow-reply messages 
+            if (repliedLogId <= maxSyncedLogId_) {
                 entry = unsyncedEntries_.get(repliedLogId);
+                repliedLogId++;
             }
             else {
                 slowReplyQu_[id].try_dequeue(entry);
@@ -827,11 +899,12 @@ namespace nezha {
                 Address* addr = proxyAddressMap_.get(entry->proxyId);
                 if (addr != NULL) {
                     slowReplySender_[id]->SendMsgTo(*addr, reply, MessageType::SLOW_REPLY);
+                    // LOG(INFO) << "Slow Reply " << reply.reqid() << "\t";
                 }
             }
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "SlowReplyTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::IndexSendTd(int id, int cvId) {
@@ -891,8 +964,8 @@ namespace nezha {
             }
 
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "IndexSendTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::IndexRecvTd() {
@@ -902,8 +975,8 @@ namespace nezha {
             indexSyncContext_.endPoint_->LoopRun();
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "IndexRecvTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
     }
 
     void Replica::ReceiveIndexSyncMessage(char* msgBuffer, int msgLen) {
@@ -1023,9 +1096,6 @@ namespace nezha {
                     opKeyAndId = req->key();
                     opKeyAndId = ((opKeyAndId << 32u) | m);
                     LogEntry* minEntry = unsyncedEntriesByKey_.get(opKeyAndId);
-                    // LOG(INFO) << "reqKey=" << req->key() << "\t"
-                    //     << "id=" << m << "\t"
-                    //     << "maxUnSyncedLogIdByKey_=" << maxUnSyncedLogIdByKey_[req->key()];
                     ASSERT(minEntry != NULL);
                     if (minEntry->LessThan(*entry)) {
                         // This minEntry is useless
@@ -1062,8 +1132,8 @@ namespace nezha {
             missedIndexAckContext_.endPoint_->LoopRun();
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "MissedIndexAckTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "MissedIndexAckTd Terminated " << preVal - 1 << " worker remaining";
     }
 
     void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
@@ -1110,8 +1180,8 @@ namespace nezha {
             missedReqAckContext_.endPoint_->LoopRun();
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "MissedReqAckTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "MissedReqAckTd Terminated " << preVal - 1 << " worker remaining";
     }
 
 
@@ -1213,7 +1283,7 @@ namespace nezha {
             // Reclaim stale (unsynced) log entry and requests
             if (!AmLeader()) {
                 for (uint32_t i = 0; i < keyNum_; i++) {
-                    while (unsyncedLogIdByKeyToClear_[i] < minUnSyncedLogIdByKey_[i]) {
+                    while (unsyncedLogIdByKeyToClear_[i] <= minUnSyncedLogIdByKey_[i]) {
                         uint64_t opKeyAndId = i;
                         opKeyAndId = ((opKeyAndId << 32u) | unsyncedLogIdByKeyToClear_[i]);
                         LogEntry* entry = unsyncedEntriesByKey_.get(opKeyAndId);
@@ -1240,8 +1310,8 @@ namespace nezha {
 
             usleep(10000);
         }
-        activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "GarbageCollectTd Terminated";
+        uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "GarbageCollectTd Terminated " << preVal - 1 << " worker remaining";
     }
 
     void Replica::CheckHeartBeat() {
@@ -1255,6 +1325,7 @@ namespace nezha {
         if (status_ != ReplicaStatus::NORMAL) {
             // Some worker threads have detected viewchange and switch status_ to VIEWCHANGE
             // But workers have no priviledge to increment viewId_ and initiate view change process, so the master will do that
+            LOG(INFO) << "InitiateViewChange-10";
             InitiateViewChange(viewId_ + 1);
             return;
         }
@@ -1264,7 +1335,7 @@ namespace nezha {
         if (lastHeartBeatTime_ + threashold < nowTime) {
             // I haven't heard from the leader for too long, it probably has died
             // Before start view change, clear context
-            LOG(INFO) << "InitiateViewChange";
+            LOG(INFO) << "InitiateViewChange-1";
             InitiateViewChange(viewId_ + 1);
         }
     }
@@ -1372,13 +1443,22 @@ namespace nezha {
     }
 
     void Replica::SendViewChange() {
+        if (AmLeader()) {
+            // I am the leader of this new view, no need to send to myself
+            return;
+        }
         ViewChange viewChangeMsg;
         viewChangeMsg.set_view(viewId_);
         viewChangeMsg.set_replicaid(replicaId_);
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
         viewChangeMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         viewChangeMsg.set_syncpoint(maxSyncedLogId_);
-        viewChangeMsg.set_unsyncedlogbegin(minUnSyncedLogId_);
+        if (minUnSyncedLogId_ < CONCURRENT_MAP_START_INDEX) {
+            viewChangeMsg.set_unsyncedlogbegin(CONCURRENT_MAP_START_INDEX);
+        }
+        else {
+            viewChangeMsg.set_unsyncedlogbegin(minUnSyncedLogId_);
+        }
         viewChangeMsg.set_unsyncedlogend(maxUnSyncedLogId_);
         viewChangeMsg.set_lastnormalview(lastNormalView_);
         masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewId_ % replicaNum_]), viewChangeMsg, MessageType::VIEWCHANGE);
@@ -1397,7 +1477,10 @@ namespace nezha {
         }
 
         status_ = ReplicaStatus::VIEWCHANGE;
-        LOG(INFO) << "status =" << status_ << " view=" << viewId_;
+        VLOG(2) << "status =" << status_ << "\t"
+            << " view=" << viewId_ << "\t"
+            << " targeting view=" << view;
+
         // Wait until every worker stop
         while (activeWorkerNum_ > 0) {
             // LOG(INFO) << "activeWorker Check=" << activeWorkerNum_;
@@ -1405,10 +1488,12 @@ namespace nezha {
         }
 
         viewId_ = view;
-        // Launch the timer
-        if (masterContext_.endPoint_->isRegistered(viewChangeTimer_) == false) {
-            masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
-        }
+        // Unregister all timers, except the monitorTimer (so as the master thread can break when status=Terminated)
+        masterContext_.endPoint_->UnRegisterAllTimers();
+        masterContext_.endPoint_->RegisterTimer(masterContext_.monitorTimer_);
+        LOG(INFO) << "Monitor Timer Registered ";
+        // Launch viewChange timer
+        masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
     }
 
     void Replica::BroadcastViewChange() {
@@ -1502,6 +1587,7 @@ namespace nezha {
             }
         }
         if (viewChangeReq.view() > viewId_) {
+            LOG(INFO) << "InitiateViewChange-2";
             InitiateViewChange(viewChangeReq.view());
         }
         else {
@@ -1515,12 +1601,14 @@ namespace nezha {
     }
 
     void Replica::ProcessViewChange(const ViewChange& viewChange) {
+        // LOG(INFO) << "viewChange: " << viewChange.DebugString();
         if (status_ == ReplicaStatus::RECOVERING) {
             // Recovering replicas do not participate in view change
             return;
         }
         if (!CheckCV(viewChange.replicaid(), viewChange.cv())) {
             // stray message
+            LOG(WARNING) << "Stray Message";
             return;
         }
 
@@ -1528,6 +1616,7 @@ namespace nezha {
 
         if (status_ == ReplicaStatus::NORMAL) {
             if (viewChange.view() > viewId_) {
+                LOG(INFO) << "InitiateViewChange-3";
                 InitiateViewChange(viewChange.view());
             }
             else {
@@ -1537,13 +1626,21 @@ namespace nezha {
         }
         else if (status_ == ReplicaStatus::VIEWCHANGE) {
             if (viewChange.view() > viewId_) {
+                LOG(INFO) << "InitiateViewChange-4";
                 InitiateViewChange(viewChange.view());
             }
             else if (viewChange.view() < viewId_) {
                 SendViewChangeRequest(viewChange.replicaid());
             }
+            // viewChange.view() == viewId
+            else if (viewChangeSet_.size() >= replicaNum_ / 2 + 1) {
+                // We have got enough valid viewchange messages, no need for this one
+                return;
+            }
             else {
+                ASSERT(AmLeader());
                 viewChangeSet_[viewChange.replicaid()] = viewChange;
+                LOG(INFO) << "viewChangeSet Size=" << viewChangeSet_.size();
                 // If cv is updated, then it is likely that some messages in viewChangeSet_ become stray, so remove them 
                 for (uint32_t i = 0; i < replicaNum_; i++) {
                     auto iter = viewChangeSet_.find(i);
@@ -1561,10 +1658,23 @@ namespace nezha {
                     myvc.set_view(viewId_);
                     myvc.set_replicaid(replicaId_);
                     myvc.set_syncpoint(maxSyncedLogId_);
-                    myvc.set_unsyncedlogbegin(minUnSyncedLogId_);
+                    if (minUnSyncedLogId_ < CONCURRENT_MAP_START_INDEX) {
+                        myvc.set_unsyncedlogbegin(CONCURRENT_MAP_START_INDEX);
+                    }
+                    else {
+                        myvc.set_unsyncedlogbegin(minUnSyncedLogId_);
+                    }
+
                     myvc.set_unsyncedlogend(maxUnSyncedLogId_);
                     myvc.set_lastnormalview(lastNormalView_);
                     viewChangeSet_[replicaId_] = myvc;
+                    // Has got enough viewChange messages, stop viewChangeTimer
+                    LOG(INFO) << "Enough viewChange msg " << viewChangeSet_.size();
+                    for (auto& kv : viewChangeSet_) {
+                        LOG(INFO) << kv.first << "\t" << kv.second.DebugString();
+                    }
+
+                    masterContext_.endPoint_->UnregisterTimer(viewChangeTimer_);
                     TransferSyncedLog();
                 }
 
@@ -1577,11 +1687,11 @@ namespace nezha {
 
     void Replica::TransferSyncedLog() {
 
-        uint32_t largestNormalView = viewChangeSet_.begin()->second.lastnormalview();
-        uint32_t largestSyncPoint = CONCURRENT_MAP_START_INDEX;
+        uint32_t largestNormalView = lastNormalView_;
+        uint32_t largestSyncPoint = maxSyncedLogId_;
         for (auto& kv : viewChangeSet_) {
-            if (largestNormalView < kv.second.view()) {
-                largestNormalView = kv.second.view();
+            if (largestNormalView < kv.second.lastnormalview()) {
+                largestNormalView = kv.second.lastnormalview();
             }
         }
 
@@ -1595,8 +1705,12 @@ namespace nezha {
         }
 
         stateTransferIndices_.clear();
+        LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
+            << "largestSyncPoint=" << largestSyncPoint << "\t"
+            << "largestNormalView = " << largestNormalView << "\t"
+            << "lastNormalView_=" << lastNormalView_;
         // Directly copy the synced entries
-        if (largestNormalView == this->lastNormalView_) {
+        if (largestNormalView == lastNormalView_) {
             if (maxSyncedLogId_ < largestSyncPoint) {
                 stateTransferIndices_[targetReplicaId] = { maxSyncedLogId_ + 1, largestSyncPoint };
             }
@@ -1624,10 +1738,22 @@ namespace nezha {
 
     void Replica::TransferUnSyncedLog() {
         // Get the unsynced logs from the f+1 remaining replicas
-        // TODO: If this process cannot be completed, rollback to view change
+        // If this process cannot be completed, rollback to view change
+        LOG(INFO) << "TransferUnSyncedLog";
         stateTransferIndices_.clear();
         for (auto& kv : viewChangeSet_) {
+            LOG(INFO) << "begin=" << kv.second.unsyncedlogbegin() << "\t" << kv.second.unsyncedlogend();
+            if (kv.second.unsyncedlogbegin() > kv.second.unsyncedlogend()) {
+                // This replica has no unsynced logs 
+                continue;
+            }
             stateTransferIndices_[kv.first] = { kv.second.unsyncedlogbegin(), kv.second.unsyncedlogend() };
+        }
+        if (stateTransferIndices_.empty()) {
+            // No need to do state transfer for unsynced logs
+            // Directly go to new view
+            EnterNewView();
+            return;
         }
         transferSyncedEntry_ = false;
         // After this state transfer is completed, this replica will enter the new view
@@ -1660,6 +1786,7 @@ namespace nezha {
     }
 
     void Replica::EnterNewView() {
+        VLOG(2) << "Enter New View " << viewId_;
         // Leader sends StartView to all the others
         if (AmLeader()) {
             SendStartView(-1);
@@ -1681,12 +1808,14 @@ namespace nezha {
             waitVar_.notify_all();
             usleep(1000);
         }
+        VLOG(2) << "View=" << viewId_ << " Recovered " << activeWorkerNum_;
     }
 
 
     void Replica::SendStateTransferRequest() {
-        // TODO: If statetransfer cannot be completed within a certain amount of time, rollback to view change
+
         if (GetMicrosecondTimestamp() >= stateTransferTerminateTime_) {
+            // If statetransfer cannot be completed within a certain amount of time, rollback to view change
             masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
             stateTransferTerminateCallback_();
             return;
@@ -1711,14 +1840,17 @@ namespace nezha {
                 request.set_logend(stateTransferInfo.second.second);
             }
 
+            LOG(INFO) << "stateTransferRequest = " << request.DebugString();
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[stateTransferInfo.first]), request, MessageType::STATE_TRANSFER_REQUEST);
         }
 
     }
 
     void Replica::ProcessStateTransferRequest(const StateTransferRequest& stateTransferRequest) {
+        // LOG(INFO) << "stateTransferRequest=" << stateTransferRequest.DebugString();
         if (stateTransferRequest.view() != viewId_) {
             if (stateTransferRequest.view() > viewId_) {
+                LOG(INFO) << "InitiateViewChange-5";
                 InitiateViewChange(stateTransferRequest.view());
             }
             return;
@@ -1801,6 +1933,7 @@ namespace nezha {
                 masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
             }
             else if (status_ == ReplicaStatus::VIEWCHANGE) {
+                LOG(INFO) << "InitiateViewChange-6";
                 InitiateViewChange(stateTransferReply.view());
             }
             else {
@@ -1870,6 +2003,8 @@ namespace nezha {
     void Replica::RewindSyncedLogTo(uint32_t rewindPoint) {
         uint32_t logIdToClear = rewindPoint + 1;
         std::set<uint32_t> keysToClear;
+        LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
+            << "rewindPoint=" << rewindPoint;
         // Rewind syncedEntries_ and maxSyncedLogId_
         while (maxSyncedLogId_ > rewindPoint) {
             LogEntry* entry = syncedEntries_.get(logIdToClear);
@@ -1910,6 +2045,8 @@ namespace nezha {
     }
 
     void Replica::ProcessStartView(const StartView& startView) {
+        LOG(INFO) << startView.DebugString();
+
         if (!CheckCV(startView.replicaid(), startView.cv())) {
             return;
         }
@@ -1919,9 +2056,12 @@ namespace nezha {
 
         if (status_ == ReplicaStatus::VIEWCHANGE) {
             if (startView.view() > viewId_) {
+                LOG(INFO) << "InitiateViewChange-7";
                 InitiateViewChange(startView.view());
             }
             else if (startView.view() == viewId_) {
+                LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
+                    << "syncedlogid=" << startView.syncedlogid();
                 if (committedLogId_ < startView.syncedlogid()) {
                     // Start StateTransfer
                     RewindSyncedLogTo(committedLogId_);
@@ -1942,6 +2082,7 @@ namespace nezha {
         }
         else if (status_ == ReplicaStatus::NORMAL) {
             if (startView.view() > viewId_) {
+                LOG(INFO) << "InitiateViewChange-8";
                 InitiateViewChange(startView.view());
             }
             else if (startView.view() < viewId_) {
@@ -2190,6 +2331,7 @@ namespace nezha {
         }
         if (view > this->viewId_) {
             // new view, update status and wait for master thread to handle the situation
+            LOG(INFO) << "InitiateViewChange-9";
             InitiateViewChange(view);
             return false;
         }
@@ -2198,7 +2340,7 @@ namespace nezha {
 
     bool Replica::CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv) {
         CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
-        return (cv.at(senderId) < masterCV->cv_[senderId]);
+        return (cv.at(senderId) >= masterCV->cv_[senderId]);
     }
 
     bool Replica::Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv) {

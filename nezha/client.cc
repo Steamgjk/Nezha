@@ -136,7 +136,9 @@ namespace nezha {
         }
         Reply reply;
         if (reply.ParseFromArray(msgBuffer, bufferLen)) {
-            // LOG(INFO) << "reply:" << reply.DebugString();
+            // LOG(INFO) << "reply: ClientId=" << reply.clientid() << "\t"
+            //     << "reqId=" << reply.reqid() << "\t"
+            //     << "replyType=" << reply.replytype();
             Request* request = outstandingRequests_.get(reply.reqid());
             if (request) {
                 LogInfo* log = new LogInfo();
@@ -198,9 +200,11 @@ namespace nezha {
                     outstandingRequests_.assign(request->reqid(), request);
                     outstandingRequestSendTime_.assign(request->reqid(), GetMicrosecondTimestamp());
                     nextReqId_++;
-                    if (nextReqId_ == 5) {
-                        exit(0);
-                    }
+                    // if (nextReqId_ == 5) {
+                    //     LOG(INFO) << "Pausing here ";
+                    //     getchar();
+                    //     exit(0);
+                    // }
                     roundRobinIdx++;
 
                 }
@@ -208,6 +212,8 @@ namespace nezha {
             }
             if (GetMicrosecondTimestamp() >= endTime) {
                 // Client has executed long enough, should terminate
+                sleep(10);
+                running_ = false;
                 return;
             }
         }
@@ -267,6 +273,7 @@ namespace nezha {
         uint64_t startTime, endTime;
         uint32_t lastSubmitteddReqId = 0;
         uint32_t lastCountCommitedReq = 0;
+        uint32_t latencySample = 0;
 
         startTime = GetMicrosecondTimestamp();
         while (running_) {
@@ -284,7 +291,8 @@ namespace nezha {
                     << "committedReqId_=" << committedReqId_ << "\t"
                     << "nextReqId_=" << nextReqId_ << "\t"
                     << "submissionRate=" << submissionRate << " req/sec\t"
-                    << "commitRate=" << commitRate << " req/sec";
+                    << "commitRate=" << commitRate << " req/sec"
+                    << "latency(Sample)=" << latencySample << " us";
 
             }
             if (logQu_.try_dequeue(log)) {
@@ -301,6 +309,7 @@ namespace nezha {
                     }
                 }
 
+                latencySample = log->commitTime - log->sendTime;
                 delete log;
                 countCommitedReqs++;
 

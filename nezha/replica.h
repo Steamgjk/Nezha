@@ -89,6 +89,7 @@ namespace nezha {
         Context indexSyncContext_;
         Context missedIndexAckContext_;
         Context missedReqAckContext_;
+        TimerStruct* heartbeatCheckTimer_;
         TimerStruct* indexAskTimer_;
         TimerStruct* requestAskTimer_;
         TimerStruct* viewChangeTimer_;
