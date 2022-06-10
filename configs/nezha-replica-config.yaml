@@ -1,9 +1,9 @@
 ---
 print-config: true
 replica-ips:
-  - "127.0.0.1"
-  - "127.0.0.1"
-  - "127.0.0.1"
+  - "10.128.2.10"
+  - "10.128.2.11"
+  - "10.128.2.12"
 replica-id: 0
 recovering: false
 receiver-shards: 1 # The number of threads to receive threads
@@ -29,3 +29,4 @@ crash-vector-request-period-ms: 50 # make it longer, becasue it will clear all p
 recovery-request-period-ms: 10
 sync-report-period-ms: 10
 key-num: 1000000 # when commutativity is enabled for test, we need the specified key number to detect commutativity
+owd-estimation-window: 1000 # we use a sliding window to get moving median of one-way delays, here is the length of the window

@@ -72,7 +72,7 @@ struct MsgHandlerStruct {
                 LOG(ERROR) << "This message handler is not attached to any endpoints";
                 return;
             }
-            socklen_t sockLen;
+            socklen_t sockLen = sizeof(struct sockaddr_in);
             int msgLen = recvfrom(w->fd, m->buffer_, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
             m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_, m->attachedEP_);
             });

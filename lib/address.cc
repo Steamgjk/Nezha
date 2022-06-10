@@ -9,3 +9,13 @@ Address::Address(const std::string& ip, const int port, const std::string& mac) 
     addr_.sin_addr.s_addr = inet_addr(ip.c_str());
 }
 Address::~Address() {}
+
+std::string Address::DecodeIP() {
+    ip_ = inet_ntoa(addr_.sin_addr);
+    return ip_;
+}
+
+int Address::DecodePort() {
+    port_ = htons(addr_.sin_port);
+    return port_;
+}

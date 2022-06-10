@@ -150,6 +150,14 @@ namespace nezha {
         std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
         std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
 
+        // OWD related variables
+        uint32_t slidingWindowLen_;
+        ConcurrentQueue<std::pair<uint64_t, uint32_t>> owdQu_; // <proxyId, owd>
+        ConcurrentMap<uint64_t, uint32_t> owdMap_; // <proxyId, owd>
+
+        std::map<uint64_t, std::vector<uint32_t>> slidingWindow_; // <proxyid, vec>
+        std::map<uint64_t, uint64_t> owdSampleNum_;
+
         // Garbage-Collection related variables
         uint32_t cvVersionToClear_;
         uint32_t unsyncedLogIdToClear_;
@@ -190,7 +198,7 @@ namespace nezha {
         void ProcessRecoveryReply(const RecoveryReply& reply);
         void ProcessSyncStatusReport(const SyncStatusReport& report);
         void ProcessCommitInstruction(const CommitInstruction& commit);
-        void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSynedReq = true, const bool sendReply = true);
+        void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq = true, const bool sendReply = true);
 
 
 
@@ -215,6 +223,7 @@ namespace nezha {
         void IndexRecvTd();
         void MissedIndexAckTd();
         void MissedReqAckTd();
+        void OWDCalcTd();
         void GarbageCollectTd();
 
     public:

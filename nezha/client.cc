@@ -53,7 +53,7 @@ namespace nezha {
         int keyNum = clientConfig_["client-info"]["key-num"].as<int>();
         float skewFactor = clientConfig_["client-info"]["skew-factor"].as<float>();
         LOG(INFO) << "keyNum=" << keyNum << "\tskewFactor=" << skewFactor;
-        zipfianKeys_.resize(10000, 0);
+        zipfianKeys_.resize(1000000, 0);
         retryTimeoutus_ = clientConfig_["client-info"]["request-retry-time-us"].as<uint32_t>();
         if (keyNum > 1) {
             std::default_random_engine generator(clientId_); // clientId as the seed
@@ -280,8 +280,8 @@ namespace nezha {
                 LOG(INFO) << "countCommitedReqs=" << countCommitedReqs << "\t"
                     << "committedReqId_=" << committedReqId_ << "\t"
                     << "nextReqId_=" << nextReqId_ << "\t"
-                    << "submissionRate=" << submissionRate << "\t"
-                    << "commitRate=" << commitRate;
+                    << "submissionRate=" << submissionRate << " req/sec\t"
+                    << "commitRate=" << commitRate << " req/sec";
 
             }
             if (logQu_.try_dequeue(log)) {

@@ -43,13 +43,15 @@ namespace nezha {
         std::vector<int> requestReceiveFds_;
         std::vector<uint64_t> proxyIds_;
         std::atomic<uint32_t> latencyBound_;
+        ConcurrentQueue<std::pair<uint32_t, uint32_t>> owdQu_; // <replicaId, owd>
+
+
         int replicaNum_;
         int f_;
         int fastQuorum_;
         std::vector<std::vector<struct sockaddr_in*>> replicaAddrs_;
         ConcurrentMap<uint32_t, struct sockaddr_in*> clientAddrs_;
         ConcurrentMap<uint32_t, Reply*> committedReply_; // used as cache
-        ConcurrentQueue<std::pair<uint32_t, uint32_t>> owdQu_; // <replicaId, OWD>
 
 
     public:

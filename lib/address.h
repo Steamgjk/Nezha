@@ -25,6 +25,9 @@ public:
     Address(const std::string& ip, const int port, const std::string& mac = std::string(""));
     ~Address();
 
+    std::string DecodeIP();
+    int DecodePort();
+
 };
 
 
