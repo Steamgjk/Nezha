@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <string>
 #include <condition_variable>
 #include <glog/logging.h>
 #include <junction/ConcurrentMap_Leapfrog.h>

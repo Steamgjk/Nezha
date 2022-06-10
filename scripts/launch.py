@@ -359,15 +359,15 @@ if __name__ == '__main__':
     # start_instance_list(instance_list = vm_list)
     # launch_ttcs(custom_ips)
 
-    # custom_ips = custom_ips[0:3] + [ custom_ips[3], custom_ips[4] ]
-    # vm_list = vm_list[0:3] + [ vm_list[3], vm_list[4] ]
-    # print(custom_ips)
+    custom_ips = custom_ips[0:3] + [ custom_ips[3], custom_ips[4] ]
+    vm_list = vm_list[0:3] + [ vm_list[3], vm_list[4] ]
+    print(custom_ips)
     # start_instance_list(instance_list = vm_list)
-    # time.sleep(10)
+    # time.sleep(30)
     # launch_ttcs(custom_ips)
 
-    custom_ips = custom_ips[1:2]
-    vm_list = vm_list[1:2]
+    # custom_ips = custom_ips[1:2]
+    # vm_list = vm_list[1:2]
 
     remote_path = "/home/steam1994/nezhav2/.bin/*"
     rm_cmd = "sudo rm -f {remote_path}".format(remote_path=remote_path)

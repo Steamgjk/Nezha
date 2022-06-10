@@ -198,6 +198,9 @@ namespace nezha {
                     outstandingRequests_.assign(request->reqid(), request);
                     outstandingRequestSendTime_.assign(request->reqid(), GetMicrosecondTimestamp());
                     nextReqId_++;
+                    if (nextReqId_ == 5) {
+                        exit(0);
+                    }
                     roundRobinIdx++;
 
                 }

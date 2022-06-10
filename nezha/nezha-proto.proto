@@ -32,6 +32,7 @@ message IndexSync {
     uint32 view = 5;
     // crash-vector
     repeated uint32 cv = 6;
+    uint64 sendtime = 7;
 }
 
 message AskIndex {

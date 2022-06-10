@@ -90,7 +90,7 @@ namespace nezha {
         do {
             status_ = ReplicaStatus::TERMINATED;
             waitVar_.notify_all();
-            LOG(INFO) << "activeWorkerNum_=" << activeWorkerNum_;
+            // LOG(INFO) << "activeWorkerNum_=" << activeWorkerNum_;
         } while (activeWorkerNum_ > 0);
     }
 
@@ -377,10 +377,11 @@ namespace nezha {
     }
 
     void Replica::LaunchThreads() {
-        activeWorkerNum_ = 0;
+        activeWorkerNum_ = 0; // Dynamic variable, used as semphore
+        totalWorkerNum_ = 0; // static variable to counter number of workers
         // RequestReceive
         for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
-            activeWorkerNum_.fetch_add(1);
+            totalWorkerNum_++;
             std::thread* td = new std::thread(&Replica::ReceiveTd, this, i);
             std::string key("ReceiveTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -389,7 +390,7 @@ namespace nezha {
 
         // RequestProcess
         for (int i = 0; i < replicaConfig_["process-shards"].as<int>(); i++) {
-            activeWorkerNum_.fetch_add(1);
+            totalWorkerNum_++;
             std::thread* td = new std::thread(&Replica::ProcessTd, this, i);
             std::string key("ProcessTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -399,14 +400,14 @@ namespace nezha {
         // RequestReply
         int replyShardNum = replicaConfig_["reply-shards"].as<int>();
         for (int i = 0; i < replyShardNum; i++) {
-            activeWorkerNum_.fetch_add(1);
+            totalWorkerNum_++;
             std::thread* td = new std::thread(&Replica::FastReplyTd, this, i, i + 1);
             std::string key("FastReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
         }
         for (int i = 0; i < replyShardNum; i++) {
-            activeWorkerNum_.fetch_add(1);
+            totalWorkerNum_++;
             std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i, i + replyShardNum + 1);
             std::string key("SlowReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -415,7 +416,7 @@ namespace nezha {
 
         // IndexSync
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
-            activeWorkerNum_.fetch_add(1);
+            totalWorkerNum_++;
             std::thread* td = new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum * 2 + 1);
             std::string key("IndexSendTd-" + std::to_string(i));
             threadPool_[key] = td;
@@ -426,27 +427,26 @@ namespace nezha {
             }
         }
 
-        activeWorkerNum_.fetch_add(1);
+        totalWorkerNum_++;
         threadPool_["IndexRecvTd"] = new std::thread(&Replica::IndexRecvTd, this);
         LOG(INFO) << "Launched IndexRecvTd\t" << threadPool_["IndexRecvTd"]->native_handle();
 
-        activeWorkerNum_.fetch_add(1);
+        totalWorkerNum_++;
         threadPool_["MissedIndexAckTd"] = new std::thread(&Replica::MissedIndexAckTd, this);
         LOG(INFO) << "Launched MissedIndexAckTd\t" << threadPool_["MissedIndexAckTd"]->native_handle();
 
-        activeWorkerNum_.fetch_add(1);
+        totalWorkerNum_++;
         threadPool_["MissedReqAckTd"] = new std::thread(&Replica::MissedReqAckTd, this);
         LOG(INFO) << "Launched MissedReqAckTd\t" << threadPool_["MissedReqAckTd"]->native_handle();
 
-        activeWorkerNum_.fetch_add(1);
+        totalWorkerNum_++;
         threadPool_["GarbageCollectTd"] = new std::thread(&Replica::GarbageCollectTd, this);
         LOG(INFO) << "Launch  GarbageCollectTd " << threadPool_["GarbageCollectTd"]->native_handle();
 
-        activeWorkerNum_.fetch_add(1);
+        totalWorkerNum_++;
         threadPool_["OWDCalcTd"] = new std::thread(&Replica::OWDCalcTd, this);
         LOG(INFO) << "Launch  OWDCalcTd " << threadPool_["OWDCalcTd"]->native_handle();
 
-        totalWorkerNum_ = activeWorkerNum_;
         LOG(INFO) << "totalWorkerNum_=" << totalWorkerNum_;
     }
 
@@ -490,18 +490,12 @@ namespace nezha {
 
     void Replica::BlockWhenStatusIs(char targetStatus) {
         if (status_ == targetStatus) {
-            uint32_t preValue = activeWorkerNum_.fetch_sub(1);
-            LOG(INFO) << pthread_self() << "\t" << activeWorkerNum_ << "\t preValue=" << preValue;
+            activeWorkerNum_.fetch_sub(1);
             std::unique_lock<std::mutex> lk(waitMutext_);
             waitVar_.wait(lk, [this, targetStatus] {
                 if (status_ == ReplicaStatus::TERMINATED || status_ != targetStatus) {
-                    // unlock 
-                    LOG(INFO) << pthread_self() << "\t Unlock" << activeWorkerNum_;
-                    if (status_ == ReplicaStatus::NORMAL) {
-                        // The work comes back to work
-                        activeWorkerNum_.fetch_add(1);
-                    }
-
+                    // Unblock 
+                    activeWorkerNum_.fetch_add(1);
                     return true;
                 }
                 else {
@@ -513,8 +507,8 @@ namespace nezha {
 
 
     void Replica::OWDCalcTd() {
+        activeWorkerNum_.fetch_add(1);
         std::pair<uint32_t, uint64_t> owdSample;
-
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             if (owdQu_.try_dequeue(owdSample)) {
@@ -539,18 +533,24 @@ namespace nezha {
                 }
             }
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "OWDCalcTd Terminated";
     }
 
     void Replica::ReceiveTd(int id) {
+        activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             requestContext_[id].Register();
             requestContext_[id].endPoint_->LoopRun();
             // Normally, it should be blocked in LoopRun, if it comes here, then there are 2 possible cases: (1) Terminated (2) ViewChange
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "ReceiveTd Terminated";
     }
 
     void Replica::ProcessTd(int id) {
+        activeWorkerNum_.fetch_add(1);
         uint64_t reqKey = 0;
         Request* req = NULL;
         bool amLeader = AmLeader();
@@ -639,6 +639,8 @@ namespace nezha {
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "ProcessTd Terminated";
     }
 
     void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq, const bool sendReply) {
@@ -665,10 +667,10 @@ namespace nezha {
             syncedEntries_.assign(logId, entry);
             syncedReq2LogId_.assign(reqKey, logId);
             // LOG(INFO) << "request.key=" << request.key() << "\t" << "size=" << maxSyncedLogIdByKey_.size();
-            maxSyncedLogIdByKey_[request.key()]++;
             opKeyAndId = request.key();
-            opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[request.key()]));
+            opKeyAndId = ((opKeyAndId << 32u) | (maxSyncedLogIdByKey_[request.key()] + 1));
             syncedEntriesByKey_.assign(opKeyAndId, entry);
+            maxSyncedLogIdByKey_[request.key()]++;
             maxSyncedLogId_++;
         }
         else {
@@ -686,13 +688,16 @@ namespace nezha {
             uint32_t logId = maxUnSyncedLogId_ + 1;
             unsyncedEntries_.assign(logId, entry);
             unsyncedReq2LogId_.assign(reqKey, logId);
-            maxUnSyncedLogIdByKey_[request.key()]++;
+            opKeyAndId = request.key();
+            opKeyAndId = ((opKeyAndId << 32u) | (maxUnSyncedLogIdByKey_[request.key()] + 1));
             unsyncedEntriesByKey_.assign(opKeyAndId, entry);
+            maxUnSyncedLogIdByKey_[request.key()]++;
             maxUnSyncedLogId_++;
         }
     }
 
     void Replica::FastReplyTd(int id, int cvId) {
+        activeWorkerNum_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
         reply.set_view(viewId_);
@@ -702,9 +707,7 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[cvId];
         uint64_t opKeyAndId = 0ul;
         while (status_ != ReplicaStatus::TERMINATED) {
-            LOG(INFO) << "Blocking ";
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
-            LOG(INFO) << "Unblocked ";
             if (fastReplyQu_[id].try_dequeue(entry)) {
                 reply.set_clientid((entry->reqKey) >> 32);
                 reply.set_reqid((uint32_t)(entry->reqKey));
@@ -715,11 +718,15 @@ namespace nezha {
                     cv = masterCV;
                 }
                 if (amLeader) {
-                    SHA_HASH hash = entry->hash;
+                    SHA_HASH hash(entry->hash);
                     hash.XOR(cv->cvHash_);
                     reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+                    LOG(INFO) << "reply =" << reply.reqid() << "\t" << hash.toString();
                 }
                 else {
+                    SHA_HASH hash(entry->hash);
+                    hash.XOR(cv->cvHash_);
+
                     if (maxSyncedLogIdByKey_[entry->opKey] >= CONCURRENT_MAP_START_INDEX) {
                         uint32_t syncPoint = maxSyncedLogIdByKey_[entry->opKey];
                         opKeyAndId = entry->opKey;
@@ -727,8 +734,6 @@ namespace nezha {
                         LogEntry* syncedEntry = NULL;
                         do {
                             // Normally, this do-while will break by just executing once
-                            LOG(INFO) << "COming entry->opKey=" << entry->opKey << "\t"
-                                << "syncPoint=" << syncPoint;
                             syncedEntry = syncedEntriesByKey_.get(opKeyAndId);
                         } while (syncedEntry == NULL);
 
@@ -750,20 +755,25 @@ namespace nezha {
                                 }
                             }
                             if (unsyncedPointStart <= unsyncedPointEnd) {
-                                SHA_HASH hash(entry->hash);
+                                // Remove the part to the left of the sync-point
                                 hash.XOR(unsyncedEntryBoundary->hash);
-                                hash.XOR(unsyncedEntryBoundary->myhash); // so far, hash encodes all unsynced info
-                                hash.XOR(syncedEntry->hash);// plus the synced info
-                                hash.XOR(cv->cvHash_); // plus crash-vector to avoid stray message effect
+                                hash.XOR(unsyncedEntryBoundary->myhash);
+                                // so far, hash encodes all unsynced info (these entries are to the right  of sync-point)
+                                hash.XOR(syncedEntry->hash);// plus the synced part
                                 reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
                             }
                         }
                         // else (very unlikely): syncedEntry has surpassed unsyncedEntry, so we do not need to send fast-reply for this entry, because (1) a slow-reply must have been sent (2) or this entry does not exist on the leader
                     }
+                    else {
+                        reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+                        LOG(INFO) << "reply =" << reply.reqid() << "\t"
+                            << hash.toString();
+                    }
                 }
                 reply.set_result(entry->result);
                 reply.set_owd(owdMap_.get(entry->proxyId)); // If the map does not have the proxyId, it will return 0 (0 happens to be the dummy value of protobuf)
-                LOG(INFO) << "reply =" << reply.DebugString();
+
                 Address* addr = proxyAddressMap_.get(entry->proxyId);
                 if (addr != NULL) {
                     // LOG(INFO) << "proxyId=" << entry->proxyId << "\t" << addr->DecodeIP() << ":" << addr->DecodePort();
@@ -773,13 +783,13 @@ namespace nezha {
                 }
                 // else (unlikely): this replica does not have the addr of the proxy
             }
-
-            LOG(INFO) << "End While status =" << status_;
         }
+        activeWorkerNum_.fetch_sub(1);
         LOG(INFO) << "Fast Reply Terminated ";
     }
 
     void Replica::SlowReplyTd(int id, int cvId) {
+        activeWorkerNum_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
         reply.set_view(viewId_);
@@ -787,16 +797,14 @@ namespace nezha {
         reply.set_replicaid(replicaId_);
         reply.set_hash("");
         reply.set_result("");
-
         uint32_t repliedLogId = maxSyncedLogId_;
-
         while (status_ != ReplicaStatus::TERMINATED) {
             // LOG(INFO)<<"AmLeader? "<<AmLeader()<<" status="<<
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             // LOG(INFO) << "AmLeader? " << AmLeader();
             if (AmLeader()) {
                 // Leader does not send slow replies
-                LOG(INFO) << "Become Leader ";
+                // LOG(INFO) << "Become Leader ";
                 usleep(1000);
                 continue;
             }
@@ -822,9 +830,12 @@ namespace nezha {
                 }
             }
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "SlowReplyTd Terminated";
     }
 
     void Replica::IndexSendTd(int id, int cvId) {
+        activeWorkerNum_.fetch_add(1);
         uint32_t lastSyncedLogId = CONCURRENT_MAP_START_INDEX - 1;
         IndexSync indexSyncMsg;
         CrashVectorStruct* cv = crashVectorInUse_[cvId].load();
@@ -839,8 +850,11 @@ namespace nezha {
                 continue;
             }
             uint32_t logEnd = maxSyncedLogId_;
-            if (lastSyncedLogId < logEnd) {
-                // Leader has some indices to sync
+            if (lastSyncedLogId < logEnd
+                || indexSyncMsg.sendtime() + 10000 < GetMicrosecondTimestamp()) {
+
+                // (1) Leader has some indices to sync
+                // (2) There is noting to send, but we still send an indexSync msg every 1ms (to serve as leader's heartbeat)
                 indexSyncMsg.set_view(this->viewId_);
                 indexSyncMsg.set_logidbegin(lastSyncedLogId + 1);
                 logEnd = std::min(lastSyncedLogId + indexBatch, logEnd);
@@ -863,6 +877,7 @@ namespace nezha {
                 // Add cv to broadcast
                 indexSyncMsg.clear_cv();
                 indexSyncMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
+                indexSyncMsg.set_sendtime(GetMicrosecondTimestamp());
                 // Send
                 for (uint32_t r = 0; r < replicaNum_; r++) {
                     if (r != this->replicaNum_) {
@@ -876,14 +891,19 @@ namespace nezha {
             }
 
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "IndexSendTd Terminated";
     }
 
     void Replica::IndexRecvTd() {
+        activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             indexSyncContext_.Register();
             indexSyncContext_.endPoint_->LoopRun();
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "IndexRecvTd Terminated";
     }
 
     void Replica::ReceiveIndexSyncMessage(char* msgBuffer, int msgLen) {
@@ -1003,6 +1023,9 @@ namespace nezha {
                     opKeyAndId = req->key();
                     opKeyAndId = ((opKeyAndId << 32u) | m);
                     LogEntry* minEntry = unsyncedEntriesByKey_.get(opKeyAndId);
+                    // LOG(INFO) << "reqKey=" << req->key() << "\t"
+                    //     << "id=" << m << "\t"
+                    //     << "maxUnSyncedLogIdByKey_=" << maxUnSyncedLogIdByKey_[req->key()];
                     ASSERT(minEntry != NULL);
                     if (minEntry->LessThan(*entry)) {
                         // This minEntry is useless
@@ -1033,11 +1056,14 @@ namespace nezha {
     }
 
     void Replica::MissedIndexAckTd() {
+        activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             missedIndexAckContext_.Register();
             missedIndexAckContext_.endPoint_->LoopRun();
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "MissedIndexAckTd Terminated";
     }
 
     void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
@@ -1078,11 +1104,14 @@ namespace nezha {
     }
 
     void Replica::MissedReqAckTd() {
+        activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             missedReqAckContext_.Register();
             missedReqAckContext_.endPoint_->LoopRun();
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "MissedReqAckTd Terminated";
     }
 
 
@@ -1157,6 +1186,7 @@ namespace nezha {
 
 
     void Replica::GarbageCollectTd() {
+        activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
             // Reclaim stale crashVector
@@ -1210,6 +1240,8 @@ namespace nezha {
 
             usleep(10000);
         }
+        activeWorkerNum_.fetch_sub(1);
+        LOG(INFO) << "GarbageCollectTd Terminated";
     }
 
     void Replica::CheckHeartBeat() {

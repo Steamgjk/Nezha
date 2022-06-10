@@ -74,6 +74,14 @@ union SHA_HASH {
         item[3] ^= h.item[3];
         item[4] ^= h.item[4];
     }
+    std::string toString() {
+        return (std::to_string(item[0]) + "-"
+            + std::to_string(item[1]) + "-"
+            + std::to_string(item[2]) + "-"
+            + std::to_string(item[3]) + "-"
+            + std::to_string(item[4])
+            );
+    }
 };
 
 SHA_HASH CalculateHash(uint64_t deadline, uint64_t reqKey);

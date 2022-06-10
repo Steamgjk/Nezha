@@ -55,7 +55,7 @@ int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr, const char* buffer, con
 
     int ret = sendto(fd_, buffer, bufferLen, 0, (struct sockaddr*)(&(dstAddr.addr_)), sizeof(sockaddr_in));
     if (ret < 0) {
-        LOG(ERROR) << "Send Fail ret =" << ret;
+        LOG(ERROR) << pthread_self() << "Send Fail ret =" << ret;
     }
     return ret;
 }
