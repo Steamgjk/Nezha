@@ -1,0 +1,31 @@
+---
+print-config: true
+replica-ips:
+  - "10.128.2.10"
+  - "10.128.2.11"
+  - "10.128.2.12"
+replica-id: 0
+receiver-shards: 1 # The number of threads to receive threads
+process-shards: 1 # The number of threads to process requests. For now process-shards is fixed to 1, because the early-buffer enque/deque is hard to parallelize. Maybe later we can find a high-performant **concurrent priority queue** for early-buffer, then process-shards may be parallelized for higher performance
+reply-shards: 1 # The number of threads to send replies (both fast/slow replies)
+index-sync-shards: 1 # The number of threads used by the leader to broadcast index synchronization messages to followers. For followers, they only need one such thread to receive and handle the index sync msgs
+receiver-port: 33333 # The port is exposed to client/proxy and is used to receive client/proxy requests. When receiver-shards>1, the corresponding ports are receiver-ports + shard-index
+index-sync-port: 35333 # The port is used for replicas to communicate index synchronization messages. Typicall, the leader sends index sync msgs and the followers receive them
+request-ask-port: 36333 # When one follower is missing requests, they ask from the leader or other followers. The leader/followers send the missed requests to this port of this follower
+index-ask-port: 37333 # When one follower is missing some index sync msgs, it asks the leader (or other followers) for the missing ones, and the leader (or other followers) send to the index-sync-port of the problematic follower
+master-port: 34333 # This port is mainly used to send/receive other messages
+monitor-period-ms: 50 # Each blocking thread has a monitor timer, which periodically checks the replica status and unblock the thread (and exit) when replica status is not Normal
+main-loop-period-ms: 20
+heartbeat-threshold-ms: 500
+index-ask-period-ms: 10 # When missing indices, we launch a timer to periodically ask indices
+request-ask-period-ms: 10 # When missing logs, we launch a timer to periodically ask logs(requests)
+view-change-period-ms: 10
+state-transfer-period-ms: 10
+state-transfer-timeout-ms: 100000 # If the state-transfer has not been completed after such long time, then rollback to viewchange
+index-transfer-max-batch: 30
+request-transfer-max-batch: 5
+crash-vector-request-period-ms: 50 # make it longer, becasue it will clear all previous replies
+recovery-request-period-ms: 10
+sync-report-period-ms: 10
+key-num: 1000000 # when commutativity is enabled for test, we need the specified key number to detect commutativity
+owd-estimation-window: 1000 # we use a sliding window to get moving median of one-way delays, here is the length of the window

@@ -2,12 +2,12 @@
 print-config: true
 proxy-info:
   proxy-ips:
-    - "10.128.2.13"
+    - "127.0.0.4"
   proxy-shards: 1
   request-port-base: 32000
 client-info:
   client-id: 1
-  client-ip: "10.128.2.14"
+  client-ip: "127.0.0.5"
   request-port: 32912
   is-openloop: true
   poisson-rate: 10 # it means the client sends x reqs/10ms on average

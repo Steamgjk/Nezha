@@ -46,14 +46,13 @@ namespace nezha {
             masterContext_.endPoint_->RegisterTimer(crashVectorRequestTimer_);
         }
         else if (status_ == ReplicaStatus::NORMAL) {
-            // Launch worker threads (based on config)
-            LaunchThreads();
             if (!AmLeader()) {
                 masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
             }
             // TODO: Register periodicSyncTimer_
         }
-
+        // Launch worker threads (based on config)
+        LaunchThreads();
 
         masterContext_.endPoint_->LoopRun();
         LOG(INFO) << "Break LoopRun";
@@ -515,12 +514,12 @@ namespace nezha {
 
 
 
-    void Replica::BlockWhenStatusIs(char targetStatus) {
-        if (status_ == targetStatus) {
+    void Replica::BlockWhenStatusIsNot(char targetStatus) {
+        if (status_ != targetStatus) {
             activeWorkerNum_.fetch_sub(1);
             std::unique_lock<std::mutex> lk(waitMutext_);
             waitVar_.wait(lk, [this, targetStatus] {
-                if (status_ == ReplicaStatus::TERMINATED || status_ != targetStatus) {
+                if (status_ == ReplicaStatus::TERMINATED || status_ == targetStatus) {
                     // Unblock 
                     activeWorkerNum_.fetch_add(1);
                     return true;
@@ -537,7 +536,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         std::pair<uint32_t, uint64_t> owdSample;
         while (status_ != ReplicaStatus::TERMINATED) {
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             if (owdQu_.try_dequeue(owdSample)) {
                 uint64_t proxyId = owdSample.first;
                 uint32_t owd = owdSample.second;
@@ -567,10 +566,9 @@ namespace nezha {
     void Replica::ReceiveTd(int id) {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             requestContext_[id].Register();
             requestContext_[id].endPoint_->LoopRun();
-            // Normally, it should be blocked in LoopRun, if it comes here, then there are 2 possible cases: (1) Terminated (2) ViewChange
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
         LOG(INFO) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";;
@@ -582,7 +580,7 @@ namespace nezha {
         Request* req = NULL;
         bool amLeader = AmLeader();
         while (status_ != ReplicaStatus::TERMINATED) {
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             if (processQu_.try_dequeue(req)) {
                 reqKey = req->clientid();
                 reqKey = ((reqKey << 32u) | (req->reqid()));
@@ -735,7 +733,7 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[cvId];
         uint64_t opKeyAndId = 0ul;
         while (status_ != ReplicaStatus::TERMINATED) {
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             // Before encoding crashVector into hash, check whether the crashVector (cv) is the freshest one
             CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
             if (cv->version_ < masterCV->version_) {
@@ -868,7 +866,7 @@ namespace nezha {
         uint32_t repliedLogId = maxSyncedLogId_;
         while (status_ != ReplicaStatus::TERMINATED) {
             // LOG(INFO)<<"AmLeader? "<<AmLeader()<<" status="<<
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             // LOG(INFO) << "AmLeader? " << AmLeader();
             if (AmLeader()) {
                 // Leader does not send slow replies
@@ -916,7 +914,7 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[cvId].load();
         uint32_t indexBatch = replicaConfig_["index-transfer-max-batch"].as<uint32_t>();
         while (status_ != ReplicaStatus::TERMINATED) {
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             if (!AmLeader()) {
                 // Although this replica is not leader currently
                 // We still keep this thread. When it becomes the leader
@@ -973,9 +971,9 @@ namespace nezha {
     void Replica::IndexRecvTd() {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             indexSyncContext_.Register();
             indexSyncContext_.endPoint_->LoopRun();
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
         LOG(INFO) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
@@ -1130,9 +1128,9 @@ namespace nezha {
     void Replica::MissedIndexAckTd() {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             missedIndexAckContext_.Register();
             missedIndexAckContext_.endPoint_->LoopRun();
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
         LOG(INFO) << "MissedIndexAckTd Terminated " << preVal - 1 << " worker remaining";
@@ -1178,9 +1176,9 @@ namespace nezha {
     void Replica::MissedReqAckTd() {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             missedReqAckContext_.Register();
             missedReqAckContext_.endPoint_->LoopRun();
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
         LOG(INFO) << "MissedReqAckTd Terminated " << preVal - 1 << " worker remaining";
@@ -1260,7 +1258,7 @@ namespace nezha {
     void Replica::GarbageCollectTd() {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
-            BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             // Reclaim stale crashVector
             uint32_t masterCVVersion = crashVectorInUse_[0].load()->version_;
             while (cvVersionToClear_ <= masterCVVersion) {
@@ -1492,7 +1490,7 @@ namespace nezha {
 
         // Wait until every worker stop
         while (activeWorkerNum_ > 0) {
-            // LOG(INFO) << "activeWorker Check=" << activeWorkerNum_;
+            LOG(INFO) << "activeWorker Check=" << activeWorkerNum_;
             usleep(1000);
         }
 
@@ -1801,9 +1799,7 @@ namespace nezha {
         if (AmLeader()) {
             SendStartView(-1);
         } // Else: followers directly start
-        if (status_ == ReplicaStatus::RECOVERING) {
-            // TODO::
-        }
+
         status_ = ReplicaStatus::NORMAL;
         lastNormalView_.store(viewId_);
         // Update crashVector, all synced with master
@@ -1826,7 +1822,6 @@ namespace nezha {
 
 
     void Replica::SendStateTransferRequest() {
-
         if (GetMicrosecondTimestamp() >= stateTransferTerminateTime_) {
             // If statetransfer cannot be completed within a certain amount of time, rollback to view change
             masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
@@ -2157,15 +2152,18 @@ namespace nezha {
 
     void Replica::ProcessCrashVectorReply(const CrashVectorReply& reply) {
         if (status_ != ReplicaStatus::RECOVERING) {
+            LOG(INFO) << "nolong Recovering " << status_;
             return;
         }
 
         if (nonce_ != reply.nonce()) {
+            LOG(INFO) << "nonce inconistent " << crashVectorReplySet_.size();
             return;
         }
 
         if (masterContext_.endPoint_->isRegistered(crashVectorRequestTimer_) == false) {
             // We no longer request crash vectors
+            LOG(INFO) << "no longer register crashVectorRequest " << crashVectorReplySet_.size();
             return;
         }
 

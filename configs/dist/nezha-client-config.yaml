@@ -1,0 +1,17 @@
+---
+print-config: true
+proxy-info:
+  proxy-ips:
+    - "10.128.2.13"
+  proxy-shards: 1
+  request-port-base: 32000
+client-info:
+  client-id: 1
+  client-ip: "10.128.2.14"
+  request-port: 32912
+  is-openloop: true
+  poisson-rate: 10 # it means the client sends x reqs/10ms on average
+  duration-sec: 60 # it means the duration of the client runs (second)
+  key-num: 1000000 # when key-num is 1, it means there is no commutativity optimization
+  skew-factor: 0.5 # 0-0.99 The higher the zipfian factor is, the more skewed the workload is
+  request-retry-time-us: 10000 # After the request is submitted, if we cannot get the response after such long time, then we will retry

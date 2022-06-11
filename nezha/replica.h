@@ -186,7 +186,7 @@ namespace nezha {
         void RollbackToRecovery();
 
         void RewindSyncedLogTo(uint32_t rewindPoint);
-        void BlockWhenStatusIs(char targetStatus);
+        void BlockWhenStatusIsNot(char targetStatus);
 
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
