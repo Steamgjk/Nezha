@@ -55,13 +55,13 @@ namespace nezha {
         LaunchThreads();
 
         masterContext_.endPoint_->LoopRun();
-        LOG(INFO) << "Break LoopRun";
+        VLOG(2) << "Break LoopRun";
 
         // Wait until all threads return
         for (auto& kv : threadPool_) {
-            LOG(INFO) << "Joining " << kv.first;
+            VLOG(2) << "Joining " << kv.first;
             kv.second->join();
-            LOG(INFO) << "Join Complete \t" << kv.first;
+            VLOG(2) << "Join Complete \t" << kv.first;
         }
     }
 
@@ -560,7 +560,7 @@ namespace nezha {
             }
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
+        VLOG(2) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
     }
 
     void Replica::ReceiveTd(int id) {
@@ -571,7 +571,7 @@ namespace nezha {
             requestContext_[id].endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";;
+        VLOG(2) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";;
     }
 
     void Replica::ProcessTd(int id) {
@@ -650,9 +650,6 @@ namespace nezha {
 
             // Polling early-buffer
             uint64_t nowTime = GetMicrosecondTimestamp();
-            // if (earlyBuffer_.size() > 0) {
-            //     LOG(INFO) << "earlyBUffer Size =" << earlyBuffer_.size();
-            // }
 
             while ((!earlyBuffer_.empty()) && nowTime <= earlyBuffer_.begin()->first.first) {
                 uint64_t deadline = earlyBuffer_.begin()->first.first;
@@ -665,7 +662,7 @@ namespace nezha {
             }
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";;
+        VLOG(2) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq, const bool sendReply) {
@@ -702,7 +699,7 @@ namespace nezha {
                 opKeyAndId = request.key();
                 opKeyAndId = ((opKeyAndId << 32u) | (maxUnSyncedLogIdByKey_[request.key()]));
                 LogEntry* prev = unsyncedEntriesByKey_.get(opKeyAndId);
-                ASSERT(prev != NULL); // Problem!
+                ASSERT(prev != NULL);
                 hash.XOR(prev->hash);
             }
             entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), "", request.proxyid());
@@ -779,9 +776,6 @@ namespace nezha {
                         // Then directly reply with the XORed hash (similar to the leader)
                         reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
                         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
-                        // LOG(INFO) << "Follower (No deps) " << reply.reqid() << "\t"
-                        //     << "opKey=" << entry->opKey << "\t"
-                        //     << "hash=" << hash.toString();
                     }
                     else {
                         // The follower already gets some synced non-commutative logs (via index sync process)
@@ -851,7 +845,7 @@ namespace nezha {
             }
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";;
+        VLOG(2) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::SlowReplyTd(int id) {
@@ -904,7 +898,7 @@ namespace nezha {
             }
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining";;
+        VLOG(2) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::IndexSendTd(int id, int cvId) {
@@ -965,7 +959,7 @@ namespace nezha {
 
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";;
+        VLOG(2) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";;
     }
 
     void Replica::IndexRecvTd() {
@@ -976,7 +970,7 @@ namespace nezha {
             indexSyncContext_.endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
+        VLOG(2) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
     }
 
     void Replica::ReceiveIndexSyncMessage(char* msgBuffer, int msgLen) {
@@ -1092,9 +1086,14 @@ namespace nezha {
                 maxSyncedLogId_++;
                 // Chunk UnSynced logs
                 uint32_t m = minUnSyncedLogIdByKey_[req->key()];
-                while (m <= maxUnSyncedLogIdByKey_[req->key()]) {
+                m = std::max(CONCURRENT_MAP_START_INDEX, m);
+                while (m < maxUnSyncedLogIdByKey_[req->key()]) {
                     opKeyAndId = req->key();
                     opKeyAndId = ((opKeyAndId << 32u) | m);
+                    // LOG(INFO) << "key=" << req->key() << "\t"
+                    //     << "min =" << m << "\t"
+                    //     << "max =" << maxUnSyncedLogIdByKey_[req->key()];
+
                     LogEntry* minEntry = unsyncedEntriesByKey_.get(opKeyAndId);
                     ASSERT(minEntry != NULL);
                     if (minEntry->LessThan(*entry)) {
@@ -1133,7 +1132,7 @@ namespace nezha {
             missedIndexAckContext_.endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "MissedIndexAckTd Terminated " << preVal - 1 << " worker remaining";
+        VLOG(2) << "MissedIndexAckTd Terminated " << preVal - 1 << " worker remaining";
     }
 
     void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
@@ -1181,7 +1180,7 @@ namespace nezha {
             missedReqAckContext_.endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "MissedReqAckTd Terminated " << preVal - 1 << " worker remaining";
+        VLOG(2) << "MissedReqAckTd Terminated " << preVal - 1 << " worker remaining";
     }
 
 
@@ -1287,7 +1286,7 @@ namespace nezha {
                         // No entires to clear for this key
                         continue;
                     }
-                    while (unsyncedLogIdByKeyToClear_[i] <= minUnSyncedLogIdByKey_[i]) {
+                    while (unsyncedLogIdByKeyToClear_[i] < minUnSyncedLogIdByKey_[i]) {
                         uint64_t opKeyAndId = i;
                         opKeyAndId = ((opKeyAndId << 32u) | unsyncedLogIdByKeyToClear_[i]);
                         LogEntry* entry = unsyncedEntriesByKey_.get(opKeyAndId);
@@ -1315,7 +1314,7 @@ namespace nezha {
             usleep(10000);
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-        LOG(INFO) << "GarbageCollectTd Terminated " << preVal - 1 << " worker remaining";
+        VLOG(2) << "GarbageCollectTd Terminated " << preVal - 1 << " worker remaining";
     }
 
     void Replica::CheckHeartBeat() {
@@ -1329,7 +1328,7 @@ namespace nezha {
         if (status_ != ReplicaStatus::NORMAL) {
             // Some worker threads have detected viewchange and switch status_ to VIEWCHANGE
             // But workers have no priviledge to increment viewId_ and initiate view change process, so the master will do that
-            LOG(INFO) << "InitiateViewChange-10";
+            VLOG(2) << "InitiateViewChange-10";
             InitiateViewChange(viewId_ + 1);
             return;
         }
@@ -1339,7 +1338,7 @@ namespace nezha {
         if (lastHeartBeatTime_ + threashold < nowTime) {
             // I haven't heard from the leader for too long, it probably has died
             // Before start view change, clear context
-            LOG(INFO) << "InitiateViewChange-1";
+            VLOG(2) << "InitiateViewChange-1";
             InitiateViewChange(viewId_ + 1);
         }
     }
@@ -1490,7 +1489,7 @@ namespace nezha {
 
         // Wait until every worker stop
         while (activeWorkerNum_ > 0) {
-            LOG(INFO) << "activeWorker Check=" << activeWorkerNum_;
+            VLOG(3) << "activeWorker Check=" << activeWorkerNum_;
             usleep(1000);
         }
 
@@ -1595,7 +1594,7 @@ namespace nezha {
             }
         }
         if (viewChangeReq.view() > viewId_) {
-            LOG(INFO) << "InitiateViewChange-2";
+            VLOG(2) << "InitiateViewChange-2";
             InitiateViewChange(viewChangeReq.view());
         }
         else {
@@ -1624,7 +1623,7 @@ namespace nezha {
 
         if (status_ == ReplicaStatus::NORMAL) {
             if (viewChange.view() > viewId_) {
-                LOG(INFO) << "InitiateViewChange-3";
+                VLOG(2) << "InitiateViewChange-3";
                 InitiateViewChange(viewChange.view());
             }
             else {
@@ -1634,7 +1633,7 @@ namespace nezha {
         }
         else if (status_ == ReplicaStatus::VIEWCHANGE) {
             if (viewChange.view() > viewId_) {
-                LOG(INFO) << "InitiateViewChange-4";
+                VLOG(2) << "InitiateViewChange-4";
                 InitiateViewChange(viewChange.view());
             }
             else if (viewChange.view() < viewId_) {
@@ -1648,7 +1647,7 @@ namespace nezha {
             else {
                 ASSERT(AmLeader());
                 viewChangeSet_[viewChange.replicaid()] = viewChange;
-                LOG(INFO) << "viewChangeSet Size=" << viewChangeSet_.size();
+                VLOG(3) << "viewChangeSet Size=" << viewChangeSet_.size();
                 // If cv is updated, then it is likely that some messages in viewChangeSet_ become stray, so remove them 
                 for (uint32_t i = 0; i < replicaNum_; i++) {
                     auto iter = viewChangeSet_.find(i);
@@ -1677,11 +1676,6 @@ namespace nezha {
                     myvc.set_lastnormalview(lastNormalView_);
                     viewChangeSet_[replicaId_] = myvc;
                     // Has got enough viewChange messages, stop viewChangeTimer
-                    LOG(INFO) << "Enough viewChange msg " << viewChangeSet_.size();
-                    for (auto& kv : viewChangeSet_) {
-                        LOG(INFO) << kv.first << "\t" << kv.second.DebugString();
-                    }
-
                     masterContext_.endPoint_->UnregisterTimer(viewChangeTimer_);
                     TransferSyncedLog();
                 }
@@ -1713,7 +1707,7 @@ namespace nezha {
         }
 
         stateTransferIndices_.clear();
-        LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
+        VLOG(3) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
             << "largestSyncPoint=" << largestSyncPoint << "\t"
             << "largestNormalView = " << largestNormalView << "\t"
             << "lastNormalView_=" << lastNormalView_;
@@ -1747,10 +1741,9 @@ namespace nezha {
     void Replica::TransferUnSyncedLog() {
         // Get the unsynced logs from the f+1 remaining replicas
         // If this process cannot be completed, rollback to view change
-        LOG(INFO) << "TransferUnSyncedLog";
+        VLOG(3) << "TransferUnSyncedLog";
         stateTransferIndices_.clear();
         for (auto& kv : viewChangeSet_) {
-            LOG(INFO) << "begin=" << kv.second.unsyncedlogbegin() << "\t" << kv.second.unsyncedlogend();
             if (kv.second.unsyncedlogbegin() > kv.second.unsyncedlogend()) {
                 // This replica has no unsynced logs 
                 continue;
@@ -1848,7 +1841,7 @@ namespace nezha {
                 request.set_logend(stateTransferInfo.second.second);
             }
 
-            LOG(INFO) << "stateTransferRequest = " << request.DebugString();
+            VLOG(3) << "stateTransferRequest = " << request.DebugString();
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[stateTransferInfo.first]), request, MessageType::STATE_TRANSFER_REQUEST);
         }
 
@@ -1858,7 +1851,7 @@ namespace nezha {
         // LOG(INFO) << "stateTransferRequest=" << stateTransferRequest.DebugString();
         if (stateTransferRequest.view() != viewId_) {
             if (stateTransferRequest.view() > viewId_) {
-                LOG(INFO) << "InitiateViewChange-5";
+                VLOG(2) << "InitiateViewChange-5";
                 InitiateViewChange(stateTransferRequest.view());
             }
             return;
@@ -1941,7 +1934,7 @@ namespace nezha {
                 masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
             }
             else if (status_ == ReplicaStatus::VIEWCHANGE) {
-                LOG(INFO) << "InitiateViewChange-6";
+                VLOG(2) << "InitiateViewChange-6";
                 InitiateViewChange(stateTransferReply.view());
             }
             else {
@@ -2011,7 +2004,7 @@ namespace nezha {
     void Replica::RewindSyncedLogTo(uint32_t rewindPoint) {
         uint32_t logIdToClear = rewindPoint + 1;
         std::set<uint32_t> keysToClear;
-        LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
+        VLOG(3) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
             << "rewindPoint=" << rewindPoint;
         // Rewind syncedEntries_ and maxSyncedLogId_
         while (maxSyncedLogId_ > rewindPoint) {
@@ -2064,11 +2057,11 @@ namespace nezha {
 
         if (status_ == ReplicaStatus::VIEWCHANGE) {
             if (startView.view() > viewId_) {
-                LOG(INFO) << "InitiateViewChange-7";
+                VLOG(2) << "InitiateViewChange-7";
                 InitiateViewChange(startView.view());
             }
             else if (startView.view() == viewId_) {
-                LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
+                VLOG(3) << "committedLogId_=" << committedLogId_ << "\t"
                     << "syncedlogid=" << startView.syncedlogid();
                 if (committedLogId_ < startView.syncedlogid()) {
                     // Start StateTransfer
@@ -2090,7 +2083,7 @@ namespace nezha {
         }
         else if (status_ == ReplicaStatus::NORMAL) {
             if (startView.view() > viewId_) {
-                LOG(INFO) << "InitiateViewChange-8";
+                VLOG(2) << "InitiateViewChange-8";
                 InitiateViewChange(startView.view());
             }
             else if (startView.view() < viewId_) {
@@ -2117,7 +2110,6 @@ namespace nezha {
                 continue;
             }
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::CRASH_VECTOR_REQUEST);
-            // LOG(INFO) << "crashVecRequest " << request.DebugString();
         }
 
     }
@@ -2132,7 +2124,6 @@ namespace nezha {
                 continue;
             }
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::RECOVERY_REQUEST);
-            LOG(INFO) << "RecoveryRequest=" << request.DebugString();
         }
     }
 
@@ -2147,7 +2138,6 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
         reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]), reply, MessageType::CRASH_VECTOR_REPLY);
-        // LOG(INFO) << "send to " << request.replicaid() << "\t" << reply.DebugString();
     }
 
     void Replica::ProcessCrashVectorReply(const CrashVectorReply& reply) {
@@ -2197,14 +2187,11 @@ namespace nezha {
     }
 
     void Replica::ProcessRecoveryRequest(const RecoveryRequest& request) {
-        LOG(INFO) << "request=" << request.DebugString();
         if (status_ != ReplicaStatus::NORMAL) {
-            LOG(INFO) << "status = " << status_;
             return;
         }
 
         if (!CheckCV(request.replicaid(), request.cv())) {
-            LOG(INFO) << "stray " << request.DebugString();
             return;
         }
         else {
@@ -2217,14 +2204,11 @@ namespace nezha {
         reply.set_view(viewId_);
         reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         reply.set_syncedlogid(maxSyncedLogId_);
-        LOG(INFO) << "reply-1 =" << reply.DebugString();
         masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]), reply, MessageType::RECOVERY_REPLY);
-        LOG(INFO) << "reply =" << reply.DebugString();
 
     }
 
     void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
-        LOG(INFO) << "receive reply=" << reply.DebugString();
         if (!CheckCV(reply.replicaid(), reply.cv())) {
             return;
         }
@@ -2245,12 +2229,9 @@ namespace nezha {
             return;
         }
         recoveryReplySet_[reply.replicaid()] = reply;
-        LOG(INFO) << "receive replySz" << recoveryReplySet_.size();
-
         if (recoveryReplySet_.size() >= replicaNum_ / 2 + 1) {
             // Got enough quorum
             masterContext_.endPoint_->UnregisterTimer(recoveryRequestTimer_);
-
             uint32_t maxView = 0;
             uint32_t syncedLogId = 0;
             for (const auto& kv : recoveryReplySet_) {
@@ -2375,7 +2356,7 @@ namespace nezha {
         }
         if (view > this->viewId_) {
             // new view, update status and wait for master thread to handle the situation
-            LOG(INFO) << "InitiateViewChange-9";
+            VLOG(2) << "InitiateViewChange-9";
             InitiateViewChange(view);
             return false;
         }

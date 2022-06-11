@@ -8,12 +8,16 @@ LD = g++
 PROTOC = protoc
 # EXPAND = lib/tmpl/expand
 
+PROTOVERSION := $(shell protoc --version) 
+$(info $(PROTOVERSION) )
+
+
 CFLAGS := -g -Wall -pthread -iquote.obj/gen -Wno-uninitialized  -O2 -DNASSERT
 CXXFLAGS := -std=c++0x -O3
 # CFLAGS := -g2 -Wall -pthread -iquote.obj/gen -Wno-uninitialized -O0
 # CXXFLAGS := -std=c++0x -O0 -g2
 
-LDFLAGS := -lev -ldl -lprotobuf -ljunction -lcrypto -lglog -lgflags -lyaml-cpp -pthread
+LDFLAGS := -lev -ldl -lprotobuf -ljunction -lcrypto -lgflags  -lglog  -lyaml-cpp -pthread
 LIBPATH := -I./
 CFLAGS += $(LIBPATH)
 
@@ -114,7 +118,7 @@ define add-LDFLAGS
 $(foreach bin,$(1),$(eval LDFLAGS-$(bin) += $(2)))
 endef
 
-include sources/Rules.mk
+# include sources/Rules.mk
 include lib/Rules.mk
 include nezha/Rules.mk
 

@@ -15,7 +15,7 @@
 #include <gflags/gflags.h>
 
 
-#define CONCURRENT_MAP_START_INDEX (2)
+#define CONCURRENT_MAP_START_INDEX (2u)
 
 namespace  ReplicaStatus {
     extern char NORMAL;

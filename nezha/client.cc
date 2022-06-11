@@ -200,11 +200,6 @@ namespace nezha {
                     outstandingRequests_.assign(request->reqid(), request);
                     outstandingRequestSendTime_.assign(request->reqid(), GetMicrosecondTimestamp());
                     nextReqId_++;
-                    // if (nextReqId_ == 5) {
-                    //     LOG(INFO) << "Pausing here ";
-                    //     getchar();
-                    //     exit(0);
-                    // }
                     roundRobinIdx++;
 
                 }
@@ -212,6 +207,7 @@ namespace nezha {
             }
             if (GetMicrosecondTimestamp() >= endTime) {
                 // Client has executed long enough, should terminate
+                LOG(INFO) << "Terminating soon...";
                 sleep(10);
                 running_ = false;
                 return;
