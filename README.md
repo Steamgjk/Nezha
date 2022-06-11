@@ -57,7 +57,7 @@ The core part is the nezha folder, which includes three processes, i.e., replica
 Each process is composed of three files: a class header (e.g., nezha-replica.h), a class source code (nezha-replica.cc), a launching file (e.g., nezha-replica-run.cc). Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) to get its full configuration
 
 
-## All-in-One Box Test
+## All-in-One-Box Test
 
 ```
 # Launch one beefy machine (e.g.g 16 or 32 CPUs)
