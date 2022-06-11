@@ -220,7 +220,7 @@ namespace nezha {
         void ReceiveTd(int id = -1);
         void ProcessTd(int id = -1);
         void FastReplyTd(int id = -1, int cvId = -1);
-        void SlowReplyTd(int id = -1, int cvId = -1);
+        void SlowReplyTd(int id = -1);
         void IndexSendTd(int id = -1, int cvId = -1);
         void IndexRecvTd();
         void MissedIndexAckTd();
@@ -229,7 +229,7 @@ namespace nezha {
         void GarbageCollectTd();
 
     public:
-        Replica(const std::string& configFile = std::string("../configs/nezha-replica-config.yaml"));
+        Replica(const std::string& configFile = std::string("../configs/nezha-replica-config.yaml"), bool isRecovering = false);
         ~Replica();
 
         void ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);

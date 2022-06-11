@@ -46,7 +46,9 @@ make
 # it will install turf and junction together in /usr/local/lib
 sudo make install
 
-# install glog https://github.com/google/glog
+# install glog (install from source, the apt install have some problems) https://github.com/google/glog
+# install gflag 
+sudo apt-get install libgflags-dev -y
 ```
 
 

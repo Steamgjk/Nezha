@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <openssl/sha.h>
 #include <glog/logging.h>
+#include <gflags/gflags.h>
 
 
 #define CONCURRENT_MAP_START_INDEX (2)

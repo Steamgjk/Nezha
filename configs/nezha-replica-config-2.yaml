@@ -5,7 +5,6 @@ replica-ips:
   - "10.128.2.11"
   - "10.128.2.12"
 replica-id: 2
-recovering: false
 receiver-shards: 1 # The number of threads to receive threads
 process-shards: 1 # The number of threads to process requests. For now process-shards is fixed to 1, because the early-buffer enque/deque is hard to parallelize. Maybe later we can find a high-performant **concurrent priority queue** for early-buffer, then process-shards may be parallelized for higher performance
 reply-shards: 1 # The number of threads to send replies (both fast/slow replies)

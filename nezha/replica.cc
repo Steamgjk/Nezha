@@ -8,10 +8,17 @@ namespace nezha {
 #define ASSERT(x) {}
 #endif
 
-    Replica::Replica(const std::string& configFile) :viewId_(0), lastNormalView_(0)
+    Replica::Replica(const std::string& configFile, bool isRecovering) :viewId_(0), lastNormalView_(0)
     {
         // Load Config
         replicaConfig_ = YAML::LoadFile(configFile);
+        if (isRecovering) {
+            status_ = ReplicaStatus::RECOVERING;
+        }
+        else {
+            status_ = ReplicaStatus::NORMAL;
+        }
+        LOG(WARNING) << "Replica Status " << status_;
         PrintConfig();
         CreateContext();
         LOG(INFO) << "viewId_=" << viewId_
@@ -33,19 +40,20 @@ namespace nezha {
     }
 
     void Replica::Run() {
-        // Launch worker threads (based on config)
-        LaunchThreads();
         // Master thread run
         masterContext_.Register();
         if (status_ == ReplicaStatus::RECOVERING) {
             masterContext_.endPoint_->RegisterTimer(crashVectorRequestTimer_);
         }
         else if (status_ == ReplicaStatus::NORMAL) {
+            // Launch worker threads (based on config)
+            LaunchThreads();
             if (!AmLeader()) {
                 masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
             }
+            // TODO: Register periodicSyncTimer_
         }
-        // TODO: Register periodicSyncTimer_
+
 
         masterContext_.endPoint_->LoopRun();
         LOG(INFO) << "Break LoopRun";
@@ -66,7 +74,6 @@ namespace nezha {
                 LOG(INFO) << "\t" << replicaConfig_["replica-ips"][i].as<std::string>();
             }
             LOG(INFO) << "ReplicaID:" << replicaConfig_["replica-id"].as<int>();
-            LOG(INFO) << "Recovering?" << replicaConfig_["recovering"].as<bool>();
             LOG(INFO) << "Request Receiver Shards:" << replicaConfig_["receiver-shards"].as<int>();
             LOG(INFO) << "Process Shards:" << replicaConfig_["process-shards"].as<int>();
             LOG(INFO) << "Reply Shards:" << replicaConfig_["reply-shards"].as<int>();
@@ -116,13 +123,7 @@ namespace nezha {
         unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
-        if (replicaConfig_["recovering"].as<bool>()) {
-            status_ = ReplicaStatus::RECOVERING;
-        }
-        else {
-            status_ = ReplicaStatus::NORMAL;
-        }
-        LOG(WARNING) << "Replica Status " << status_;
+
         // Create master endpoints and context
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         int port = replicaConfig_["master-port"].as<int>();
@@ -232,7 +233,7 @@ namespace nezha {
         std::vector<uint32_t> cvVec(replicaNum_, 0);
         CrashVectorStruct* cv = new CrashVectorStruct(cvVec, 2);
         crashVector_.assign(cv->version_, cv);
-        crashVectorVecSize_ = 1 + replyShardNum * 2 + replicaConfig_["index-sync-shards"].as<int>() + 2;
+        crashVectorVecSize_ = 1 + replyShardNum + replicaConfig_["index-sync-shards"].as<int>() + 2;
         indexRecvCVIdx_ = crashVectorVecSize_ - 2;
         indexAckCVIdx_ = crashVectorVecSize_ - 1;
         crashVectorInUse_ = new std::atomic<CrashVectorStruct*>[crashVectorVecSize_];
@@ -299,12 +300,12 @@ namespace nezha {
 
         // Clear UnSyncedLogs
         // Since ConcurrentMap reseres 0 and 1, we can only use log-id from 2
-        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX;
+        minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         minUnSyncedLogIdByKey_.clear();
         maxUnSyncedLogIdByKey_.clear();
         unsyncedLogIdByKeyToClear_.clear();
-        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
+        minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
@@ -394,6 +395,8 @@ namespace nezha {
         masterContext_.endPoint_->UnRegisterAllTimers();
         masterContext_.endPoint_->RegisterTimer(masterContext_.monitorTimer_);
         if (!AmLeader()) {
+            // Start checking leader's heartbeat from now on
+            lastHeartBeatTime_ = GetMicrosecondTimestamp();
             masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
         }
         // TODO: Register periodicSyncTimer_
@@ -432,7 +435,7 @@ namespace nezha {
         }
         for (int i = 0; i < replyShardNum; i++) {
             totalWorkerNum_++;
-            std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i, i + replyShardNum + 1);
+            std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
             std::string key("SlowReplyTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
@@ -441,7 +444,7 @@ namespace nezha {
         // IndexSync
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
             totalWorkerNum_++;
-            std::thread* td = new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum * 2 + 1);
+            std::thread* td = new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum + 1);
             std::string key("IndexSendTd-" + std::to_string(i));
             threadPool_[key] = td;
             LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
@@ -733,6 +736,13 @@ namespace nezha {
         uint64_t opKeyAndId = 0ul;
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIs(ReplicaStatus::VIEWCHANGE);
+            // Before encoding crashVector into hash, check whether the crashVector (cv) is the freshest one
+            CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
+            if (cv->version_ < masterCV->version_) {
+                // My cv is stale, update it
+                crashVectorInUse_[cvId] = masterCV;
+                cv = masterCV;
+            }
             if (fastReplyQu_[id].try_dequeue(entry)) {
                 Address* addr = proxyAddressMap_.get(entry->proxyId);
                 if (addr == NULL) {
@@ -751,14 +761,6 @@ namespace nezha {
                 reply.set_result(entry->result);
                 // If the owdMap_ does not have the proxyId (i.e. the owd for this proxyId has not been estimated), it will return 0 (0 happens to be the dummy value of protobuf, and the proxy will not consider it as an estimated owd)
                 reply.set_owd(owdMap_.get(entry->proxyId));
-                // Before encoding crashVector into hash, check whether the crashVector (cv) is the freshest one
-                CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
-                if (cv->version_ < masterCV->version_) {
-                    // My cv is stale, update it
-                    crashVectorInUse_[cvId] = masterCV;
-                    cv = masterCV;
-                }
-
                 SHA_HASH hash(entry->hash);
                 hash.XOR(cv->cvHash_);
                 if (amLeader) {
@@ -854,7 +856,7 @@ namespace nezha {
         LOG(INFO) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";;
     }
 
-    void Replica::SlowReplyTd(int id, int cvId) {
+    void Replica::SlowReplyTd(int id) {
         activeWorkerNum_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
@@ -1283,6 +1285,10 @@ namespace nezha {
             // Reclaim stale (unsynced) log entry and requests
             if (!AmLeader()) {
                 for (uint32_t i = 0; i < keyNum_; i++) {
+                    if (minUnSyncedLogIdByKey_[i] < CONCURRENT_MAP_START_INDEX) {
+                        // No entires to clear for this key
+                        continue;
+                    }
                     while (unsyncedLogIdByKeyToClear_[i] <= minUnSyncedLogIdByKey_[i]) {
                         uint64_t opKeyAndId = i;
                         opKeyAndId = ((opKeyAndId << 32u) | unsyncedLogIdByKeyToClear_[i]);
@@ -1380,18 +1386,21 @@ namespace nezha {
         else if (msgHdr->msgType == MessageType::CRASH_VECTOR_REQUEST) {
             CrashVectorRequest request;
             if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                // LOG(INFO) << "request=" << request.DebugString();
                 ProcessCrashVectorRequest(request);
             }
         }
         else if (msgHdr->msgType == MessageType::CRASH_VECTOR_REPLY) {
             CrashVectorReply reply;
             if (reply.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                LOG(INFO) << "CrashVectorReply = " << reply.DebugString();
                 ProcessCrashVectorReply(reply);
             }
         }
         else if (msgHdr->msgType == MessageType::RECOVERY_REQUEST) {
             RecoveryRequest request;
             if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                LOG(INFO) << "recovery request " << request.DebugString() << " status=" << status_;
                 ProcessRecoveryRequest(request);
             }
         }
@@ -1527,7 +1536,8 @@ namespace nezha {
                     // No need to send to self
                     continue;
                 }
-                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), startView, MessageType::STATE_TRANSFER_REQUEST);
+                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), startView, MessageType::START_VIEW);
+                LOG(INFO) << "Send StartView to " << i << "\t" << masterReceiver_[i]->DecodeIP() << ":" << masterReceiver_[i]->DecodePort();
             }
         }
 
@@ -1791,7 +1801,9 @@ namespace nezha {
         if (AmLeader()) {
             SendStartView(-1);
         } // Else: followers directly start
-
+        if (status_ == ReplicaStatus::RECOVERING) {
+            // TODO::
+        }
         status_ = ReplicaStatus::NORMAL;
         lastNormalView_.store(viewId_);
         // Update crashVector, all synced with master
@@ -1808,6 +1820,7 @@ namespace nezha {
             waitVar_.notify_all();
             usleep(1000);
         }
+
         VLOG(2) << "View=" << viewId_ << " Recovered " << activeWorkerNum_;
     }
 
@@ -2109,6 +2122,7 @@ namespace nezha {
                 continue;
             }
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::CRASH_VECTOR_REQUEST);
+            // LOG(INFO) << "crashVecRequest " << request.DebugString();
         }
 
     }
@@ -2123,6 +2137,7 @@ namespace nezha {
                 continue;
             }
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::RECOVERY_REQUEST);
+            LOG(INFO) << "RecoveryRequest=" << request.DebugString();
         }
     }
 
@@ -2137,6 +2152,7 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
         reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]), reply, MessageType::CRASH_VECTOR_REPLY);
+        // LOG(INFO) << "send to " << request.replicaid() << "\t" << reply.DebugString();
     }
 
     void Replica::ProcessCrashVectorReply(const CrashVectorReply& reply) {
@@ -2145,6 +2161,11 @@ namespace nezha {
         }
 
         if (nonce_ != reply.nonce()) {
+            return;
+        }
+
+        if (masterContext_.endPoint_->isRegistered(crashVectorRequestTimer_) == false) {
+            // We no longer request crash vectors
             return;
         }
 
@@ -2168,19 +2189,24 @@ namespace nezha {
             for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
                 crashVectorInUse_[i] = newCV;
             }
+            masterContext_.endPoint_->UnregisterTimer(crashVectorRequestTimer_);
+            crashVectorReplySet_.clear();
+            // Start Recovery Request
+            masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
 
         }
-        masterContext_.endPoint_->UnregisterTimer(crashVectorRequestTimer_);
-        // Start Recovery Request
-        masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
+
     }
 
     void Replica::ProcessRecoveryRequest(const RecoveryRequest& request) {
+        LOG(INFO) << "request=" << request.DebugString();
         if (status_ != ReplicaStatus::NORMAL) {
+            LOG(INFO) << "status = " << status_;
             return;
         }
 
         if (!CheckCV(request.replicaid(), request.cv())) {
+            LOG(INFO) << "stray " << request.DebugString();
             return;
         }
         else {
@@ -2189,15 +2215,18 @@ namespace nezha {
 
         RecoveryReply reply;
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
-        reply.set_replicaid(request.replicaid());
+        reply.set_replicaid(replicaId_);
         reply.set_view(viewId_);
         reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         reply.set_syncedlogid(maxSyncedLogId_);
+        LOG(INFO) << "reply-1 =" << reply.DebugString();
         masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]), reply, MessageType::RECOVERY_REPLY);
+        LOG(INFO) << "reply =" << reply.DebugString();
 
     }
 
     void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
+        LOG(INFO) << "receive reply=" << reply.DebugString();
         if (!CheckCV(reply.replicaid(), reply.cv())) {
             return;
         }
@@ -2212,9 +2241,18 @@ namespace nezha {
                 }
             }
         }
+
+        if (masterContext_.endPoint_->isRegistered(recoveryRequestTimer_) == false) {
+            // We no longer request recovery reply
+            return;
+        }
+        recoveryReplySet_[reply.replicaid()] = reply;
+        LOG(INFO) << "receive replySz" << recoveryReplySet_.size();
+
         if (recoveryReplySet_.size() >= replicaNum_ / 2 + 1) {
             // Got enough quorum
             masterContext_.endPoint_->UnregisterTimer(recoveryRequestTimer_);
+
             uint32_t maxView = 0;
             uint32_t syncedLogId = 0;
             for (const auto& kv : recoveryReplySet_) {
@@ -2225,21 +2263,29 @@ namespace nezha {
             }
             // Get the maxView, launch state transfer with the corresponding leader
             viewId_ = maxView;
+            recoveryReplySet_.clear();
             if (AmLeader()) {
                 // If the recoverying replica happens to be the leader of the new view, don't participate. Wait until the healthy replicas elect a new leader
-                recoveryReplySet_.clear();
                 usleep(1000); // sleep some time and restart the recovery process
                 masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
             }
             else {
                 // Launch state transfer
                 stateTransferIndices_.clear();
-                stateTransferIndices_[maxView % replicaNum_] = { 2, syncedLogId };
-                stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
-                transferSyncedEntry_ = true;
-                stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
-                stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToRecovery, this);
-                masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
+                if (syncedLogId >= CONCURRENT_MAP_START_INDEX) {
+                    // There are some log entries that should be transferred
+                    stateTransferIndices_[maxView % replicaNum_] = { CONCURRENT_MAP_START_INDEX, syncedLogId };
+                    stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
+                    transferSyncedEntry_ = true;
+                    stateTransferTerminateTime_ = GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
+                    stateTransferTerminateCallback_ = std::bind(&Replica::RollbackToRecovery, this);
+                    masterContext_.endPoint_->RegisterTimer(stateTransferTimer_);
+                }
+                else {
+                    // No log entries to recover, directly enter new view
+                    EnterNewView();
+                }
+
             }
         }
     }
@@ -2363,7 +2409,7 @@ namespace nezha {
                 // Wait until the reply threads has known the new cv
                 while (true) {
                     bool ready = true;
-                    for (uint32_t i = 1; i <= fastReplyQu_.size() + slowReplyQu_.size(); i++) {
+                    for (uint32_t i = 1; i <= fastReplyQu_.size(); i++) {
                         if (crashVectorInUse_[i].load()->version_ < newCV->version_) {
                             ready = false;
                         }

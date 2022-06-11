@@ -13,7 +13,7 @@ CXXFLAGS := -std=c++0x -O3
 # CFLAGS := -g2 -Wall -pthread -iquote.obj/gen -Wno-uninitialized -O0
 # CXXFLAGS := -std=c++0x -O0 -g2
 
-LDFLAGS := -lev -ldl -lprotobuf -ljunction -lcrypto -lglog -lyaml-cpp -pthread
+LDFLAGS := -lev -ldl -lprotobuf -ljunction -lcrypto -lglog -lgflags -lyaml-cpp -pthread
 LIBPATH := -I./
 CFLAGS += $(LIBPATH)
 
