@@ -51,6 +51,11 @@ sudo make install
 sudo apt-get install libgflags-dev -y
 ```
 
+## File Structure
+The core part is the nezha folder, which includes three processes, i.e., replica, proxy and client. 
+
+Each process is composed of three files: a class header (e.g., nezha-replica.h), a class source code (nezha-replica.cc), a launching file (e.g., nezha-replica-run.cc). Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) to get its full configuration
+
 
 ## All-in-One Box Test
 
@@ -80,5 +85,6 @@ For open source projects, say how it is licensed.
 ## Project status
 I have just completed some basic tests in distributed and one-box setting (3 replicas + 1 proxy + 1 open-loop client). The normal workflow, leader failure and election, replica rejoin work fine. Performance tests have not been conducted, because more bugs are expected to show up as the test cases become more complex. I will continue to 
 
-(1) Conduct more tests to make the functionality robust, and then go on to measure the performance. 
+(1) Conduct more tests to make the functionality robust, and then go on to measure the performance
+
 (2) Clean the codebase and add more optimizations
