@@ -25,7 +25,8 @@ git push -uf origin main
 sudo apt update
 sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake libssl-dev libboost-all-dev
 
-# install protobuf (3.20.1-rc1). Please follow the instructions at https://github.com/protocolbuffers/protobuf/blob/main/src/README.md and install from source code (apt install gives an old version)
+# install protobuf (3.20.1-rc1). Please follow the instructions at https://github.com/protocolbuffers/protobuf/blob/main/src/README.md 
+# Install protobuf from source code (because apt install gives an old version)
 
 # install yamlcpp. Please follow the instructions at https://github.com/jbeder/yaml-cpp
 
