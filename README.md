@@ -1,6 +1,6 @@
 # Nezhav2
 
-Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks
+Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks [[preprint](https://arxiv.org/pdf/2206.03285.pdf)]
 
 ## Getting started
 
@@ -88,3 +88,4 @@ I have just completed some basic tests in distributed and one-box setting (3 rep
 (1) Conduct more tests to make the functionality robust, and then go on to measure the performance
 
 (2) Clean the codebase and add more optimizations
+
