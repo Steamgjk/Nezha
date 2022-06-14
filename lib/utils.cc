@@ -1,7 +1,6 @@
 #include "lib/utils.h"
 
 
-
 namespace  ReplicaStatus {
     char NORMAL = 1;
     char VIEWCHANGE = 2;

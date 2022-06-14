@@ -70,6 +70,10 @@ int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr, const google::protobuf:
     msgHdr->msgType = msgType;
     std::string serializedString = msg.SerializeAsString();
     msgHdr->msgLen = serializedString.length();
+    if (serializedString.length() + sizeof(MessageHeader) >= UDP_BUFFER_SIZE) {
+        LOG(ERROR) << "Msg too large " << (uint32_t)msgType << "\t length=" << serializedString.length();
+        return -1;
+    }
     if (msgHdr->msgLen > 0) {
         // serialization succeed
         memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(), msgHdr->msgLen);

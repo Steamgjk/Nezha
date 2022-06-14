@@ -23,7 +23,9 @@ view-change-period-ms: 10
 state-transfer-period-ms: 10
 state-transfer-timeout-ms: 100000 # If the state-transfer has not been completed after such long time, then rollback to viewchange
 index-transfer-max-batch: 30
-request-transfer-max-batch: 5
+index-transfer-batch: 30
+request-key-transfer-batch: 60
+request-transfer-batch: 5
 crash-vector-request-period-ms: 50 # make it longer, becasue it will clear all previous replies
 recovery-request-period-ms: 10
 sync-report-period-ms: 10

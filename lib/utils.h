@@ -16,6 +16,9 @@
 
 
 #define CONCURRENT_MAP_START_INDEX (2u)
+#define CONCAT_UINT32(a, b) ((((uint64_t)a)<<32u)|(uint32_t)b)
+#define HIGH_32BIT(a) ((uint32_t)(a>>32))
+#define LOW_32BIT(a) ((uint32_t)a)
 
 namespace  ReplicaStatus {
     extern char NORMAL;
@@ -106,15 +109,23 @@ struct LogEntry {
     SHA_HASH myhash; // the hash value of this entry
     SHA_HASH hash; // the accumulative hash
     uint32_t opKey; // for commutativity optimization
+    uint32_t prevLogId; // The log id of the next non-commutative request, initialized as 0
+    uint32_t nextLogId; // The log id of the next non-commutative request, initialized as UINT_MAX
     std::string result;
     uint64_t proxyId;
     LogEntry() {}
-    LogEntry(const uint64_t d, const uint64_t r, const SHA_HASH& mh, const SHA_HASH& h, const uint32_t ok, const std::string& re, const uint64_t p) :deadline(d), reqKey(r), myhash(mh), hash(h), opKey(ok), result(re), proxyId(p) {}
+    LogEntry(const uint64_t d, const uint64_t r, const SHA_HASH& mh, const SHA_HASH& h, const uint32_t ok, const uint32_t prev, const uint32_t next, const std::string& re, const uint64_t p) :deadline(d), reqKey(r), myhash(mh), hash(h), opKey(ok), prevLogId(prev), nextLogId(next), result(re), proxyId(p) {}
     bool LessThan(const LogEntry& bigger) {
         return (deadline < bigger.deadline || (deadline == bigger.deadline && reqKey < bigger.reqKey));
     }
     bool LessThan(const std::pair<uint64_t, uint64_t>& bigger) {
         return (deadline < bigger.first || (deadline == bigger.first && reqKey < bigger.second));
+    }
+    bool LessOrEqual(const LogEntry& bigger) {
+        return (deadline < bigger.deadline || (deadline == bigger.deadline && reqKey <= bigger.reqKey));
+    }
+    bool LessOrEqual(const std::pair<uint64_t, uint64_t>& bigger) {
+        return (deadline < bigger.first || (deadline == bigger.first && reqKey <= bigger.second));
     }
 
 };

@@ -27,6 +27,7 @@ private:
     std::set<struct MsgHandlerStruct*> msgHandlers_;
     std::set<struct TimerStruct*> eventTimers_;
 public:
+
     int epId_; // for debug
     UDPSocketEndpoint();
     UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);

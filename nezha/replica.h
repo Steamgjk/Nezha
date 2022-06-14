@@ -43,7 +43,7 @@ namespace nezha {
         }
     };
 
-    // TODO: How to update lastReleasedEntryByKeys_?
+
     class Replica
     {
     private:
@@ -55,6 +55,13 @@ namespace nezha {
         std::atomic<int> status_; // Worker threads check status to decide whether they should stop (for view change)
 
         std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // The key pair is <deadline, reqKey>
+
+        ConcurrentMap<uint32_t, Request*> lateBuffer_; // Only used by followers, <id, reqKey>, we can use reqKey to get the request from unsyncedRequestMap_
+        ConcurrentMap<uint64_t, uint32_t> lateBufferReq2LogId_; // <reqKey, logId> Inverse Index, used (by follower) to look up request from lateBuffer. 
+        std::atomic<uint32_t> maxLateBufferId_;
+        std::atomic<uint32_t> minLateBufferId_; // Used by ProcessTd to signal garbage collection 
+        std::atomic<uint32_t> validLateBufferId_; // used by IndexRecvTd to signal garbage collection
+
         std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
 
         ConcurrentMap<uint64_t, Request*> syncedRequestMap_; // <reqKey, request>
@@ -63,22 +70,37 @@ namespace nezha {
         ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_; // log-id as the key [accumulated hashes]
         ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by leader)
         ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by followers)
+        std::atomic<uint32_t> validUnSyncedLogId_; //  used by IndexRecvTd to signal garbage collection // obsolete
+
+        std::atomic<uint32_t> unSyncedLogIdInUse_; // used by IndexRecvTd and FastReplyTd to signal garbage collection
+
 
         // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and provide convenience for garbage-collection
         std::atomic<uint32_t> maxSyncedLogId_;
         std::atomic<uint32_t> minUnSyncedLogId_;
         std::atomic<uint32_t> maxUnSyncedLogId_;
         // syncedLogIdByKey_ and unsyncedLogIdByKey_ are fine-grained version of maxSyncedLogId_ and minUnSyncedLogId_, to support commutativity optimization
+
+        // sortedUnSyncedRequests_ will be used for state transfer during view change
+        // std::map is not thread-safe, so it is managed by one single thread:
+        // During normal processing, only GarbageCollectTd can update it
+        // During view change, only masterTd will manage it
+        std::map<std::pair<uint64_t, uint64_t>, Request*> sortedUnSyncedRequests_;
+        std::vector<Request*> filteredUnSyncedRequests_;
+
         std::atomic<uint32_t> committedLogId_;
 
         //  To support commutativity optimization
         uint32_t keyNum_;
         std::vector<uint32_t> maxSyncedLogIdByKey_; // per-key based log-id
-        std::vector<uint32_t> minUnSyncedLogIdByKey_; // per-key based log-id, starts with 2
+        std::vector<uint32_t> minUnSyncedLogIdByKey_; // per-key based log-id, together with  maxSyncedLogIdByKey_, they serve as the sync-points on followers
         std::vector<uint32_t> maxUnSyncedLogIdByKey_; // per-key based log-id
+
 
         ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id(consecutive)), entry>
         ConcurrentMap<uint64_t, LogEntry*> unsyncedEntriesByKey_; // <(Key|Id), entry>
+
+        // ConcurrentMap<uint64_t, uint32_t> unSyncedLogIdInUseByKey_; // used by follower's fast-reply thread, GarbageCollectTd will check it before deleting some entries  // obsolete
 
         // Use <threadName> as the key (for search), <threadPtr, threadId> as the value
         std::map<std::string, std::thread*> threadPool_;
@@ -118,20 +140,36 @@ namespace nezha {
 
         uint32_t indexRecvCVIdx_;
         uint32_t indexAckCVIdx_;
-        std::map<uint32_t, IndexSync> pendingIndexSync_;
+        std::map<std::pair<uint32_t, uint32_t>, IndexSync> pendingIndexSync_;
         std::set<uint32_t> missedReqKeys_; // Missed Request during index synchronization
         std::pair<uint32_t, uint32_t> missedIndices_; // Missed Indices during index synchronization
 
+        uint32_t indexTransferBatch_;
+        uint32_t requestKeyTransferBatch_;
+        uint32_t requestTrasnferBatch_;
 
-        uint32_t stateRequestTransferBatch_;
         uint64_t stateTransferTimeout_;
-        std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
         std::uint64_t stateTransferTerminateTime_; // When it comes to thsi time, the state transfer is forced to be terminated
-        std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
         bool transferSyncedEntry_;
+        union StateTransferIndex
+        {
+            struct SyncedLogIndex {
+                uint32_t logBegin;
+                uint32_t logEnd;
+            } asSyncedLogIndex_;
+            struct UnSyncedLogIndex {
+                std::pair<uint64_t, uint64_t> keyBegin;
+                std::pair<uint64_t, uint64_t> keyEnd;
+            } asUnSyncedLogIndex;
+        };
+
+        std::map<uint32_t, StateTransferIndex> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
+
+        std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
+
 
         std::function<void(void)> stateTransferCallback_;
-        // TODO: There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
+        // There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
         std::function<void(void)> stateTransferTerminateCallback_;
 
         std::string nonce_;
@@ -185,6 +223,11 @@ namespace nezha {
         void RollbackToViewChange();
         void RollbackToRecovery();
 
+        void SortUnSyncedRequests(uint32_t begin, uint32_t end);
+        void ReclaimStaleLogs(uint32_t end);
+        void ReclaimStaleCrashVector();
+
+        void FilterUnSyncedRequests();
         void RewindSyncedLogTo(uint32_t rewindPoint);
         void BlockWhenStatusIsNot(char targetStatus);
 

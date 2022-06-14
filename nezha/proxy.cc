@@ -171,9 +171,9 @@ namespace nezha
                 }
                 if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
                     replyNum++;
-                    // if (replyNum % 100 == 0) {
-                    //     LOG(INFO) << "id=" << id << "\t" << "replyNum=" << replyNum;
-                    // }
+                    if (replyNum % 1000 == 0) {
+                        LOG(INFO) << "id=" << id << "\t" << "replyNum=" << replyNum;
+                    }
                     // LOG(INFO) << "reply=" << reply.DebugString();
 
                     uint64_t reqKey = reply.clientid();

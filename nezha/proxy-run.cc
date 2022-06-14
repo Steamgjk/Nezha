@@ -8,6 +8,7 @@ void Terminate(int para) {
 int main(int argc, char* argv[]) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     google::InitGoogleLogging(argv[0]);
+    FLAGS_logtostderr = 1;
     signal(SIGINT, Terminate);
     proxy = new nezha::Proxy(FLAGS_config);
     proxy->Run();
