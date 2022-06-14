@@ -72,7 +72,7 @@ namespace nezha {
         ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by followers)
         std::atomic<uint32_t> validUnSyncedLogId_; //  used by IndexRecvTd to signal garbage collection // obsolete
 
-        std::atomic<uint32_t> unSyncedLogIdInUse_; // used by IndexRecvTd and FastReplyTd to signal garbage collection
+        std::atomic<uint32_t>* unSyncedLogIdInUse_; // used by IndexRecvTd and FastReplyTd to signal garbage collection
 
 
         // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and provide convenience for garbage-collection
@@ -151,19 +151,8 @@ namespace nezha {
         uint64_t stateTransferTimeout_;
         std::uint64_t stateTransferTerminateTime_; // When it comes to thsi time, the state transfer is forced to be terminated
         bool transferSyncedEntry_;
-        union StateTransferIndex
-        {
-            struct SyncedLogIndex {
-                uint32_t logBegin;
-                uint32_t logEnd;
-            } asSyncedLogIndex_;
-            struct UnSyncedLogIndex {
-                std::pair<uint64_t, uint64_t> keyBegin;
-                std::pair<uint64_t, uint64_t> keyEnd;
-            } asUnSyncedLogIndex;
-        };
 
-        std::map<uint32_t, StateTransferIndex> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
+        std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
 
         std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
 

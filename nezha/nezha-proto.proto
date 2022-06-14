@@ -81,8 +81,8 @@ message StateTransferRequest {
     uint32 view = 1;
     uint32 replicaid = 2;
     bool issynced = 3;
-    repeated uint32 logends = 4; // If issynced = true
-    repeated uint64 keyends = 5; // If issynced = false
+    uint32 logbegin = 4;
+    uint32 logend = 5;
 }
 
 
@@ -91,8 +91,8 @@ message StateTransferReply {
     uint32 replicaid = 2;
     repeated uint32 cv = 3;
     bool issynced = 4;
-    repeated uint32 logends = 5; // If issynced = true
-    repeated uint64 keyends = 6; // If issynced = false
+    uint32 logbegin = 5;
+    uint32 logend = 6;
     repeated Request reqs = 7;
 }
 
