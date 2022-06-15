@@ -72,8 +72,9 @@ message ViewChange {
     uint32 lastnormalview= 4;
     // In the algo, we should include the logs in the viewchange msg
     // But that is too large. As an implementation optimization, Let's use the following information, and later do state transfer to get the necessary entries
-    uint32 syncpoint = 5; // for synced logs: the max synced log id
-    uint32 unsyncednum = 6; 
+    uint32 syncpoint = 5; // for synced logs: the max synced log id, no need to add syncbegin, because it is always CONCURRENT_MAP_START_IDX
+    uint32 unsynclogbegin = 6;
+    uint32 unsynclogend = 7; 
 }
 
 

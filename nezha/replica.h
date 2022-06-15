@@ -55,14 +55,12 @@ namespace nezha {
         std::atomic<int> status_; // Worker threads check status to decide whether they should stop (for view change)
 
         std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // The key pair is <deadline, reqKey>
-
+        std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
         ConcurrentMap<uint32_t, Request*> lateBuffer_; // Only used by followers, <id, reqKey>, we can use reqKey to get the request from unsyncedRequestMap_
         ConcurrentMap<uint64_t, uint32_t> lateBufferReq2LogId_; // <reqKey, logId> Inverse Index, used (by follower) to look up request from lateBuffer. 
         std::atomic<uint32_t> maxLateBufferId_;
-        std::atomic<uint32_t> minLateBufferId_; // Used by ProcessTd to signal garbage collection 
-        std::atomic<uint32_t> validLateBufferId_; // used by IndexRecvTd to signal garbage collection
 
-        std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
+
 
         ConcurrentMap<uint64_t, Request*> syncedRequestMap_; // <reqKey, request>
         ConcurrentMap<uint64_t, Request*> unsyncedRequestMap_; // <reqKey, request>
@@ -70,40 +68,26 @@ namespace nezha {
         ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_; // log-id as the key [accumulated hashes]
         ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by leader)
         ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by followers)
-        std::atomic<uint32_t> validUnSyncedLogId_; //  used by IndexRecvTd to signal garbage collection // obsolete
-
-        std::atomic<uint32_t>* unSyncedLogIdInUse_; // used by IndexRecvTd and FastReplyTd to signal garbage collection
-
 
         // These two (maxSyncedLogId_ and minUnSyncedLogId_) combine to work as sync-point, and provide convenience for garbage-collection
         std::atomic<uint32_t> maxSyncedLogId_;
-        std::atomic<uint32_t> minUnSyncedLogId_;
         std::atomic<uint32_t> maxUnSyncedLogId_;
-        // syncedLogIdByKey_ and unsyncedLogIdByKey_ are fine-grained version of maxSyncedLogId_ and minUnSyncedLogId_, to support commutativity optimization
-
-        // sortedUnSyncedRequests_ will be used for state transfer during view change
-        // std::map is not thread-safe, so it is managed by one single thread:
-        // During normal processing, only GarbageCollectTd can update it
-        // During view change, only masterTd will manage it
-        std::map<std::pair<uint64_t, uint64_t>, Request*> sortedUnSyncedRequests_;
-        std::vector<Request*> filteredUnSyncedRequests_;
-
-        std::atomic<uint32_t> committedLogId_;
+        uint32_t minUnSyncedLogId_;
 
         //  To support commutativity optimization
         uint32_t keyNum_;
+        // syncedLogIdByKey_ and unsyncedLogIdByKey_ are fine-grained version of maxSyncedLogId_ and minUnSyncedLogId_, to support commutativity optimization
         std::vector<uint32_t> maxSyncedLogIdByKey_; // per-key based log-id
         std::vector<uint32_t> minUnSyncedLogIdByKey_; // per-key based log-id, together with  maxSyncedLogIdByKey_, they serve as the sync-points on followers
         std::vector<uint32_t> maxUnSyncedLogIdByKey_; // per-key based log-id
-
-
         ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id(consecutive)), entry>
         ConcurrentMap<uint64_t, LogEntry*> unsyncedEntriesByKey_; // <(Key|Id), entry>
 
-        // ConcurrentMap<uint64_t, uint32_t> unSyncedLogIdInUseByKey_; // used by follower's fast-reply thread, GarbageCollectTd will check it before deleting some entries  // obsolete
-
         // Use <threadName> as the key (for search), <threadPtr, threadId> as the value
         std::map<std::string, std::thread*> threadPool_;
+
+        // To Support periodica sync and also accelerate recovery process
+        std::atomic<uint32_t> committedLogId_;
 
         // Context
         Context masterContext_;
@@ -111,6 +95,7 @@ namespace nezha {
         Context indexSyncContext_;
         Context missedIndexAckContext_;
         Context missedReqAckContext_;
+        // Timers
         TimerStruct* heartbeatCheckTimer_;
         TimerStruct* indexAskTimer_;
         TimerStruct* requestAskTimer_;
@@ -119,6 +104,7 @@ namespace nezha {
         TimerStruct* periodicSyncTimer_;
         TimerStruct* crashVectorRequestTimer_;
         TimerStruct* recoveryRequestTimer_;
+        // Endpoints
         std::vector<UDPSocketEndpoint*> indexSender_;
         std::vector<UDPSocketEndpoint*> fastReplySender_;
         std::vector<UDPSocketEndpoint*> slowReplySender_;
@@ -126,17 +112,18 @@ namespace nezha {
         UDPSocketEndpoint* reqRequester_;
         UDPSocketEndpoint* indexAcker_;
         UDPSocketEndpoint* reqAcker_;
+        // Addresses
         std::vector<Address*> indexReceiver_;
         std::vector<Address*> indexAskReceiver_;
         std::vector<Address*> requestAskReceiver_;
         std::vector<Address*> masterReceiver_;
-        uint32_t roundRobinRequestProcessIdx_;
+
+        uint32_t roundRobinProcessIdx_;
         uint32_t roundRobinIndexAskIdx_;
         uint32_t roundRobinRequestAskIdx_;
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_; // Version-based CrashVector, used for garbage-collection
         std::atomic<CrashVectorStruct*>* crashVectorInUse_;
         uint32_t crashVectorVecSize_;
-
 
         uint32_t indexRecvCVIdx_;
         uint32_t indexAckCVIdx_;
@@ -148,19 +135,19 @@ namespace nezha {
         uint32_t requestKeyTransferBatch_;
         uint32_t requestTrasnferBatch_;
 
+        // State-Transfer related variables
         uint64_t stateTransferTimeout_;
         std::uint64_t stateTransferTerminateTime_; // When it comes to thsi time, the state transfer is forced to be terminated
         bool transferSyncedEntry_;
-
         std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_; // <targetReplica, <logbegin, logend> >
-
-        std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
-
-
         std::function<void(void)> stateTransferCallback_;
         // There needs to be some mechanism to jump out of the case when the stateTransferTarget replica fails
         std::function<void(void)> stateTransferTerminateCallback_;
 
+        // UnSynced request merge (during leader recovery)
+        std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
+
+        // Recovery related variables
         std::string nonce_;
         std::map<uint32_t, CrashVectorReply> crashVectorReplySet_;
         std::map<uint32_t, RecoveryReply> recoveryReplySet_;
@@ -188,38 +175,45 @@ namespace nezha {
         std::map<uint64_t, uint64_t> owdSampleNum_;
 
         // Garbage-Collection related variables
+        uint32_t reclaimTimeout_;
         uint32_t cvVersionToClear_;
         uint32_t unsyncedLogIdToClear_;
         std::vector<uint32_t> unsyncedLogIdByKeyToClear_;
+        std::atomic<uint32_t> prepareToClearLateBufferLogId_; // Used by GarbageCollectTd to signal IndexSyncTd
+        std::atomic<uint32_t> prepareToClearUnSyncedLogId_; // Used by GarbageCollectTd to signal FastReplyTd(s) and IndexSyncTd
+        std::atomic<uint32_t> safeToClearLateBufferLogId_; // Used by IndexSyncTd to signal GarbageCollectTd, telling GarbageCollectTd that it can safely clear the requests in late buffer up to this point [included]
+        std::atomic<uint32_t>* safeToClearUnSyncedLogId_; // Used by FastReplyTd(s) and IndexSyncTd ti singal GarbageCollectTd, telling GarbageCollectTd that it can safely clear unsynced log entries up to this point [included]
+
 
         void CreateContext();
         void LaunchThreads();
         void EnterNewView();
+
+        // View Change (recovery) related
         void ResetContext();
         void InitiateViewChange(const uint32_t view);
         void BroadcastViewChange();
         void SendViewChangeRequest(const int toReplicaId);
         void SendViewChange();
-
         void InitiateRecovery();
         void BroadcastCrashVectorRequest();
         void BroadcastRecoveryRequest();
         void SendStartView(const int toReplicaId);
         void SendStateTransferRequest();
-        void SendSyncStatusReport();
-        void SendCommit();
-
         void RollbackToViewChange();
         void RollbackToRecovery();
+        void RewindSyncedLogTo(uint32_t rewindPoint);
 
-        void SortUnSyncedRequests(uint32_t begin, uint32_t end);
-        void ReclaimStaleLogs(uint32_t end);
+
+        // Periodic Sync related
+        void SendSyncStatusReport();
+        void SendCommit();
+        // Garbage-Collect related
+        void ReclaimStaleLogs();
+        void PrepareNextReclaim();
         void ReclaimStaleCrashVector();
 
-        void FilterUnSyncedRequests();
-        void RewindSyncedLogTo(uint32_t rewindPoint);
-        void BlockWhenStatusIsNot(char targetStatus);
-
+        // Message handler
         bool ProcessIndexSync(const IndexSync& idxSyncMsg);
         void ProcessViewChangeReq(const ViewChangeRequest& viewChangeReq);
         void ProcessViewChange(const ViewChange& viewChange);
@@ -235,9 +229,12 @@ namespace nezha {
         void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq = true, const bool sendReply = true);
 
 
-
+        // The interfaces to bridge specific applications
         std::string ApplicationExecute(const Request& request);
+
+        // Tools
         bool AmLeader();
+        void BlockWhenStatusIsNot(char targetStatus);
         MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
         bool CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv);
         bool CheckView(const uint32_t view);
@@ -264,6 +261,7 @@ namespace nezha {
         Replica(const std::string& configFile = std::string("../configs/nezha-replica-config.yaml"), bool isRecovering = false);
         ~Replica();
 
+        // Registered event functions
         void ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
         void ReceiveIndexSyncMessage(char* msgBuffer, int msgLen);
         void ReceiveAskMissedReq(char* msgBuffer, int msgLen);
@@ -273,6 +271,7 @@ namespace nezha {
         void AskMissedRequest();
         void CheckHeartBeat();
 
+        // ***
         void Run();
         void Terminate();
     };
