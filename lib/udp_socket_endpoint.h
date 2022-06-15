@@ -9,11 +9,11 @@
 #include <functional>
 #include <set>
 #include <fcntl.h>
+#include <google/protobuf/message.h>
 #include "lib/address.h"
 #include "lib/utils.h"
-#include "nezha/nezha-proto.pb.h"
 
-using namespace nezha::proto;
+
 
 // TODO: In the future, we will extract a base class, and from that class, we derive two sub-classes: one for UDP and the other for TCP
 

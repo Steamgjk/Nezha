@@ -14,9 +14,9 @@
 #include <glog/logging.h>
 #include <junction/ConcurrentMap_Leapfrog.h>
 #include <yaml-cpp/yaml.h>
+#include <concurrentqueue.h>
 #include "nezha/nezha-proto.pb.h"
 #include "lib/utils.h"
-#include "lib/concurrentqueue.hpp"
 #include "lib/udp_socket_endpoint.h"
 #include "lib/zipfian.h"
 

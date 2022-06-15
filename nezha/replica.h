@@ -20,10 +20,10 @@
 #include <yaml-cpp/yaml.h>
 #include <boost/uuid/uuid.hpp>            
 #include <boost/uuid/uuid_generators.hpp> 
-#include <boost/uuid/uuid_io.hpp>         
+#include <boost/uuid/uuid_io.hpp>     
+#include <concurrentqueue.h>    
 #include "nezha/nezha-proto.pb.h"
 #include "lib/utils.h"
-#include "lib/concurrentqueue.hpp"
 #include "lib/udp_socket_endpoint.h"
 
 namespace nezha {
