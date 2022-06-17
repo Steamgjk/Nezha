@@ -293,7 +293,7 @@ namespace nezha
                     uint64_t reqKey = request.clientid();
                     reqKey = ((reqKey << 32) | request.reqid());
                     Reply* commitAck = committedReply_.get(reqKey);
-                    if (commitAck != NULL) {
+                    if (commitAck != NULL && false) {
                         std::string replyStr = commitAck->SerializeAsString();
                         sendto(requestReceiveFds_[id], replyStr.c_str(), replyStr.length(), 0, (struct sockaddr*)&receiverAddr, len);
                         continue;

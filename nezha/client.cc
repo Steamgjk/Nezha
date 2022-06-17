@@ -207,6 +207,7 @@ namespace nezha {
             }
             if (GetMicrosecondTimestamp() >= endTime) {
                 // Client has executed long enough, should terminate
+
                 LOG(INFO) << "Terminating soon...";
                 sleep(10);
                 running_ = false;
@@ -287,7 +288,7 @@ namespace nezha {
                     << "committedReqId_=" << committedReqId_ << "\t"
                     << "nextReqId_=" << nextReqId_ << "\t"
                     << "submissionRate=" << submissionRate << " req/sec\t"
-                    << "commitRate=" << commitRate << " req/sec"
+                    << "commitRate=" << commitRate << " req/sec" << "\t"
                     << "latency(Sample)=" << latencySample << " us";
 
             }
