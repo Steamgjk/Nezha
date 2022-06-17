@@ -64,14 +64,6 @@ union SHA_HASH {
     SHA_HASH() {
         memset(item, 0, sizeof(uint32_t) * 5);
     }
-    SHA_HASH(const char* str, const uint32_t len) {
-        if (len >= SHA_DIGEST_LENGTH) {
-            memcpy(hash, str, SHA_DIGEST_LENGTH);
-        }
-        else {
-            memcpy(hash, str, len);
-        }
-    }
     SHA_HASH(const SHA_HASH& h) {
         memcpy(item, h.item, sizeof(uint32_t) * 5);
     }
@@ -145,7 +137,6 @@ struct LogEntry {
     std::string result;
 
     LogEntry() {}
-    LogEntry(const RequestBody& rb, const SHA_HASH& mh, const SHA_HASH& h, const uint32_t prev, const uint32_t next, const std::string& re) :body(rb), myhash(mh), hash(h), prevLogId(prev), nextLogId(next), result(re) {}
     LogEntry(const uint64_t d, const uint64_t r, const uint32_t ok, const uint64_t p, const std::string& cmd, const SHA_HASH& mh, const SHA_HASH& h, const uint32_t prev, const uint32_t next, const std::string& re) :body(d, r, ok, p, cmd), myhash(mh), hash(h), prevLogId(prev), nextLogId(next), result(re) {}
 
     bool LessThan(const LogEntry& bigger) {

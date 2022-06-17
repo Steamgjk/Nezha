@@ -175,9 +175,17 @@ namespace nezha
                         LOG(INFO) << "id=" << id << "\t" << "replyNum=" << replyNum;
                     }
                     // LOG(INFO) << "reply=" << reply.DebugString();
+                    if (reply.view() == 1) {
+                        LOG(INFO) << "replica=" << reply.replicaid() << "\t" << reply.clientid() << "\t"
+                            << reply.reqid() << "\t" << reply.replytype();
+                        if (reply.replytype() == (uint32_t)(MessageType::FAST_REPLY)) {
+                            std::string hashStr(reply.hash());
+                            SHA_HASH hash(hashStr.c_str(), hashStr.length());
+                            LOG(INFO) << hash.toString();
+                        }
+                    }
 
-                    uint64_t reqKey = reply.clientid();
-                    reqKey = ((reqKey << 32) | reply.reqid());
+                    uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
                     if (reply.owd() > 0) {
                         owdQu_.enqueue(std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
                     }

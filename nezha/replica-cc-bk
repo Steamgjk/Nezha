@@ -316,10 +316,8 @@ namespace nezha {
             while (slowReplyQu_[i].try_dequeue(entry)) {}
             // Don't worry about memory leakage, the memory pointed by these in-queue pointers have already been cleaned or will be cleaned according to their Conucrrent maps
         }
-        RequestBody* rb;
-        while (processQu_.try_dequeue(rb)) {
-            delete rb;
-        }
+        Request* request;
+        while (processQu_.try_dequeue(request)) {}
 
         // Clear UnSyncedLogs
         // Since ConcurrentMap reserves 0 and 1, we can only use log-id from 2
@@ -327,24 +325,25 @@ namespace nezha {
         maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         // Clear LateBuffer
         while (maxLateBufferId_ >= CONCURRENT_MAP_START_INDEX) {
-            RequestBody* rb = lateBuffer_.get(maxLateBufferId_);
-            if (rb) {
-                lateBufferReq2LogId_.erase(rb->reqKey);
+            Request* request = lateBuffer_.get(maxLateBufferId_);
+            if (request != NULL) {
+                uint64_t reqKey = CONCAT_UINT32(request->clientid(), request->reqid());
+                lateBufferReq2LogId_.erase(reqKey);
+                if (syncedRequestMap_.get(reqKey) != request) {
+                    delete request;
+                }
+
                 lateBuffer_.erase(maxLateBufferId_);
                 maxLateBufferId_--;
+
             }
             else {
                 break;
             }
         }
+
         maxLateBufferId_ = CONCURRENT_MAP_START_INDEX - 1;
 
-        // Clear Early Buffer
-        while (earlyBuffer_.empty() == false) {
-            RequestBody* rb = earlyBuffer_.begin()->second;
-            delete rb;
-            earlyBuffer_.erase(earlyBuffer_.begin());
-        }
 
         minUnSyncedLogIdByKey_.clear();
         maxUnSyncedLogIdByKey_.clear();
@@ -360,13 +359,11 @@ namespace nezha {
                 lastReleasedEntryByKeys_[key] = { 0ul, 0ul };
             }
             else {
-                // uint64_t opKeyAndId = key;
-                // opKeyAndId = ((opKeyAndId << 32u) | maxSyncedLogIdByKey_[key]);
-                // LogEntry* entry = syncedEntriesByKey_.get(opKeyAndId);
-
-                LogEntry* entry = syncedEntries_.get(maxSyncedLogIdByKey_[key]);
+                uint64_t opKeyAndId = key;
+                opKeyAndId = ((opKeyAndId << 32u) | maxSyncedLogIdByKey_[key]);
+                LogEntry* entry = syncedEntriesByKey_.get(opKeyAndId);
                 ASSERT(entry != NULL);
-                lastReleasedEntryByKeys_[key] = { entry->body.deadline, entry->body.reqKey };
+                lastReleasedEntryByKeys_[key] = { entry->deadline, entry->reqKey };
             }
         }
 
@@ -380,17 +377,17 @@ namespace nezha {
             unsyncedEntries_.erase(k);
         }
 
-        // ConcurrentMap<uint64_t, LogEntry*>::Iterator iter2(unsyncedEntriesByKey_);
-        // keysToRemove.clear();
-        // while (iter2.isValid()) {
-        //     keysToRemove.push_back(iter2.getKey());
-        //     LogEntry* entry = iter2.getValue();
-        //     delete entry;
-        //     iter2.next();
-        // }
-        // for (auto& k : keysToRemove) {
-        //     unsyncedEntries_.erase(k);
-        // }
+        ConcurrentMap<uint64_t, LogEntry*>::Iterator iter2(unsyncedEntriesByKey_);
+        keysToRemove.clear();
+        while (iter2.isValid()) {
+            keysToRemove.push_back(iter2.getKey());
+            LogEntry* entry = iter2.getValue();
+            delete entry;
+            iter2.next();
+        }
+        for (auto& k : keysToRemove) {
+            unsyncedEntries_.erase(k);
+        }
 
         ConcurrentMap<uint64_t, uint32_t>::Iterator iter3(unsyncedReq2LogId_);
         keysToRemove.clear();
@@ -400,6 +397,21 @@ namespace nezha {
         }
         for (auto& k : keysToRemove) {
             unsyncedReq2LogId_.erase(k);
+        }
+
+        ConcurrentMap<uint64_t, Request*>::Iterator iter4(unsyncedRequestMap_);
+        keysToRemove.clear();
+        while (iter4.isValid()) {
+            keysToRemove.push_back(iter4.getKey());
+            iter4.next();
+            if (syncedRequestMap_.get(iter4.getKey()) == NULL) {
+                // This request is useless, free it
+                Request* request = iter4.getValue();
+                delete request;
+            }
+        }
+        for (auto& k : keysToRemove) {
+            unsyncedRequestMap_.erase(k);
         }
 
         roundRobinIndexAskIdx_ = 0;
@@ -626,23 +638,24 @@ namespace nezha {
         RequestBody* rb;
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            bool amLeader = AmLeader();
             // if (viewId_ == 1) return;
             if (processQu_.try_dequeue(rb)) {
-                if (amLeader) {
-                    uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
+                if (AmLeader()) {
+                    uint32_t duplicateLogIdx = syncedReq2LogId_.get(reqKey);
                     if (duplicateLogIdx == 0) {
                         // Not duplicate
-                        std::pair<uint64_t, uint64_t>myEntry(rb->deadline, rb->reqKey);
-                        if (myEntry > lastReleasedEntryByKeys_[rb->opKey]) {
-                            earlyBuffer_[myEntry] = rb;
+                        uint64_t deadline = req->sendtime() + req->bound();
+                        std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
+                        syncedRequestMap_.assign(reqKey, req);
+                        if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
+                            earlyBuffer_[myEntry] = req;
                         }
                         else {
-                            // rb cannot enter early buffer
+                            // req cannot enter early buffer
                             // Leader modifies its deadline
-                            uint64_t newDeadline = lastReleasedEntryByKeys_[rb->opKey].first + 1;
-                            std::pair<uint64_t, uint64_t>myEntry(newDeadline, rb->reqKey);
-                            earlyBuffer_[myEntry] = rb;
+                            uint64_t newDeadline = lastReleasedEntryByKeys_[req->key()].first + 1;
+                            std::pair<uint64_t, uint64_t>myEntry(newDeadline, reqKey);
+                            earlyBuffer_[myEntry] = req;
                         }
                     }
                     else {
@@ -651,42 +664,43 @@ namespace nezha {
                         // We simply send the previous reply messages
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
                         // update proxy id in case the client has changed its proxy
-                        entry->body.proxyId = rb->proxyId;
+                        entry->proxyId = req->proxyid();
                         fastReplyQu_[(roundRobinProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
-                        // free this RequestBody
-                        delete rb;
+                        // free this req
+                        delete req;
                     }
                 }
                 else {
-                    uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
+                    uint32_t duplicateLogIdx = syncedReq2LogId_.get(reqKey);
                     if (duplicateLogIdx > 0) {
                         // Duplicate: resend slow-reply for this request
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
-                        entry->body.proxyId = rb->proxyId;
+                        entry->proxyId = req->proxyid();
                         slowReplyQu_[(roundRobinProcessIdx_++) % slowReplyQu_.size()].enqueue(entry);
                     }
                     else {
-                        duplicateLogIdx = unsyncedReq2LogId_.get(rb->reqKey);
+                        duplicateLogIdx = unsyncedReq2LogId_.get(reqKey);
                         if (duplicateLogIdx == 0) {
                             // Not duplicate
-                            std::pair<uint64_t, uint64_t>myEntry(rb->deadline, rb->reqKey);
+                            uint64_t deadline = req->sendtime() + req->bound();
+                            std::pair<uint64_t, uint64_t>myEntry(deadline, reqKey);
 
-                            if (myEntry > lastReleasedEntryByKeys_[rb->opKey]) {
-                                // unsyncedRequestMap_.assign(rb->reqKey, rb); // Obsolete
-                                earlyBuffer_[myEntry] = rb;
+                            if (myEntry > lastReleasedEntryByKeys_[req->key()]) {
+                                unsyncedRequestMap_.assign(reqKey, req);
+                                earlyBuffer_[myEntry] = req;
                             }
                             else {
                                 // ELse, followers leave it in late buffer
                                 // Also check to avoid duplication (memory leak)
-                                if (lateBufferReq2LogId_.get(rb->reqKey) >= CONCURRENT_MAP_START_INDEX) {
+                                if (lateBufferReq2LogId_.get(reqKey) >= CONCURRENT_MAP_START_INDEX) {
                                     LOG(INFO) << "here delete";
-                                    delete rb;
+                                    delete req;
                                 }
                                 else {
                                     uint32_t logId = maxLateBufferId_ + 1;
-                                    lateBuffer_.assign(logId, rb);
+                                    lateBuffer_.assign(logId, req);
                                     // Set the highest bit as 1, to differentiate from those unsynced requests which are accepted by the follower (i.e. go to the earlyBuffer)
-                                    lateBufferReq2LogId_.assign(rb->reqKey, logId);
+                                    lateBufferReq2LogId_.assign(reqKey, logId);
                                     maxLateBufferId_++;
                                 }
                             }
@@ -696,7 +710,7 @@ namespace nezha {
                             // As a very rare case, if the request is duplicate but also unsynced, follower does not handle it, for fear of data race with other threads (e.g. GarbageCollectTd)
                             // But this will not harm liveness, because eventually the request will become synced request, so the former if-branch will handle it and resend a slow reply
                             LOG(INFO) << "here delete";
-                            delete rb;
+                            delete req;
                         }
                     }
                 }
@@ -707,9 +721,12 @@ namespace nezha {
             uint64_t nowTime = GetMicrosecondTimestamp();
 
             while ((!earlyBuffer_.empty()) && nowTime <= earlyBuffer_.begin()->first.first) {
-                lastReleasedEntryByKeys_[rb->opKey] = earlyBuffer_.begin()->first;
+                uint64_t deadline = earlyBuffer_.begin()->first.first;
+                uint64_t reqKey = earlyBuffer_.begin()->first.second;
+                Request* req = earlyBuffer_.begin()->second;
+                lastReleasedEntryByKeys_[req->key()] = { deadline, reqKey };
                 // LOG(INFO) << "Processing " << req->reqid();
-                ProcessRequest(earlyBuffer_.begin()->second, amLeader, true);
+                ProcessRequest(deadline, reqKey, *req, AmLeader(), true);
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
 
@@ -718,61 +735,63 @@ namespace nezha {
         VLOG(2) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";;
     }
 
-    void Replica::ProcessRequest(const RequestBody* rb, const bool isSyncedReq, const bool sendReply) {
-        SHA_HASH myHash = CalculateHash(rb->deadline, rb->reqKey);
+    void Replica::ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq, const bool sendReply) {
+        SHA_HASH myHash = CalculateHash(deadline, reqKey);
         SHA_HASH hash = myHash;
+        uint64_t opKeyAndId = 0ul;
         LogEntry* prev = NULL;
         LogEntry* entry = NULL;
         if (isSyncedReq) {
             // The log id of the previous non-commutative entry in the synced logs
-            uint32_t prevLogId = maxSyncedLogIdByKey_[rb->opKey];
+            uint32_t prevLogId = maxSyncedLogIdByKey_[request.key()];
             if (prevLogId >= CONCURRENT_MAP_START_INDEX) {
                 // There are previous (non-commutative) requests appended
-                prev = syncedEntries_.get(prevLogId);
+                opKeyAndId = CONCAT_UINT32(request.key(), prevLogId);
+                prev = syncedEntriesByKey_.get(opKeyAndId);
                 ASSERT(prev != NULL);
                 hash.XOR(prev->hash);
             }
-            std::string result = ApplicationExecute(*rb);
-            entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, result);
 
+            std::string result = ApplicationExecute(request);
+            entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), prevLogId, UINT32_MAX, result, request.proxyid());
             uint32_t logId = maxSyncedLogId_ + 1;
             syncedEntries_.assign(logId, entry);
-            syncedReq2LogId_.assign(rb->reqKey, logId);
+            syncedReq2LogId_.assign(reqKey, logId);
             // LOG(INFO) << "request.key=" << request.key() << "\t" << "size=" << maxSyncedLogIdByKey_.size();
-            // opKeyAndId = CONCAT_UINT32(rb->opKey, logId);
-            // syncedEntriesByKey_.assign(opKeyAndId, entry);
-
+            opKeyAndId = CONCAT_UINT32(request.key(), logId);
+            syncedEntriesByKey_.assign(opKeyAndId, entry);
             if (prev != NULL) {
                 prev->nextLogId = logId; // This is very important, to establish the connection based on key, making them look like a skiplist
             }
 
-            maxSyncedLogIdByKey_[rb->opKey] = logId;
+            maxSyncedLogIdByKey_[request.key()] = logId;
             maxSyncedLogId_++;
         }
         else {
             // The log id of the previous non-commutative entry in the unsynced logs
-            uint32_t prevLogId = maxUnSyncedLogIdByKey_[rb->opKey];
+            uint32_t prevLogId = maxSyncedLogIdByKey_[request.key()];
             if (prevLogId >= CONCURRENT_MAP_START_INDEX) {
                 // There are previous (non-commutative) requests appended
-                LogEntry* prev = unsyncedEntries_.get(prevLogId);
+                opKeyAndId = CONCAT_UINT32(request.key(), prevLogId);
+                LogEntry* prev = unsyncedEntriesByKey_.get(opKeyAndId);
                 ASSERT(prev != NULL);
                 hash.XOR(prev->hash);
             }
-            entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
+            entry = new LogEntry(deadline, reqKey, myHash, hash, request.key(), prevLogId, UINT32_MAX, "", request.proxyid());
             uint32_t logId = maxUnSyncedLogId_ + 1;
             unsyncedEntries_.assign(logId, entry);
-            unsyncedReq2LogId_.assign(rb->reqKey, logId);
-            // opKeyAndId = CONCAT_UINT32(rb->opKey, logId);
-            // unsyncedEntriesByKey_.assign(opKeyAndId, entry);
+            unsyncedReq2LogId_.assign(reqKey, logId);
+            opKeyAndId = CONCAT_UINT32(request.key(), logId);
+            unsyncedEntriesByKey_.assign(opKeyAndId, entry);
             if (prev != NULL) {
                 prev->nextLogId = logId; // This is very important, see above
             }
-            if (minUnSyncedLogIdByKey_[rb->opKey] < CONCURRENT_MAP_START_INDEX) {
+            if (minUnSyncedLogIdByKey_[request.key()] < CONCURRENT_MAP_START_INDEX) {
                 // ProcessTd only make once assignement for minUnSyncedLogIdByKey_
                 // After switching it from the dummy value (CONCURRENT_MAP_START_INDEX-1) to a valid logId, the following update will all be charged by IndexRecvTd
-                minUnSyncedLogIdByKey_[rb->opKey] = logId;
+                minUnSyncedLogIdByKey_[request.key()] = logId;
             }
-            maxUnSyncedLogIdByKey_[rb->opKey] = logId;
+            maxUnSyncedLogIdByKey_[request.key()] = logId;
             maxUnSyncedLogId_++;
 
         }
@@ -785,12 +804,13 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
+        reply.set_view(viewId_);
         reply.set_replytype(MessageType::FAST_REPLY);
         reply.set_replicaid(replicaId_);
+        bool amLeader = AmLeader();
         CrashVectorStruct* cv = crashVectorInUse_[cvId];
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            bool amLeader = AmLeader();
             // if (viewId_ == 1) return;
             safeToClearUnSyncedLogId_[id].store(prepareToClearUnSyncedLogId_.load());
             // Before encoding crashVector into hash, check whether the crashVector (cv) is the freshest one
@@ -801,7 +821,7 @@ namespace nezha {
                 cv = masterCV;
             }
             if (fastReplyQu_[id].try_dequeue(entry)) {
-                Address* addr = proxyAddressMap_.get(entry->body.proxyId);
+                Address* addr = proxyAddressMap_.get(entry->proxyId);
                 if (addr == NULL) {
                     // The replica cannot find the address to send reply
                     // This can happen in very trivial edge cases, e.g.,
@@ -809,19 +829,19 @@ namespace nezha {
                     // Step 2: The other replica gives it the missing entry
                     // Step 3: This replica has not received any entries from that proxy, so it does not have any addr info
                     // Step 4: This replica wants to send reply for this entry
-                    LOG(ERROR) << "Cannot find the address of the proxy " << entry->body.proxyId;
+                    LOG(ERROR) << "Cannot find the address of the proxy " << entry->proxyId;
                     continue;
                 }
-                reply.set_view(viewId_);
-                reply.set_clientid((entry->body.reqKey) >> 32);
-                reply.set_reqid((uint32_t)(entry->body.reqKey));
+
+                reply.set_clientid((entry->reqKey) >> 32);
+                reply.set_reqid((uint32_t)(entry->reqKey));
                 reply.set_result(entry->result);
                 // If the owdMap_ does not have the proxyId (i.e. the owd for this proxyId has not been estimated), it will return 0 (0 happens to be the dummy value of protobuf, and the proxy will not consider it as an estimated owd)
-                reply.set_owd(owdMap_.get(entry->body.proxyId));
+                reply.set_owd(owdMap_.get(entry->proxyId));
                 SHA_HASH hash(entry->hash);
                 hash.XOR(cv->cvHash_);
                 if (amLeader) {
-                    // Leader's logic is very easy: after XORing the crashVector and the log entry hash together, it can directly reply
+                    // Leader's logic is very easy: After XORing the crashVector and the log entry hash together, it can directly reply
                     reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
                     fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
                     // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
@@ -836,8 +856,8 @@ namespace nezha {
                     // Let's first get the boundary, i.e. minUnSyncedLogId_ and maxSyncedLogId_
                     // maxSynced is always updated earlier than minUnSynced, so we first get minUnSynced, and then get maxSynced, this ensures minUnSynced is no fresher than maxSynced
                     // By contrast, if we get the two variables in the reverse order, then we cannot be sure which variable is fresher, that can lead to the missing of some entries during hash calculation
-                    uint32_t unsyncedLogId = minUnSyncedLogIdByKey_[entry->body.opKey];// per-key based monotonously increasing
-                    uint32_t syncedLogId = maxSyncedLogIdByKey_[entry->body.opKey];
+                    uint32_t unsyncedLogId = minUnSyncedLogIdByKey_[entry->opKey];// per-key based monotonously increasing
+                    uint32_t syncedLogId = maxSyncedLogIdByKey_[entry->opKey];
 
                     if (syncedLogId < CONCURRENT_MAP_START_INDEX || unsyncedLogId < CONCURRENT_MAP_START_INDEX || unsyncedLogId <= safeToClearUnSyncedLogId_[id]) {
                         // The index sync process may have not been started, or may have not catch up;
@@ -862,7 +882,7 @@ namespace nezha {
                         // We are sure that  unsyncedLogId >= CONCURRENT_MAP_START_INDEX
                         LogEntry* unsyncedEntry = unsyncedEntries_.get(unsyncedLogId);
                         ASSERT(unsyncedEntry != NULL);
-                        // Since unsyncedLogId is no fresher (maybe older) than syncedLogId, then unsyncedEntry may have already been surpasssed by syncedEntry, we need to remove the (potential) overlap
+                        // Since unsyncedLogId is no fresher (maybe stale) than syncedLogId, then unsyncedEntry may have already been surpasssed by syncedEntry, we need to remove the (potential) overlap
                         while (unsyncedEntry->LessOrEqual(*syncedEntry)) {
                             if (unsyncedEntry->nextLogId < UINT32_MAX) {
                                 unsyncedEntry = unsyncedEntries_.get(unsyncedEntry->nextLogId);
@@ -891,6 +911,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         LogEntry* entry = NULL;
         Reply reply;
+        reply.set_view(viewId_);
         reply.set_replytype(MessageType::SLOW_REPLY);
         reply.set_replicaid(replicaId_);
         reply.set_hash("");
@@ -899,6 +920,7 @@ namespace nezha {
         while (status_ != ReplicaStatus::TERMINATED) {
             // LOG(INFO)<<"AmLeader? "<<AmLeader()<<" status="<<
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
+            if (viewId_ == 1) return;
             // LOG(INFO) << "AmLeader? " << AmLeader();
             if (AmLeader()) {
                 // Leader does not send slow replies
@@ -913,23 +935,22 @@ namespace nezha {
 
             // TODO: SlowReplyTd can be merged with FastReplyTd, just needs to piggyback the most recent synced-log-id on fast-reply, and that is enough for proxies to do quorum check, even without slow-reply messages 
             if (repliedLogId <= maxSyncedLogId_) {
-                entry = syncedEntries_.get(repliedLogId);
+                entry = unsyncedEntries_.get(repliedLogId);
                 repliedLogId++;
             }
             else {
                 slowReplyQu_[id].try_dequeue(entry);
             }
             if (entry) {
-                reply.set_view(viewId_);
-                reply.set_clientid((entry->body.reqKey) >> 32);
-                reply.set_reqid((uint32_t)(entry->body.reqKey));
+                reply.set_clientid((entry->reqKey) >> 32);
+                reply.set_reqid((uint32_t)(entry->reqKey));
                 // Optimize: SLOW_REPLY => COMMIT_REPLY
-                if (syncedReq2LogId_.get(entry->body.reqKey) <= committedLogId_) {
+                if (syncedReq2LogId_.get(entry->reqKey) <= committedLogId_) {
                     reply.set_replytype(MessageType::COMMIT_REPLY);
                 }
-                reply.set_owd(owdMap_.get(entry->body.proxyId));
+                reply.set_owd(owdMap_.get(entry->proxyId));
 
-                Address* addr = proxyAddressMap_.get(entry->body.proxyId);
+                Address* addr = proxyAddressMap_.get(entry->proxyId);
                 if (addr != NULL) {
                     slowReplySender_[id]->SendMsgTo(*addr, reply, MessageType::SLOW_REPLY);
                     // LOG(INFO) << "Slow Reply " << reply.reqid() << "\t";
@@ -947,6 +968,7 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[cvId].load();
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
+            if (viewId_ == 1) return;
             if (!AmLeader()) {
                 // Although this replica is not leader currently
                 // We still keep this thread. When it becomes the leader
@@ -959,7 +981,7 @@ namespace nezha {
                 || indexSyncMsg.sendtime() + 10000 < GetMicrosecondTimestamp()) {
                 // (1) Leader has some indices to sync
                 // (2) There is noting to send, but we still send an indexSync msg every 10ms (to serve as leader's heartbeat)
-                indexSyncMsg.set_view(viewId_);
+                indexSyncMsg.set_view(this->viewId_);
                 indexSyncMsg.set_logidbegin(lastSyncedLogId + 1);
                 logEnd = std::min(lastSyncedLogId + indexTransferBatch_, logEnd);
                 indexSyncMsg.set_logidend(logEnd);
@@ -968,8 +990,8 @@ namespace nezha {
                 for (uint32_t i = indexSyncMsg.logidbegin(); i <= indexSyncMsg.logidend(); i++) {
                     LogEntry* entry = syncedEntries_.get(i);
                     ASSERT(entry != NULL);
-                    indexSyncMsg.add_deadlines(entry->body.deadline);
-                    indexSyncMsg.add_reqkeys(entry->body.reqKey);
+                    indexSyncMsg.add_deadlines(entry->deadline);
+                    indexSyncMsg.add_reqkeys(entry->reqKey);
                 }
 
                 CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
@@ -982,7 +1004,7 @@ namespace nezha {
                 indexSyncMsg.clear_cv();
                 indexSyncMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
                 indexSyncMsg.set_sendtime(GetMicrosecondTimestamp());
-                // Send to all followers
+                // Send
                 // LOG(INFO) << "Send " << indexSyncMsg.logidbegin() << "\t" << indexSyncMsg.logidend();
                 for (uint32_t r = 0; r < replicaNum_; r++) {
                     if (r != replicaId_) {
@@ -1004,7 +1026,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            // if (viewId_ == 1) return;
+            if (viewId_ == 1) return;
             indexSyncContext_.Register();
             indexSyncContext_.endPoint_->LoopRun();
         }
@@ -1024,6 +1046,7 @@ namespace nezha {
         char* buffer = msgBuffer + sizeof(MessageHeader);
 
         if (msgHdr->msgType == MessageType::SYNC_INDEX) {
+
             IndexSync idxSyncMsg;
             if (idxSyncMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
                 if (!CheckViewAndCV(idxSyncMsg.view(), idxSyncMsg.cv())) {
@@ -1051,12 +1074,13 @@ namespace nezha {
             MissedReq missedReqMsg;
             if (missedReqMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
                 for (int i = 0; i < missedReqMsg.reqs().size(); i++) {
-                    const RequestBodyMsg& rbMsg = missedReqMsg.reqs(i);
-                    if (missedReqKeys_.find(rbMsg.reqkey()) != missedReqKeys_.end()) {
-                        RequestBody* rb = new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(), rbMsg.command());
+                    uint64_t reqKey = missedReqMsg.reqs(i).clientid();
+                    reqKey = ((reqKey << 32u) | missedReqMsg.reqs(i).reqid());
+                    if (missedReqKeys_.find(reqKey) != missedReqKeys_.end()) {
+                        Request* req = new Request(missedReqMsg.reqs(i));
                         // We must handle it to process td, to avoid data race (and further memroy leakage), although it is a trivial possibility
-                        processQu_.enqueue(rb);
-                        missedReqKeys_.erase(rb->reqKey);
+                        processQu_.enqueue(req);
+                        missedReqKeys_.erase(reqKey);
                         if (missedReqKeys_.empty()) {
                             // can stop the timer now
                             indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
@@ -1104,60 +1128,61 @@ namespace nezha {
                 indexSyncContext_.endPoint_->RegisterTimer(indexAskTimer_);
             }
         }
-        // LOG(INFO) << "index begin " << idxSyncMsg.logidbegin() << "\t" << idxSyncMsg.logidend() << "\t maxSyncedLogId_=" << maxSyncedLogId_;
+        LOG(INFO) << "index begin " << idxSyncMsg.logidbegin() << "\t" << idxSyncMsg.logidend() << "\t maxSyncedLogId_=" << maxSyncedLogId_;
+        uint64_t opKeyAndId = 0ul;
         for (uint32_t logId = maxSyncedLogId_ + 1; logId <= idxSyncMsg.logidend(); logId++) {
             uint32_t offset = logId - idxSyncMsg.logidbegin();
             uint64_t reqKey = idxSyncMsg.reqkeys(offset);
             uint64_t deadline = idxSyncMsg.deadlines(offset);
-            RequestBody* rb = NULL;
-            uint32_t reqLogId = unsyncedReq2LogId_.get(reqKey);
 
+            Request* req = NULL;
+            uint32_t reqLogId = unsyncedReq2LogId_.get(reqKey);
             if (reqLogId >= CONCURRENT_MAP_START_INDEX
                 && reqLogId > safeToClearUnSyncedLogId_[fastReplyQu_.size()]) {
                 // We must ensure this logid is no smaller than unSyncedLogIdInUse_[fastReplyQu_.size()], otherwisxe, it may have been reclaimed
-                LogEntry* entry = unsyncedEntries_.get(reqLogId);
-                ASSERT(entry != NULL);
-                rb = new RequestBody(entry->body);
+                req = unsyncedRequestMap_.get(reqKey);
+                ASSERT(req != NULL);
             }
 
-            if (rb == NULL) {
+            if (req == NULL) {
                 // cannot find the request in unsynced requests (early-buffer), then try to look up it in the late buffer
                 uint32_t reqLogId = lateBufferReq2LogId_.get(reqKey);
                 if (reqLogId >= CONCURRENT_MAP_START_INDEX
                     && reqLogId >= safeToClearLateBufferLogId_) {
                     // We are sure that GarbageCollectTd has not reclaim it
-                    rb = lateBuffer_.get(reqLogId);
-                    ASSERT(rb != NULL);
+                    req = lateBuffer_.get(reqLogId);
+                    ASSERT(req != NULL);
                 }
             }
 
-            if (rb) {
-                // Find the request locally
+            if (req) {
+                // Find the req locally
                 // Copy a new request, do not use the previous req
                 // This can make garbage collection easier
                 SHA_HASH myHash = CalculateHash(deadline, reqKey);
                 SHA_HASH hash(myHash);
                 uint32_t prevLogId = 0;
-                if (maxSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
+                uint32_t opKey = req->key();
+                if (maxSyncedLogIdByKey_[opKey] >= CONCURRENT_MAP_START_INDEX) {
                     // This request has some pre non-commutative ones
                     // In that way, XOR the previous accumulated hash
-                    prevLogId = maxSyncedLogIdByKey_[rb->opKey];
-                    ASSERT(syncedEntries_.get(prevLogId) != NULL);
-                    const SHA_HASH& prev = syncedEntries_.get(prevLogId)->hash;
+                    prevLogId = maxSyncedLogIdByKey_[opKey];
+                    opKeyAndId = CONCAT_UINT32(opKey, prevLogId);
+                    const SHA_HASH& prev = syncedEntriesByKey_.get(opKeyAndId)->hash;
                     hash.XOR(prev);
                 }
 
-                LogEntry* entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
-                // syncedRequestMap_.assign(reqKey, req); // obsolete
+                LogEntry* entry = new LogEntry(deadline, reqKey, myHash, hash, opKey, prevLogId, UINT32_MAX, "", req->proxyid());
+                syncedRequestMap_.assign(reqKey, req);
                 syncedReq2LogId_.assign(reqKey, logId);
                 syncedEntries_.assign(logId, entry);
-                // opKeyAndId = CONCAT_UINT32(rb->opKey, logId);
-                // syncedEntriesByKey_.assign(opKeyAndId, entry);
-                maxSyncedLogIdByKey_[rb->opKey] = logId;
+                opKeyAndId = CONCAT_UINT32(opKey, logId);
+                syncedEntriesByKey_.assign(opKeyAndId, entry);
+                maxSyncedLogIdByKey_[opKey] = logId;
                 maxSyncedLogId_++;
                 // Chunk UnSynced logs
-                uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[rb->opKey];
-                if (minUnSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
+                uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[opKey];
+                if (minUnSyncedLogIdByKey_[opKey] >= CONCURRENT_MAP_START_INDEX) {
                     // Try to advance  minUnSyncedLogIdByKey_[opKey]
                     LogEntry* unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
                     ASSERT(unSyncedEntry != NULL);
@@ -1167,7 +1192,7 @@ namespace nezha {
                         ASSERT(unSyncedEntry != NULL);
                     }
                     // LOG(INFO) << "minUnSyncedLogId=" << minUnSyncedLogId;
-                    minUnSyncedLogIdByKey_[rb->opKey] = minUnSyncedLogId;
+                    minUnSyncedLogIdByKey_[opKey] = minUnSyncedLogId;
 
                 }
 
@@ -1198,6 +1223,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
+            if (viewId_ == 1) return;
             missedIndexAckContext_.Register();
             missedIndexAckContext_.endPoint_->LoopRun();
         }
@@ -1228,8 +1254,8 @@ namespace nezha {
                 indexSyncMsg.set_logidend(logEnd);
                 for (uint32_t logid = indexSyncMsg.logidbegin(); logid <= indexSyncMsg.logidend(); logid++) {
                     LogEntry* entry = syncedEntries_.get(logid);
-                    indexSyncMsg.add_deadlines(entry->body.deadline);
-                    indexSyncMsg.add_reqkeys(entry->body.reqKey);
+                    indexSyncMsg.add_deadlines(entry->deadline);
+                    indexSyncMsg.add_reqkeys(entry->reqKey);
                 }
                 // Piggyback crash vector
                 crashVectorInUse_[indexAckCVIdx_] = crashVectorInUse_[0].load();
@@ -1246,6 +1272,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
+            if (viewId_ == 1) return;
             missedReqAckContext_.Register();
             missedReqAckContext_.endPoint_->LoopRun();
         }
@@ -1264,27 +1291,16 @@ namespace nezha {
             missedReqMsg.set_replicaid(this->replicaId_);
             for (int i = 0; i < askReqMsg.missedreqkeys_size(); i++) {
                 uint64_t reqKey = askReqMsg.missedreqkeys(i);
-                // Request* req = syncedRequestMap_.get(reqKey);
-                // if (req == NULL) {
-                //     // Cannot find in syncedRequestMap_, try in unsyncedRequestMap_
-                //     req = unsyncedRequestMap_.get(reqKey);
-                // }
-
-                // Don't try late buffer (GarbageCollectTd may be relclaiming it)
-                // if (req) {
-                //     // the req is found
-                //     missedReqMsg.add_reqs()->CopyFrom(*req);
-                // }
-
-                uint32_t logId = syncedReq2LogId_.get(reqKey);
-
-                if (logId >= CONCURRENT_MAP_START_INDEX) {
-                    // the req is found
-                    LogEntry* entry = syncedEntries_.get(logId);
-                    ASSERT(entry != NULL);
-                    RequestBodyToMessage(entry->body, missedReqMsg.add_reqs());
+                Request* req = syncedRequestMap_.get(reqKey);
+                if (req == NULL) {
+                    // Cannot find in syncedRequestMap_, try in unsyncedRequestMap_
+                    req = unsyncedRequestMap_.get(reqKey);
                 }
-
+                // Don't try late buffer (GarbageCollectTd may be relclaiming it)
+                if (req) {
+                    // the req is found
+                    missedReqMsg.add_reqs()->CopyFrom(*req);
+                }
                 if ((uint32_t)(missedReqMsg.reqs_size()) >= requestTrasnferBatch_) {
                     missedReqAckContext_.endPoint_->SendMsgTo(*(indexReceiver_[askReqMsg.replicaid()]), missedReqMsg, MessageType::MISSED_REQ);
                     missedReqMsg.clear_reqs();
@@ -1298,14 +1314,6 @@ namespace nezha {
         }
     }
 
-
-    void Replica::RequestBodyToMessage(const RequestBody& rb, RequestBodyMsg* rbMsg) {
-        rbMsg->set_deadline(rb.deadline);
-        rbMsg->set_reqkey(rb.reqKey);
-        rbMsg->set_proxyid(rb.proxyId);
-        rbMsg->set_command(rb.command);
-        rbMsg->set_key(rb.opKey);
-    }
 
     void Replica::AskMissedIndex() {
         if (missedIndices_.first > missedIndices_.second) {
@@ -1360,7 +1368,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            // if (viewId_ == 1) return;
+            if (viewId_ == 1) return;
             // // Reclaim stale crashVector
             // ReclaimStaleCrashVector();
             // // Reclaim (unsynced) stale logs
@@ -1411,22 +1419,36 @@ namespace nezha {
                 // This key has been cleared in previous round, we can stop here
                 break;
             }
-            unsyncedReq2LogId_.erase(entryToClear->body.reqKey);
+            // Reclaim its request
+            Request* req = unsyncedRequestMap_.get(entryToClear->reqKey);
+            if (syncedRequestMap_.get(entryToClear->reqKey) != req) {
+                // This req is not reused by synced entries, so we can delete it
+                delete req;
+            }
+
+            unsyncedRequestMap_.erase(entryToClear->reqKey);
+            unsyncedReq2LogId_.erase(entryToClear->reqKey);
             unsyncedEntries_.erase(safePoint);
+
             safePoint--;
+
         }
 
         // Reclaim requests in late-buffer
         safePoint = safeToClearLateBufferLogId_;
         while (safePoint >= CONCURRENT_MAP_START_INDEX) {
-            RequestBody* rb = lateBuffer_.get(safePoint);
-            if (rb == NULL) {
+            Request* req = lateBuffer_.get(safePoint);
+            if (req == NULL) {
                 // We have cleared enough, stop and jump out
                 break;
             }
-            delete rb;
-            lateBufferReq2LogId_.erase(rb->reqKey);
+            uint64_t reqKey = CONCAT_UINT32(req->clientid(), req->reqid());
+            lateBufferReq2LogId_.erase(reqKey);
             lateBuffer_.erase(safePoint);
+            if (syncedRequestMap_.get(reqKey) != req) {
+                // This req is not reused by synced entries, so we can delete it
+                delete req;
+            }
             safePoint--;
         }
     }
@@ -1434,9 +1456,9 @@ namespace nezha {
     void Replica::PrepareNextReclaim() {
         uint32_t lastPrepare = prepareToClearLateBufferLogId_;
         while (lastPrepare <= maxLateBufferId_ && lastPrepare >= CONCURRENT_MAP_START_INDEX) {
-            RequestBody* rb = lateBuffer_.get(lastPrepare);
-            ASSERT(rb != NULL);
-            if (rb->deadline + reclaimTimeout_ * 1000 < GetMicrosecondTimestamp()) {
+            Request* request = lateBuffer_.get(lastPrepare);
+            ASSERT(request != NULL);
+            if (request->sendtime() + reclaimTimeout_ * 1000 < GetMicrosecondTimestamp()) {
                 // this request is too old, no need to keep it any longer
                 lastPrepare++;
             }
@@ -1451,7 +1473,7 @@ namespace nezha {
             LogEntry* entry = unsyncedEntries_.get(lastPrepare);
             ASSERT(entry != NULL);
             bool shouldReclaim = false;
-            uint32_t syncPoint = maxSyncedLogIdByKey_[entry->body.opKey];
+            uint32_t syncPoint = maxSyncedLogIdByKey_[entry->opKey];
             if (syncPoint >= CONCURRENT_MAP_START_INDEX) {
                 LogEntry* syncedEntry = syncedEntries_.get(syncPoint);
                 // syncedEntriesByKey_ Map may be unnecessary
@@ -1460,7 +1482,7 @@ namespace nezha {
                     shouldReclaim = true;
                 }
             }
-            if ((!shouldReclaim) && entry->body.deadline + reclaimTimeout_ * 1000 < GetMicrosecondTimestamp()) {
+            if ((!shouldReclaim) && entry->deadline + reclaimTimeout_ * 1000 < GetMicrosecondTimestamp()) {
                 // Even if synced entry has not surpassed it, it has been kept on the follwoers for too long
                 // We assume reclaimTimeout_ is a sufficient time: If leader has such an entry, it should have synced it with the follower after such a long time
                 // Otherwise, it only proves that the leader does not have such entry, so it is also unnecessary for the follower to keep it
@@ -1486,10 +1508,10 @@ namespace nezha {
         if (AmLeader()) {
             return;
         }
-        // // inject for debug
-        // if (viewId_ == 1) {
-        //     return;
-        // }
+        // inject for debug
+        if (viewId_ == 1) {
+            return;
+        }
         if (status_ != ReplicaStatus::NORMAL) {
             // Some worker threads have detected viewchange and switch status_ to VIEWCHANGE
             // But workers have no priviledge to increment viewId_ and initiate view change process, so the master will do that
@@ -1620,7 +1642,6 @@ namespace nezha {
             // I am the leader of this new view, no need to send to myself
             return;
         }
-
         ViewChange viewChangeMsg;
         viewChangeMsg.set_view(viewId_);
         viewChangeMsg.set_replicaid(replicaId_);
@@ -1663,6 +1684,8 @@ namespace nezha {
                 minUnSyncedLogId_ = safeToClearUnSyncedLogId_[i] + 1;
             }
         }
+
+
 
         viewId_ = view;
         // Unregister all timers, except the monitorTimer (so as the master thread can break when status=Terminated)
@@ -1938,16 +1961,18 @@ namespace nezha {
         int f = replicaNum_ / 2;
         int quorum = (f % 2 == 0) ? (f / 2 + 1) : (f / 2 + 2);
         for (auto& kv : requestsToMerge_) {
+            uint64_t deadline = kv.first.first;
             uint64_t reqKey = kv.first.second;
-            RequestBody* rb = kv.second.first;
+            Request* request = kv.second.first;
             int count = kv.second.second;
             if (count >= quorum) {
-                if (syncedEntries_.get(reqKey) != NULL) {
+                if (syncedRequestMap_.get(reqKey) != NULL) {
                     // at-most once
-                    delete rb;
+                    delete request;
                     continue;
                 }
-                ProcessRequest(rb, true, false);
+                syncedRequestMap_.assign(reqKey, request);
+                ProcessRequest(deadline, reqKey, *request);
             }
         }
         requestsToMerge_.clear();
@@ -1955,7 +1980,7 @@ namespace nezha {
     }
 
     void Replica::EnterNewView() {
-        LOG(INFO) << "Enter New View " << viewId_ << " maxSyncedLog =" << maxSyncedLogId_;
+        LOG(INFO) << "Enter New View " << viewId_;
         // Leader sends StartView to all the others
         if (AmLeader()) {
             SendStartView(-1);
@@ -2034,6 +2059,8 @@ namespace nezha {
 
         ConcurrentMap<uint32_t, LogEntry*>& entryMap = (reply.issynced() ? syncedEntries_ : unsyncedEntries_);
 
+        ConcurrentMap<uint64_t, Request*>& requestMap = (reply.issynced() ? syncedRequestMap_ : unsyncedRequestMap_);
+
         if (reply.issynced()) {
             ASSERT(maxSyncedLogId_ >= reply.logend());
         }
@@ -2044,13 +2071,22 @@ namespace nezha {
 
         for (uint32_t j = reply.logbegin(); j <= reply.logend(); j++) {
             LogEntry* entry = NULL;
+            Request* request = NULL;
+            uint32_t failcnt = 0;
             do {
-                // normally this do-while should only run once
                 entry = entryMap.get(j);
+                failcnt++;
             } while (entry == NULL);
+            do {
+                request = requestMap.get(entry->reqKey);
+            } while (request == NULL);
 
-            RequestBodyToMessage(entry->body, reply.add_reqs());
+            reply.add_reqs()->CopyFrom(*request);
+            // Also piggyback the deadline
+            reply.mutable_reqs()->rbegin()->set_sendtime(entry->deadline);
+            reply.mutable_reqs()->rbegin()->set_bound(0);
         }
+
 
         masterContext_.endPoint_->SendMsgTo(*requesterAddr, reply, MessageType::STATE_TRANSFER_REPLY);
 
@@ -2108,23 +2144,29 @@ namespace nezha {
         if (stateTransferReply.issynced()) {
             // This is the state-transfer for synced requests
             for (uint32_t i = iter->second.first; i <= stateTransferReply.logend(); i++) {
-                if (syncedEntries_.get(i) != NULL) {
+                if (syncedRequestMap_.get(i) != NULL) {
                     LOG(INFO) << "logid=" << i << "\t" << "stateMissingBegin=" << iter->second.first << "\tstateMissingEnd=" << iter->second.second << "\t maxSyncedLogId=" << maxSyncedLogId_ << "\t" << "stateTransferReply.logbegin=" << stateTransferReply.logbegin() << "\t" << "stateTransferReply.logend=" << stateTransferReply.logend();
                 }
-                ASSERT(syncedEntries_.get(i) == NULL);
-                const RequestBodyMsg& rbMsg = stateTransferReply.reqs(i - iter->second.first);
-                RequestBody* rb = new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(), rbMsg.command());
-                ProcessRequest(rb, true, false);
+                ASSERT(syncedRequestMap_.get(i) == NULL);
+                Request* request = new Request(stateTransferReply.reqs(i - iter->second.first));
+                syncedRequestMap_.assign(i, request);
+                uint64_t deadline = request->sendtime();
+                uint64_t reqKey = request->clientid();
+                reqKey = ((reqKey << 32u) | (request->reqid()));
+                ProcessRequest(deadline, reqKey, *request, true, false);
             }
         }
         else {
             // This is the state-transfer for unsynced request (log merge)
             for (int i = 0; i < stateTransferReply.reqs_size(); i++) {
-                const RequestBodyMsg& rbMsg = stateTransferReply.reqs(i);
-                std::pair<uint64_t, uint64_t> key(rbMsg.deadline(), rbMsg.reqkey());
+                uint64_t deadline = stateTransferReply.reqs(i).sendtime();
+                uint32_t clientId = stateTransferReply.reqs(i).clientid();
+                uint32_t reqId = stateTransferReply.reqs(i).reqid();
+                uint64_t reqKey = CONCAT_UINT32(clientId, reqId);
+                std::pair<uint64_t, uint64_t> key(deadline, reqKey);
                 if (requestsToMerge_.find(key) != requestsToMerge_.end()) {
-                    RequestBody* rb = new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(), rbMsg.command());
-                    requestsToMerge_[key] = { rb, 1 };
+                    Request* request = new Request(stateTransferReply.reqs(i));
+                    requestsToMerge_[key] = { request, 1 };
                 }
                 else {
                     requestsToMerge_[key].second++;
@@ -2152,58 +2194,48 @@ namespace nezha {
     }
 
     void Replica::RewindSyncedLogTo(uint32_t rewindPoint) {
+        uint32_t logIdToClear = rewindPoint + 1;
         std::set<uint32_t> keysToClear;
-        LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
+        VLOG(3) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
             << "rewindPoint=" << rewindPoint;
-
         // Rewind syncedEntries_ and maxSyncedLogId_
         while (maxSyncedLogId_ > rewindPoint) {
-            LogEntry* entry = syncedEntries_.get(maxSyncedLogId_);
-            keysToClear.insert(entry->body.opKey);
-            syncedReq2LogId_.erase(entry->body.reqKey);
+            LogEntry* entry = syncedEntries_.get(logIdToClear);
+            keysToClear.insert(entry->opKey);
+            syncedEntries_.erase(maxSyncedLogId_);
             maxSyncedLogId_--;
         }
-
-        for (const uint32_t& opKey : keysToClear) {
-            // Rewind
-            while (maxSyncedLogIdByKey_[opKey] > maxSyncedLogId_ && maxSyncedLogIdByKey_[opKey] >= CONCURRENT_MAP_START_INDEX) {
-                LogEntry* entry = syncedEntries_.get(maxSyncedLogIdByKey_[opKey]);
+        // Rewind syncedRequestMap_, syncedReq2LogId_, syncedEntriesByKey_ and maxSyncedLogIdByKey_
+        for (const uint32_t& key : keysToClear) {
+            while (maxSyncedLogIdByKey_[key] >= CONCURRENT_MAP_START_INDEX) {
+                uint64_t keyAndId = key;
+                keyAndId = ((keyAndId << 32u) | maxSyncedLogIdByKey_[key]);
+                LogEntry* entry = syncedEntriesByKey_.get(keyAndId);
                 ASSERT(entry != NULL);
-                syncedEntries_.erase(maxSyncedLogIdByKey_[opKey]);
-                if (entry->prevLogId >= CONCURRENT_MAP_START_INDEX) {
-                    maxSyncedLogIdByKey_[opKey] = entry->prevLogId;
+                uint32_t logId = syncedReq2LogId_.get(entry->reqKey);
+                if (logId > maxSyncedLogId_) {
+                    // Should be cleared
+                    syncedReq2LogId_.erase(entry->reqKey);
+                    syncedEntriesByKey_.erase(keyAndId);
+                    Request* request = syncedRequestMap_.get(entry->reqKey);
+                    syncedRequestMap_.erase(entry->reqKey);
+                    if (unsyncedEntries_.get(entry->reqKey) == NULL) {
+                        delete request;
+                    }// Else: This request is still owned by unsyncedRequestMap
+                        // So we do not free it, the gc-thread will do that
                     delete entry;
+                    maxSyncedLogIdByKey_[key]--;
                 }
                 else {
-                    maxSyncedLogIdByKey_[opKey] = CONCURRENT_MAP_START_INDEX - 1;
-                    delete entry;
+                    // We have completely cleared the entries that go beyond the maxSyncedLogId_
+                    // Break the while loop and go to clear the next key
                     break;
                 }
 
             }
         }
 
-        // Rewind  syncedReq2LogId_, syncedEntriesByKey_ and maxSyncedLogIdByKey_
-        // for (const uint32_t& opKey : keysToClear) {
-        //     while (maxSyncedLogIdByKey_[opKey] >= CONCURRENT_MAP_START_INDEX) {
-        //         uint64_t opKeyAndId = CONCAT_UINT32(opKey, maxSyncedLogIdByKey_[opKey]);
-        //         LogEntry* entry = syncedEntriesByKey_.get(opKeyAndId);
-        //         ASSERT(entry != NULL);
-        //         uint32_t logId = syncedReq2LogId_.get(entry->body.reqKey);
-        //         if (logId > maxSyncedLogId_) {
-        //             // Should be cleared
-        //             syncedReq2LogId_.erase(entry->body.reqKey);
-        //             // syncedEntriesByKey_.erase(opKeyAndId);
-        //             delete entry;
-        //             maxSyncedLogIdByKey_[opKey]--;
-        //         }
-        //         else {
-        //             // We have completely cleared the entries that go beyond the maxSyncedLogId_
-        //             // Break the while loop and go to clear the next key
-        //             break;
-        //         }
-        //     }
-        // }
+
     }
 
     void Replica::ProcessStartView(const StartView& startView) {
@@ -2584,10 +2616,9 @@ namespace nezha {
     }
 
 
-    std::string Replica::ApplicationExecute(const RequestBody& request) {
+    std::string Replica::ApplicationExecute(const Request& req) {
         return "";
     }
-
     bool Replica::AmLeader() {
         return (viewId_ % replicaNum_ == replicaId_);
     }

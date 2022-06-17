@@ -12,6 +12,13 @@ message Request {
     uint32 key = 7;
 }
 
+message RequestBodyMsg {
+    uint64 deadline = 1;
+    uint64 reqkey = 2;
+    uint64 proxyid = 3;
+    bytes command = 4;
+    uint32 key = 5;
+}
 message TimeStats {
     uint64 sendtime = 1;
     uint64 proxytime1 =2;
@@ -55,7 +62,7 @@ message AskReq {
 }
 
 message MissedReq {
-    repeated Request reqs = 1;
+    repeated RequestBodyMsg reqs = 1;
     uint32 replicaid = 2;
 }
 
@@ -94,7 +101,7 @@ message StateTransferReply {
     bool issynced = 4;
     uint32 logbegin = 5;
     uint32 logend = 6;
-    repeated Request reqs = 7;
+    repeated RequestBodyMsg reqs = 7;
 }
 
 

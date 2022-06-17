@@ -54,13 +54,16 @@ namespace nezha {
         std::atomic<uint32_t> replicaNum_;
         std::atomic<int> status_; // Worker threads check status to decide whether they should stop (for view change)
 
-        std::map<std::pair<uint64_t, uint64_t>, RequestBody*> earlyBuffer_; // The key pair is <deadline, reqKey>
+        std::map<std::pair<uint64_t, uint64_t>, Request*> earlyBuffer_; // The key pair is <deadline, reqKey>
         std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
-        ConcurrentMap<uint32_t, RequestBody*> lateBuffer_; // Only used by followers, <id, reqKey>, we can use reqKey to get the request from unsyncedRequestMap_
+        ConcurrentMap<uint32_t, Request*> lateBuffer_; // Only used by followers, <id, reqKey>, we can use reqKey to get the request from unsyncedRequestMap_
         ConcurrentMap<uint64_t, uint32_t> lateBufferReq2LogId_; // <reqKey, logId> Inverse Index, used (by follower) to look up request from lateBuffer. 
         std::atomic<uint32_t> maxLateBufferId_;
 
 
+
+        ConcurrentMap<uint64_t, Request*> syncedRequestMap_; // <reqKey, request>
+        ConcurrentMap<uint64_t, Request*> unsyncedRequestMap_; // <reqKey, request>
         ConcurrentMap<uint32_t, LogEntry*> syncedEntries_; // log-id as the key [accumulated hashes]
         ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_; // log-id as the key [accumulated hashes]
         ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_; // <reqKey, logId> (inverse index, used for duplicate check by leader)
@@ -77,8 +80,8 @@ namespace nezha {
         std::vector<uint32_t> maxSyncedLogIdByKey_; // per-key based log-id
         std::vector<uint32_t> minUnSyncedLogIdByKey_; // per-key based log-id, together with  maxSyncedLogIdByKey_, they serve as the sync-points on followers
         std::vector<uint32_t> maxUnSyncedLogIdByKey_; // per-key based log-id
-        // ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id(consecutive)), entry>
-        // ConcurrentMap<uint64_t, LogEntry*> unsyncedEntriesByKey_; // <(Key|Id), entry>
+        ConcurrentMap<uint64_t, LogEntry*> syncedEntriesByKey_; // <(Key|Id(consecutive)), entry>
+        ConcurrentMap<uint64_t, LogEntry*> unsyncedEntriesByKey_; // <(Key|Id), entry>
 
         // Use <threadName> as the key (for search), <threadPtr, threadId> as the value
         std::map<std::string, std::thread*> threadPool_;
@@ -142,7 +145,7 @@ namespace nezha {
         std::function<void(void)> stateTransferTerminateCallback_;
 
         // UnSynced request merge (during leader recovery)
-        std::map<std::pair<uint64_t, uint64_t>, std::pair<RequestBody*, uint32_t>> requestsToMerge_;
+        std::map<std::pair<uint64_t, uint64_t>, std::pair<Request*, uint32_t>> requestsToMerge_;
 
         // Recovery related variables
         std::string nonce_;
@@ -223,12 +226,11 @@ namespace nezha {
         void ProcessRecoveryReply(const RecoveryReply& reply);
         void ProcessSyncStatusReport(const SyncStatusReport& report);
         void ProcessCommitInstruction(const CommitInstruction& commit);
-        void ProcessRequest(const RequestBody* rb, const bool isSyncedReq = true, const bool sendReply = true);
-
+        void ProcessRequest(const uint64_t deadline, const uint64_t reqKey, const Request& request, const bool isSyncedReq = true, const bool sendReply = true);
 
 
         // The interfaces to bridge specific applications
-        std::string ApplicationExecute(const RequestBody& request);
+        std::string ApplicationExecute(const Request& request);
 
         // Tools
         bool AmLeader();
@@ -242,7 +244,6 @@ namespace nezha {
         void TransferUnSyncedLog();
         void MergeUnSyncedLog();
         void PrintConfig();
-        void RequestBodyToMessage(const RequestBody& rb, RequestBodyMsg* rbMsg);
 
         // Threads
         void ReceiveTd(int id = -1);
