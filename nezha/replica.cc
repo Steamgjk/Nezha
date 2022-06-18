@@ -530,7 +530,7 @@ namespace nezha {
         if (msgHdr->msgType == MessageType::CLIENT_REQUEST) {
             Request request;
             if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
-                LOG(INFO) << "Request " << request.reqid() << " max " << maxSyncedLogId_;
+                // LOG(INFO) << "Request--2 " << request.reqid() << " max " << maxSyncedLogId_ << "\t" << request.DebugString();
                 // Collect OWD sample
                 if (GetMicrosecondTimestamp() > request.sendtime()) {
                     owdQu_.enqueue(std::pair<uint32_t, uint32_t>(request.proxyid(), GetMicrosecondTimestamp() - request.sendtime()));
@@ -621,6 +621,9 @@ namespace nezha {
         VLOG(2) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";;
     }
 
+
+
+
     void Replica::ProcessTd(int id) {
         activeWorkerNum_.fetch_add(1);
         RequestBody* rb;
@@ -629,6 +632,7 @@ namespace nezha {
             bool amLeader = AmLeader();
             // if (viewId_ == 1) return;
             if (processQu_.try_dequeue(rb)) {
+                // LOG(INFO) << "EarlyBuffer Size " << earlyBuffer_.size();
                 if (amLeader) {
                     uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
                     if (duplicateLogIdx == 0) {
@@ -706,7 +710,7 @@ namespace nezha {
             // Polling early-buffer
             uint64_t nowTime = GetMicrosecondTimestamp();
 
-            while ((!earlyBuffer_.empty()) && nowTime <= earlyBuffer_.begin()->first.first) {
+            while ((!earlyBuffer_.empty()) && nowTime >= earlyBuffer_.begin()->first.first) {
                 lastReleasedEntryByKeys_[rb->opKey] = earlyBuffer_.begin()->first;
                 // LOG(INFO) << "Processing " << req->reqid();
                 ProcessRequest(earlyBuffer_.begin()->second, amLeader, true);

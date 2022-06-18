@@ -131,6 +131,9 @@ namespace nezha
         std::pair<uint32_t, uint32_t> owdSample;
         std::vector<uint32_t> replicaOWDs;
         replicaOWDs.resize(proxyConfig_["replica-info"]["replica-ips"].size(), proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>());
+        for (uint32_t i = 0; i < replicaOWDs.size(); i++) {
+            LOG(INFO) << "replicaOWD " << i << "\t" << replicaOWDs[i];
+        }
         while (running_) {
             if (owdQu_.try_dequeue(owdSample)) {
                 LOG(INFO) << "replica=" << owdSample.first << "\towd=" << owdSample.second;
@@ -142,7 +145,9 @@ namespace nezha
                         maxOWD = replicaOWDs[i];
                     }
                 }
+                // TODO: should set an upper bound of owd
                 latencyBound_.store(maxOWD);
+                LOG(INFO) << "Update bound " << latencyBound_;
 
             }
         }
@@ -175,7 +180,7 @@ namespace nezha
                         LOG(INFO) << "id=" << id << "\t" << "replyNum=" << replyNum;
                     }
                     // LOG(INFO) << "reply=" << reply.DebugString();
-                    if (reply.view() == 1) {
+                    if (reply.view() <= 1) {
                         LOG(INFO) << "replica=" << reply.replicaid() << "\t" << reply.clientid() << "\t"
                             << reply.reqid() << "\t" << reply.replytype();
                         if (reply.replytype() == (uint32_t)(MessageType::FAST_REPLY)) {
@@ -286,6 +291,7 @@ namespace nezha
             if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)&receiverAddr, &len)) > 0) {
                 if (request.ParseFromArray(buffer, sz)) {
                     request.set_bound(latencyBound_);
+                    LOG(INFO) << "latency Boud " << request.bound();
                     request.set_proxyid(proxyIds_[id]);
                     request.set_sendtime(GetMicrosecondTimestamp());
 
@@ -338,6 +344,7 @@ namespace nezha
         requestReceiveFds_.resize(shardNum, -1);
         replyFds_.resize(shardNum, -1);
         proxyIds_.resize(shardNum, proxyId);
+        latencyBound_ = proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>();
         for (int i = 0; i < shardNum; i++) {
             forwardFds_[i] = CreateSocketFd(sip, replyPortBase + i);
             requestReceiveFds_[i] = CreateSocketFd(sip, requestPortBase + i);
