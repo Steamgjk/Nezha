@@ -50,6 +50,7 @@ namespace nezha {
                 masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
             }
             // TODO: Register periodicSyncTimer_
+            masterContext_.endPoint_->RegisterTimer(periodicSyncTimer_);
         }
         // Launch worker threads (based on config)
         LaunchThreads();
@@ -430,6 +431,9 @@ namespace nezha {
             lastHeartBeatTime_ = GetMicrosecondTimestamp();
             masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
         }
+
+        masterContext_.endPoint_->RegisterTimer(periodicSyncTimer_);
+
         // TODO: Register periodicSyncTimer_
 
 
@@ -650,7 +654,7 @@ namespace nezha {
                         }
                     }
                     else {
-                        LOG(WARNING) << "duplicated " << duplicateLogIdx;
+                        // LOG(WARNING) << "duplicated " << duplicateLogIdx;
                         // at-most-once: duplicate requests are not executed twice
                         // We simply send the previous reply messages
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
@@ -1077,7 +1081,6 @@ namespace nezha {
 
 
     bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
-        LOG(INFO) << "Begin index begin " << idxSyncMsg.logidbegin() << "\t" << idxSyncMsg.logidend() << "\t maxSyncedLogId_=" << maxSyncedLogId_;
         if (idxSyncMsg.logidend() <= maxSyncedLogId_) {
             // This idxSyncMsg is useless 
             return true;
@@ -1587,6 +1590,7 @@ namespace nezha {
         else if (msgHdr->msgType == MessageType::COMMIT_INSTRUCTION) {
             CommitInstruction commit;
             if (commit.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+                // LOG(INFO) << commit.DebugString();
                 ProcessCommitInstruction(commit);
             }
         }
@@ -1722,6 +1726,7 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
         report.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         report.set_syncedlogid(maxSyncedLogId_);
+        // LOG(INFO) << "Sync " << report.DebugString();
         if (AmLeader()) {
             // leader directly process its own report
             ProcessSyncStatusReport(report);
@@ -1740,9 +1745,10 @@ namespace nezha {
         CrashVectorStruct* cv = crashVectorInUse_[0].load();
         commit.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
         commit.set_committedlogid(committedLogId_);
+        // LOG(INFO) << "commit " << commit.DebugString();
         for (uint32_t i = 0; i < replicaNum_; i++) {
             if (i != replicaId_) {
-                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[viewId_ % replicaNum_]), commit, MessageType::COMMIT_INSTRUCTION);
+                masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), commit, MessageType::COMMIT_INSTRUCTION);
             }
         }
 
@@ -2479,11 +2485,13 @@ namespace nezha {
             return;
         }
 
+
         auto iter = syncStatusSet_.find(report.replicaid());
-        if (iter != syncStatusSet_.end() && iter->second.syncedlogid() < report.syncedlogid()) {
+        if (iter == syncStatusSet_.end() || iter->second.syncedlogid() < report.syncedlogid()) {
             syncStatusSet_[report.replicaid()] = report;
         }
 
+        // LOG(INFO) << "sync size=" << syncStatusSet_.size();
         if (syncStatusSet_.size() >= replicaNum_ / 2 + 1) {
             uint32_t minLogId = UINT32_MAX;
             for (const auto& kv : syncStatusSet_) {
@@ -2491,8 +2499,10 @@ namespace nezha {
                     minLogId = kv.second.syncedlogid();
                 }
             }
+            // LOG(INFO) << "minLogId=" << minLogId << "\t" << committedLogId_;
             if (minLogId >= committedLogId_) {
                 committedLogId_ = minLogId;
+                // LOG(INFO) << "syncStauts " << report.DebugString();
                 SendCommit();
             }
         }
@@ -2509,8 +2519,11 @@ namespace nezha {
         if (!CheckView(commit.view())) {
             return;
         }
+        // LOG(INFO) << "commit " << commit.DebugString();
+        // Buggy: should compare with syncedLogId, to see whether log is missing
         if (commit.committedlogid() > committedLogId_) {
             committedLogId_ = commit.committedlogid();
+            // LOG(INFO) << "committedLogId_=" << committedLogId_;
         }
     }
 

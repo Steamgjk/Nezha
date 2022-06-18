@@ -179,16 +179,16 @@ namespace nezha
                     if (replyNum % 1000 == 0) {
                         LOG(INFO) << "id=" << id << "\t" << "replyNum=" << replyNum;
                     }
-                    // LOG(INFO) << "reply=" << reply.DebugString();
-                    if (reply.view() <= 1) {
-                        LOG(INFO) << "replica=" << reply.replicaid() << "\t" << reply.clientid() << "\t"
-                            << reply.reqid() << "\t" << reply.replytype();
-                        if (reply.replytype() == (uint32_t)(MessageType::FAST_REPLY)) {
-                            std::string hashStr(reply.hash());
-                            SHA_HASH hash(hashStr.c_str(), hashStr.length());
-                            LOG(INFO) << hash.toString();
-                        }
-                    }
+                    // // LOG(INFO) << "reply=" << reply.DebugString();
+                    // if (reply.view() <= 1) {
+                    //     LOG(INFO) << "replica=" << reply.replicaid() << "\t" << reply.clientid() << "\t"
+                    //         << reply.reqid() << "\t" << reply.replytype();
+                    //     if (reply.replytype() == (uint32_t)(MessageType::FAST_REPLY)) {
+                    //         std::string hashStr(reply.hash());
+                    //         SHA_HASH hash(hashStr.c_str(), hashStr.length());
+                    //         LOG(INFO) << hash.toString();
+                    //     }
+                    // }
 
                     uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
                     if (reply.owd() > 0) {
@@ -291,7 +291,7 @@ namespace nezha
             if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)&receiverAddr, &len)) > 0) {
                 if (request.ParseFromArray(buffer, sz)) {
                     request.set_bound(latencyBound_);
-                    LOG(INFO) << "latency Boud " << request.bound();
+                    // LOG(INFO) << "latency Boud " << request.bound();
                     request.set_proxyid(proxyIds_[id]);
                     request.set_sendtime(GetMicrosecondTimestamp());
 
