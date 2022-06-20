@@ -136,12 +136,8 @@ namespace nezha {
         ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_;
         /** Each related thread (i.e. fast reply threads + index recv thread + index ack thread) will hold an atomic pointer */
         std::atomic<CrashVectorStruct*>* crashVectorInUse_;
-        /** The number of threads using crash vectors */
+        /** The number of threads using crash vectors (i.e., the length of crashVectorInUse_) */
         uint32_t crashVectorVecSize_;
-        /** The index of atomic pointer held by index recv thread */
-        uint32_t indexRecvCVIdx_;
-        /** The index of atomic pointer held by index ack thread */
-        uint32_t indexAckCVIdx_;
 
         /** The sync messages (for index sync process) which have not been processed */
         std::map<std::pair<uint32_t, uint32_t>, IndexSync> pendingIndexSync_;
@@ -270,10 +266,8 @@ namespace nezha {
         bool AmLeader();
         void BlockWhenStatusIsNot(char targetStatus);
         MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
-        /** Used by Non-Master threads */
-        bool CheckViewAndCV(const uint32_t view, const google::protobuf::RepeatedField<uint32_t>& cv);
-        /** Used by master threads */
-        bool CheckView(const uint32_t view);
+        /** Master thread can initiate view change, non-master threads only switch status to ViewChange  */
+        bool CheckView(const uint32_t view, const bool isMaster = true);
         bool CheckCV(const uint32_t senderId, const google::protobuf::RepeatedField<uint32_t>& cv);
         bool Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv);
         void TransferSyncedLog();

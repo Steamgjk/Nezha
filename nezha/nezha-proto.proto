@@ -45,9 +45,7 @@ message IndexSync {
     repeated uint64 deadlines = 3;
     repeated uint64 reqkeys =4;
     uint32 view = 5;
-    // crash-vector
-    repeated uint32 cv = 6;
-    uint64 sendtime = 7;
+    uint64 sendtime = 6;
 }
 
 message AskIndex {
