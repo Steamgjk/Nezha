@@ -20,7 +20,6 @@ namespace nezha {
         monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
             // LOG(INFO) << "Monitor running " << ((Client*)ctx)->running_;
             if (((Client*)ctx)->running_ == false) {
-
                 receiverEP->LoopBreak();
             }
             }, this, 10);
@@ -136,9 +135,6 @@ namespace nezha {
         }
         Reply reply;
         if (reply.ParseFromArray(msgBuffer, bufferLen)) {
-            // LOG(INFO) << "reply: ClientId=" << reply.clientid() << "\t"
-            //     << "reqId=" << reply.reqid() << "\t"
-            //     << "replyType=" << reply.replytype();
             Request* request = outstandingRequests_.get(reply.reqid());
             if (request) {
                 LogInfo* log = new LogInfo();
@@ -157,7 +153,7 @@ namespace nezha {
         uint64_t startTime = GetMicrosecondTimestamp();
         uint64_t endTime = startTime + clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
 
-        // Poisson rate is 10ms as one unit
+        // Poisson rate is ``10ms as one unit''
         for (uint32_t i = 0; i < clientConfig_["client-info"]["duration-sec"].as<uint32_t>() * 100; i++) {
             if (!running_) {
                 return;
@@ -180,7 +176,7 @@ namespace nezha {
                 uint32_t mapIdx = roundRobinIdx % (proxyAddrs_.size() * proxyAddrs_[0].size());
                 Request* request = NULL;
                 if (retryQu_.try_dequeue(request)) {
-                    // retry this request
+                    // Retry this request
                     std::string requestStr = request->SerializeAsString();
                     Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()][mapIdx / proxyAddrs_.size()];
                     requestEP_->SendMsgTo(*roundRobinAddr, requestStr);
@@ -207,7 +203,6 @@ namespace nezha {
             }
             if (GetMicrosecondTimestamp() >= endTime) {
                 // Client has executed long enough, should terminate
-
                 LOG(INFO) << "Terminating soon...";
                 sleep(10);
                 running_ = false;
@@ -219,14 +214,15 @@ namespace nezha {
     }
 
     void Client::CloseLoopSubmissionTd() {
-
         int roundRobinIdx = 0;
         uint64_t startTime = GetMicrosecondTimestamp();
         uint64_t endTime = startTime + clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
         while (running_) {
             if (suspending_) {
                 // do something
-                continue;
+                while (suspending_) {
+                    usleep(1000);
+                }
             }
             if (GetMicrosecondTimestamp() >= endTime) {
                 // Client has executed long enough, should terminate
@@ -312,20 +308,20 @@ namespace nezha {
 
             }
 
-            // // Check whether any requests need retry
-            // for (uint32_t reqId = committedReqId_ + 1; reqId < nextReqId_; reqId++)
-            // {
-            //     uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
-            //     if (sendTime > 0) {
-            //         // Find it
-            //         if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
-            //             // timeout, should retry
-            //             Request* request = outstandingRequests_.get(reqId);
-            //             outstandingRequestSendTime_.erase(reqId);
-            //             retryQu_.enqueue(request);
-            //         }
-            //     }
-            // }
+            // Check whether any requests need retry
+            for (uint32_t reqId = committedReqId_ + 1; reqId < nextReqId_; reqId++)
+            {
+                uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
+                if (sendTime > 0) {
+                    // Find it
+                    if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
+                        // timeout, should retry
+                        Request* request = outstandingRequests_.get(reqId);
+                        outstandingRequestSendTime_.erase(reqId);
+                        retryQu_.enqueue(request);
+                    }
+                }
+            }
 
             while (reclaimedReqId_ + 1000 < committedReqId_) {
                 // do not reclaim request too aggressive

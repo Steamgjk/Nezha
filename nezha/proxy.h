@@ -43,6 +43,7 @@ namespace nezha {
         std::vector<int> requestReceiveFds_;
         std::vector<uint64_t> proxyIds_;
         std::atomic<uint32_t> latencyBound_;
+        uint32_t maxOWD_; // Upper bound of the estimated latencyBound_
         ConcurrentQueue<std::pair<uint32_t, uint32_t>> owdQu_; // <replicaId, owd>
 
 

@@ -27,6 +27,7 @@ namespace nezha
             LOG(INFO) << "\t" << "Proxy ID:" << proxyConfig["proxy-id"].as<int>();
             LOG(INFO) << "\t" << "Proxy IP:" << proxyConfig["proxy-ip"].as<std::string>();
             LOG(INFO) << "\t" << "Shard Number:" << proxyConfig["shard-num"].as<int>();
+            LOG(INFO) << "\t" << "Max OWD:" << proxyConfig["max-owd"].as<uint32_t>();
             LOG(INFO) << "\t" << "Request Port Base:" << proxyConfig["request-port-base"].as<int>();
             LOG(INFO) << "\t" << "Reply Port Base:" << proxyConfig["reply-port-base"].as<int>();
         }
@@ -136,22 +137,25 @@ namespace nezha
         }
         while (running_) {
             if (owdQu_.try_dequeue(owdSample)) {
-                LOG(INFO) << "replica=" << owdSample.first << "\towd=" << owdSample.second;
+                VLOG(1) << "replica=" << owdSample.first << "\towd=" << owdSample.second;
                 replicaOWDs[owdSample.first] = owdSample.second;
                 // Update latency bound
-                uint32_t maxOWD = 0;
+                uint32_t estimatedOWD = 0;
                 for (uint32_t i = 0; i < replicaOWDs.size(); i++) {
-                    if (maxOWD < replicaOWDs[i]) {
-                        maxOWD = replicaOWDs[i];
+                    if (estimatedOWD < replicaOWDs[i]) {
+                        estimatedOWD = replicaOWDs[i];
                     }
                 }
-                // TODO: should set an upper bound of owd
-                latencyBound_.store(maxOWD);
-                LOG(INFO) << "Update bound " << latencyBound_;
+                if (estimatedOWD > maxOWD_) {
+                    estimatedOWD = maxOWD_;
+                }
+                latencyBound_.store(estimatedOWD);
+                VLOG(1) << "Update bound " << latencyBound_;
 
             }
         }
     }
+
     void Proxy::CheckQuorum(const int id) {
         std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
         int sz = 0;
@@ -177,19 +181,8 @@ namespace nezha
                 if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
                     replyNum++;
                     if (replyNum % 1000 == 0) {
-                        LOG(INFO) << "id=" << id << "\t" << "replyNum=" << replyNum;
+                        VLOG(1) << "id=" << id << "\t" << "replyNum=" << replyNum;
                     }
-                    // // LOG(INFO) << "reply=" << reply.DebugString();
-                    // if (reply.view() <= 1) {
-                    //     LOG(INFO) << "replica=" << reply.replicaid() << "\t" << reply.clientid() << "\t"
-                    //         << reply.reqid() << "\t" << reply.replytype();
-                    //     if (reply.replytype() == (uint32_t)(MessageType::FAST_REPLY)) {
-                    //         std::string hashStr(reply.hash());
-                    //         SHA_HASH hash(hashStr.c_str(), hashStr.length());
-                    //         LOG(INFO) << hash.toString();
-                    //     }
-                    // }
-
                     uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
                     if (reply.owd() > 0) {
                         owdQu_.enqueue(std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
@@ -227,9 +220,6 @@ namespace nezha
                     } // else: reply.view()< replyQuorum[reqKey].begin()->second.view(), ignore it
 
                     if (committedAck != NULL) {
-                        // LOG(INFO) << "Committed clientId=" << committedAck->clientid() << "\t"
-                        //     << "reqId=" << committedAck->reqid() << "\t"
-                        //     << "commitType=" << committedAck->replytype();
                         // Ack to client
                         struct sockaddr_in* clientAddr = clientAddrs_.get(reply.clientid());
                         std::string replyMsg = committedAck->SerializeAsString();
@@ -291,7 +281,6 @@ namespace nezha
             if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)&receiverAddr, &len)) > 0) {
                 if (request.ParseFromArray(buffer, sz)) {
                     request.set_bound(latencyBound_);
-                    // LOG(INFO) << "latency Boud " << request.bound();
                     request.set_proxyid(proxyIds_[id]);
                     request.set_sendtime(GetMicrosecondTimestamp());
 
@@ -304,8 +293,7 @@ namespace nezha
                         clientAddrs_.assign(request.clientid(), addr);
                     }
 
-                    uint64_t reqKey = request.clientid();
-                    reqKey = ((reqKey << 32) | request.reqid());
+                    uint64_t reqKey = CONCAT_UINT32(request.clientid(), request.reqid());
                     Reply* commitAck = committedReply_.get(reqKey);
                     if (commitAck != NULL && false) {
                         std::string replyStr = commitAck->SerializeAsString();
@@ -320,9 +308,9 @@ namespace nezha
                     }
 
                     forwardCnt++;
-                    // if (forwardCnt % 100 == 0) {
-                    //     LOG(INFO) << "ForwardId=" << id << "\t" << "count =" << forwardCnt;
-                    // }
+                    if (forwardCnt % 1000 == 0) {
+                        VLOG(1) << "ForwardId=" << id << "\t" << "count =" << forwardCnt;
+                    }
                 }
             }
 
@@ -345,6 +333,7 @@ namespace nezha
         replyFds_.resize(shardNum, -1);
         proxyIds_.resize(shardNum, proxyId);
         latencyBound_ = proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>();
+        maxOWD_ = proxyConfig_["proxy-info"]["max-owd"].as<uint32_t>();
         for (int i = 0; i < shardNum; i++) {
             forwardFds_[i] = CreateSocketFd(sip, replyPortBase + i);
             requestReceiveFds_[i] = CreateSocketFd(sip, requestPortBase + i);

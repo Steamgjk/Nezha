@@ -33,9 +33,9 @@ namespace nezha {
     class Client
     {
     private:
-        /* data */
         std::map<std::string, std::thread*>threadPool_;
         YAML::Node clientConfig_;
+        /** The endpoint to send requests */
         UDPSocketEndpoint* requestEP_;
         struct MsgHandlerStruct* replyHandler_;
         struct TimerStruct* monitorTimer_;
@@ -52,7 +52,8 @@ namespace nezha {
         std::vector<uint32_t> zipfianKeys_;
         ConcurrentMap<uint32_t, Request*> outstandingRequests_;
         ConcurrentMap<uint32_t, uint64_t> outstandingRequestSendTime_;
-        ConcurrentQueue<LogInfo*> logQu_; // for log
+        /** To communicate between ProcessReplyTd and LogTd */
+        ConcurrentQueue<LogInfo*> logQu_;
         uint32_t retryTimeoutus_;
 
         void LaunchThreads();
