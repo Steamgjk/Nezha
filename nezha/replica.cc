@@ -18,7 +18,7 @@ namespace nezha {
         else {
             status_ = ReplicaStatus::NORMAL;
         }
-        LOG(WARNING) << "Replica Status " << status_;
+        LOG(INFO) << "Replica Status " << status_;
         PrintConfig();
         CreateContext();
         LOG(INFO) << "viewId_=" << viewId_
@@ -49,7 +49,6 @@ namespace nezha {
             if (!AmLeader()) {
                 masterContext_.endPoint_->RegisterTimer(heartbeatCheckTimer_);
             }
-            // TODO: Register periodicSyncTimer_
             masterContext_.endPoint_->RegisterTimer(periodicSyncTimer_);
         }
         // Launch worker threads (based on config)
@@ -125,8 +124,8 @@ namespace nezha {
         maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1); //
         maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-        unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+        toCommitLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
 
         // Create master endpoints and context
@@ -349,11 +348,10 @@ namespace nezha {
 
         minUnSyncedLogIdByKey_.clear();
         maxUnSyncedLogIdByKey_.clear();
-        unsyncedLogIdByKeyToClear_.clear();
         minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-        unsyncedLogIdByKeyToClear_.resize(keyNum_, CONCURRENT_MAP_START_INDEX);
         committedLogId_.store(maxSyncedLogId_.load());
+        toCommitLogId_.store(maxSyncedLogId_.load());
 
         // Reset lastReleasedEntryByKeys_, no need to care about UnSyncedLogs, because they are all cleared
         for (uint32_t key = 0; key < keyNum_; key++) {
@@ -680,7 +678,6 @@ namespace nezha {
                             std::pair<uint64_t, uint64_t>myEntry(rb->deadline, rb->reqKey);
 
                             if (myEntry > lastReleasedEntryByKeys_[rb->opKey]) {
-                                // unsyncedRequestMap_.assign(rb->reqKey, rb); // Obsolete
                                 earlyBuffer_[myEntry] = rb;
                             }
                             else {
@@ -1155,13 +1152,14 @@ namespace nezha {
                 }
 
                 LogEntry* entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
-                // syncedRequestMap_.assign(reqKey, req); // obsolete
                 syncedReq2LogId_.assign(reqKey, logId);
                 syncedEntries_.assign(logId, entry);
-                // opKeyAndId = CONCAT_UINT32(rb->opKey, logId);
-                // syncedEntriesByKey_.assign(opKeyAndId, entry);
                 maxSyncedLogIdByKey_[rb->opKey] = logId;
                 maxSyncedLogId_++;
+                // try to update committedLogId_
+                if (maxSyncedLogId_ <= toCommitLogId_ && committedLogId_ < maxSyncedLogId_) {
+                    committedLogId_.store(maxSyncedLogId_.load());
+                }
                 // Chunk UnSynced logs
                 uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[rb->opKey];
                 if (minUnSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
@@ -1175,7 +1173,6 @@ namespace nezha {
                     }
                     // LOG(INFO) << "minUnSyncedLogId=" << minUnSyncedLogId;
                     minUnSyncedLogIdByKey_[rb->opKey] = minUnSyncedLogId;
-
                 }
 
             }
@@ -1271,20 +1268,7 @@ namespace nezha {
             missedReqMsg.set_replicaid(this->replicaId_);
             for (int i = 0; i < askReqMsg.missedreqkeys_size(); i++) {
                 uint64_t reqKey = askReqMsg.missedreqkeys(i);
-                // Request* req = syncedRequestMap_.get(reqKey);
-                // if (req == NULL) {
-                //     // Cannot find in syncedRequestMap_, try in unsyncedRequestMap_
-                //     req = unsyncedRequestMap_.get(reqKey);
-                // }
-
-                // Don't try late buffer (GarbageCollectTd may be relclaiming it)
-                // if (req) {
-                //     // the req is found
-                //     missedReqMsg.add_reqs()->CopyFrom(*req);
-                // }
-
                 uint32_t logId = syncedReq2LogId_.get(reqKey);
-
                 if (logId >= CONCURRENT_MAP_START_INDEX) {
                     // the req is found
                     LogEntry* entry = syncedEntries_.get(logId);
@@ -2192,28 +2176,6 @@ namespace nezha {
 
             }
         }
-
-        // Rewind  syncedReq2LogId_, syncedEntriesByKey_ and maxSyncedLogIdByKey_
-        // for (const uint32_t& opKey : keysToClear) {
-        //     while (maxSyncedLogIdByKey_[opKey] >= CONCURRENT_MAP_START_INDEX) {
-        //         uint64_t opKeyAndId = CONCAT_UINT32(opKey, maxSyncedLogIdByKey_[opKey]);
-        //         LogEntry* entry = syncedEntriesByKey_.get(opKeyAndId);
-        //         ASSERT(entry != NULL);
-        //         uint32_t logId = syncedReq2LogId_.get(entry->body.reqKey);
-        //         if (logId > maxSyncedLogId_) {
-        //             // Should be cleared
-        //             syncedReq2LogId_.erase(entry->body.reqKey);
-        //             // syncedEntriesByKey_.erase(opKeyAndId);
-        //             delete entry;
-        //             maxSyncedLogIdByKey_[opKey]--;
-        //         }
-        //         else {
-        //             // We have completely cleared the entries that go beyond the maxSyncedLogId_
-        //             // Break the while loop and go to clear the next key
-        //             break;
-        //         }
-        //     }
-        // }
     }
 
     void Replica::ProcessStartView(const StartView& startView) {
@@ -2522,8 +2484,12 @@ namespace nezha {
         // LOG(INFO) << "commit " << commit.DebugString();
         // Buggy: should compare with syncedLogId, to see whether log is missing
         if (commit.committedlogid() > committedLogId_) {
-            committedLogId_ = commit.committedlogid();
+            // Don't assign committedLogId_ directly, because this replica may have not get enough synced logs
+            toCommitLogId_ = commit.committedlogid();
             // LOG(INFO) << "committedLogId_=" << committedLogId_;
+        }
+        if (commit.committedlogid() >= maxSyncedLogId_) {
+            committedLogId_ = commit.committedlogid();
         }
     }
 

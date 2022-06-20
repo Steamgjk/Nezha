@@ -137,7 +137,7 @@ struct RequestBody {
 struct LogEntry {
     // Request Body
     RequestBody body;
-    // Other atttributes
+    /** Other atttributes */
     SHA_HASH myhash; // the hash value of this entry
     SHA_HASH hash; // the accumulative hash
     uint32_t prevLogId; // The log id of the next non-commutative request, initialized as 0
