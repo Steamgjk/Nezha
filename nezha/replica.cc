@@ -14,6 +14,7 @@ namespace nezha {
         replicaConfig_ = YAML::LoadFile(configFile);
         if (isRecovering) {
             status_ = ReplicaStatus::RECOVERING;
+            LOG(INFO) << "Recovering ...";
         }
         else {
             status_ = ReplicaStatus::NORMAL;
@@ -490,6 +491,8 @@ namespace nezha {
         threadPool_["OWDCalcTd"] = new std::thread(&Replica::OWDCalcTd, this);
         LOG(INFO) << "Launch  OWDCalcTd " << threadPool_["OWDCalcTd"]->native_handle();
 
+        LOG(INFO) << "Master Thread " << pthread_self();
+
         LOG(INFO) << "totalWorkerNum_=" << totalWorkerNum_;
 
 
@@ -603,6 +606,9 @@ namespace nezha {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             bool amLeader = AmLeader();
             if (processQu_.try_dequeue(rb)) {
+                LOG(WARNING) << "Processing..."
+                    << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey) << "\t"
+                    << "maxSyncedLogId=" << maxSyncedLogId_;
                 // LOG(INFO) << "EarlyBuffer Size " << earlyBuffer_.size();
                 if (amLeader) {
                     uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
@@ -626,6 +632,7 @@ namespace nezha {
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
                         // update proxy id in case the client has changed its proxy
                         entry->body.proxyId = rb->proxyId;
+                        LOG(INFO) << "duplicate " << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey);
                         fastReplyQu_[(roundRobinProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
                         // free this RequestBody
                         delete rb;
@@ -663,7 +670,8 @@ namespace nezha {
                             }
                         }
                         else {
-                            LOG(WARNING) << "duplicated " << duplicateLogIdx;
+                            LOG(WARNING) << "duplicated (unsynced) " << duplicateLogIdx << "\t"
+                                << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey);
                             // As a very rare case, if the request is duplicate but also unsynced, follower does not handle it, for fear of data race with other threads (e.g. GarbageCollectTd)
                             // But this will not harm liveness, because eventually the request will become synced request, so the former if-branch will handle it and resend a slow reply
                             delete rb;
@@ -982,12 +990,10 @@ namespace nezha {
                     return;
                 }
                 lastHeartBeatTime_ = GetMicrosecondTimestamp();
-                if (idxSyncMsg.logidend() <= maxSyncedLogId_) {
-                    // Useless message
-                    return;
+                if (idxSyncMsg.logidend() > maxSyncedLogId_) {
+                    std::pair<uint32_t, uint32_t> key(idxSyncMsg.logidbegin(), idxSyncMsg.logidend());
+                    pendingIndexSync_[key] = idxSyncMsg;
                 }
-                std::pair<uint32_t, uint32_t> key(idxSyncMsg.logidbegin(), idxSyncMsg.logidend());
-                pendingIndexSync_[key] = idxSyncMsg;
                 // Process pendingIndexSync, if any
                 while (!pendingIndexSync_.empty()) {
                     if (ProcessIndexSync(pendingIndexSync_.begin()->second)) {
@@ -1005,10 +1011,12 @@ namespace nezha {
                 for (int i = 0; i < missedReqMsg.reqs().size(); i++) {
                     const RequestBodyMsg& rbMsg = missedReqMsg.reqs(i);
                     if (missedReqKeys_.find(rbMsg.reqkey()) != missedReqKeys_.end()) {
+
                         RequestBody* rb = new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(), rbMsg.command());
                         // We must handle it to ProcessTd instead of processing it here, to avoid data race (and further memroy leakage), although it is a trivial possibility
+
                         processQu_.enqueue(rb);
-                        missedReqKeys_.erase(rb->reqKey);
+                        missedReqKeys_.erase(rbMsg.reqkey());
                         if (missedReqKeys_.empty()) {
                             // Can stop the timer now
                             indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
@@ -1083,39 +1091,51 @@ namespace nezha {
 
             if (rb) {
                 // Find the request locally
-                SHA_HASH myHash = CalculateHash(deadline, reqKey);
-                SHA_HASH hash(myHash);
-                uint32_t prevLogId = 0;
-                if (maxSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
-                    // This request has some pre non-commutative ones
-                    // In that way, XOR the previous accumulated hash
-                    prevLogId = maxSyncedLogIdByKey_[rb->opKey];
-                    ASSERT(syncedEntries_.get(prevLogId) != NULL);
-                    const SHA_HASH& prev = syncedEntries_.get(prevLogId)->hash;
-                    hash.XOR(prev);
-                }
-
-                LogEntry* entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
-                syncedReq2LogId_.assign(reqKey, logId);
-                syncedEntries_.assign(logId, entry);
-                maxSyncedLogIdByKey_[rb->opKey] = logId;
-                maxSyncedLogId_++;
-
-                // Chunk UnSynced logs
-                uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[rb->opKey];
-                if (minUnSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
-                    // Try to advance  minUnSyncedLogIdByKey_[opKey]
-                    LogEntry* unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
-                    ASSERT(unSyncedEntry != NULL);
-                    while (unSyncedEntry->LessOrEqual(*entry) && unSyncedEntry->nextLogId < UINT32_MAX) {
-                        minUnSyncedLogId = unSyncedEntry->nextLogId;
-                        unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
-                        ASSERT(unSyncedEntry != NULL);
+                if (missedReqKeys_.empty()) {
+                    // No missing entries, can continue to build the synced log lists
+                    // Otherwise, only keep traversing to see how many requests are missing and put the missing reqKeys in missedReqKeys_
+                    SHA_HASH myHash = CalculateHash(deadline, reqKey);
+                    SHA_HASH hash(myHash);
+                    uint32_t prevLogId = 0;
+                    if (maxSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
+                        // This request has some pre non-commutative ones
+                        // In that way, XOR the previous accumulated hash
+                        prevLogId = maxSyncedLogIdByKey_[rb->opKey];
+                        ASSERT(syncedEntries_.get(prevLogId) != NULL);
+                        const SHA_HASH& prev = syncedEntries_.get(prevLogId)->hash;
+                        hash.XOR(prev);
                     }
-                    // LOG(INFO) << "minUnSyncedLogId=" << minUnSyncedLogId;
-                    minUnSyncedLogIdByKey_[rb->opKey] = minUnSyncedLogId;
-                }
 
+                    LogEntry* entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
+                    ASSERT(entry != NULL);
+                    syncedReq2LogId_.assign(reqKey, logId);
+                    syncedEntries_.assign(logId, entry);
+                    maxSyncedLogIdByKey_[rb->opKey] = logId;
+                    maxSyncedLogId_++;
+                    // For debug
+                    if (viewId_ == 1) {
+                        LogEntry* test = syncedEntries_.get(maxSyncedLogId_);
+                        if (test == NULL) {
+                            LOG(INFO) << "logId=" << logId << "\t" << maxSyncedLogId_;
+                        }
+                        ASSERT(test != NULL);
+                    }
+
+                    // Chunk UnSynced logs
+                    uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[rb->opKey];
+                    if (minUnSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
+                        // Try to advance  minUnSyncedLogIdByKey_[opKey]
+                        LogEntry* unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
+                        ASSERT(unSyncedEntry != NULL);
+                        while (unSyncedEntry->LessOrEqual(*entry) && unSyncedEntry->nextLogId < UINT32_MAX) {
+                            minUnSyncedLogId = unSyncedEntry->nextLogId;
+                            unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
+                            ASSERT(unSyncedEntry != NULL);
+                        }
+                        // LOG(INFO) << "minUnSyncedLogId=" << minUnSyncedLogId;
+                        minUnSyncedLogIdByKey_[rb->opKey] = minUnSyncedLogId;
+                    }
+                }
             }
             else {
                 missedReqKeys_.insert(reqKey);
@@ -1273,6 +1293,9 @@ namespace nezha {
             }
         }
         if (askReqMsg.missedreqkeys_size() > 0) {
+            uint64_t reqKey = askReqMsg.missedreqkeys(0);
+            LOG(INFO) << " targetReplica= " << roundRobinRequestAskIdx_ % replicaNum_ << "\t"
+                << "reqKey=" << (reqKey >> 32) << "\t" << (uint32_t)(reqKey);
             reqRequester_->SendMsgTo(*(requestAskReceiver_[roundRobinRequestAskIdx_ % replicaNum_]), askReqMsg, MessageType::MISSED_REQ_ASK);
             roundRobinRequestAskIdx_++;
             if (roundRobinRequestAskIdx_ % replicaNum_ == replicaId_) {
@@ -1555,6 +1578,7 @@ namespace nezha {
     }
 
     void Replica::InitiateViewChange(const uint32_t view) {
+
         if (viewId_ > view) {
             LOG(ERROR) << "Invalid view change initiation currentView=" << viewId_ << "\ttargetView=" << view;
             return;
@@ -1588,7 +1612,9 @@ namespace nezha {
         // Unregister all timers, except the monitorTimer (so as the master thread can break when status=Terminated)
         masterContext_.endPoint_->UnRegisterAllTimers();
         masterContext_.endPoint_->RegisterTimer(masterContext_.monitorTimer_);
-        LOG(INFO) << "Monitor Timer Registered ";
+        LOG(INFO) << "Monitor Timer Registered "
+            << "viewId=" << viewId_ << "\t"
+            << GetMicrosecondTimestamp();
         // Launch viewChange timer
         masterContext_.endPoint_->RegisterTimer(viewChangeTimer_);
     }
@@ -1875,7 +1901,8 @@ namespace nezha {
     }
 
     void Replica::EnterNewView() {
-        LOG(INFO) << "Enter New View " << viewId_ << " maxSyncedLog =" << maxSyncedLogId_;
+        LOG(INFO) << "Enter New View " << viewId_ << " maxSyncedLog =" << maxSyncedLogId_
+            << "\t" << GetMicrosecondTimestamp();;
         // Leader sends StartView to all the others
         if (AmLeader()) {
             SendStartView(-1);
@@ -2102,6 +2129,7 @@ namespace nezha {
 
             }
         }
+        LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_;
     }
 
     void Replica::ProcessStartView(const StartView& startView) {
@@ -2168,6 +2196,7 @@ namespace nezha {
             if (i == replicaId_) {
                 continue;
             }
+            LOG(INFO) << "Broadcast CV Req ";
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::CRASH_VECTOR_REQUEST);
         }
 
@@ -2396,8 +2425,16 @@ namespace nezha {
         if (toCommitLogId_ < nextCommitId) {
             nextCommitId = toCommitLogId_;
         }
-        while (committedLogId_ <= nextCommitId) {
+        while (committedLogId_ < nextCommitId) {
+            if (committedLogId_ < CONCURRENT_MAP_START_INDEX) {
+                committedLogId_++;
+                continue;
+            }
             LogEntry* entry = syncedEntries_.get(committedLogId_);
+            if (entry == NULL) {
+                LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
+                    << "maxSyncedLogId_=" << maxSyncedLogId_;
+            }
             ASSERT(entry != NULL);
             entry->result = ApplicationExecute(entry->body);
             committedLogId_++;
@@ -2405,14 +2442,19 @@ namespace nezha {
     }
 
     bool Replica::CheckView(const uint32_t view, const bool isMaster) {
-        if (view < this->viewId_) {
+        if (view < viewId_) {
             // old message
             return false;
         }
-        if (view > this->viewId_) {
+        if (view > viewId_) {
             if (isMaster) {
-                VLOG(2) << "InitiateViewChange-9";
-                InitiateViewChange(view);
+                if (status_ != ReplicaStatus::RECOVERING) {
+                    // Recovering replicas do not participate in view change
+                    VLOG(2) << "InitiateViewChange-9: " << view
+                        << "\t currentView=" << viewId_ << "\t"
+                        << "td=" << pthread_self();
+                    InitiateViewChange(view);
+                }
             }
             else {
                 // new view, update status and wait for master thread to handle the situation

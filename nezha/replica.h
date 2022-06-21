@@ -142,7 +142,8 @@ namespace nezha {
         /** The sync messages (for index sync process) which have not been processed */
         std::map<std::pair<uint32_t, uint32_t>, IndexSync> pendingIndexSync_;
         /** Each key in missedReqKeys_ indicating a request is missing on this replica */
-        std::set<uint32_t> missedReqKeys_;
+        std::set<uint64_t> missedReqKeys_;
+
         /** Each pair indicates a segment of indices is missing during index sync process */
         std::pair<uint32_t, uint32_t> missedIndices_;
 
