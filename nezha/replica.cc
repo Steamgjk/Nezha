@@ -608,7 +608,8 @@ namespace nezha {
             if (processQu_.try_dequeue(rb)) {
                 LOG(WARNING) << "Processing..."
                     << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey) << "\t"
-                    << "maxSyncedLogId=" << maxSyncedLogId_;
+                    << "maxSyncedLogId=" << maxSyncedLogId_ << "\t"
+                    << "committedLogId=" << committedLogId_;
                 // LOG(INFO) << "EarlyBuffer Size " << earlyBuffer_.size();
                 if (amLeader) {
                     uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
@@ -642,6 +643,10 @@ namespace nezha {
                     uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
                     if (duplicateLogIdx > 0) {
                         // Duplicate: resend slow-reply for this request
+                        LOG(INFO) << "Duplicate Resend Slow-Reply " << "\t"
+                            << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey) << "\t"
+                            << "maxSyncedLogId=" << maxSyncedLogId_ << "\t"
+                            << "committedLogId=" << committedLogId_;
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
                         entry->body.proxyId = rb->proxyId;
                         slowReplyQu_[(roundRobinProcessIdx_++) % slowReplyQu_.size()].enqueue(entry);

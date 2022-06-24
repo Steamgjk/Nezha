@@ -180,22 +180,23 @@ namespace nezha
                 }
                 if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
                     replyNum++;
-                    if (replyNum % 1000 == 0) {
+                    if (replyNum % 100 == 0) {
                         VLOG(1) << "id=" << id << "\t" << "replyNum=" << replyNum;
                     }
                     uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
                     if (reply.owd() > 0) {
                         owdQu_.enqueue(std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
                     }
-                    if (committedReply_.get(reqKey) != NULL) {
-                        // already committed;  ignore this repluy
+
+                    committedAck = committedReply_.get(reqKey);
+                    if (committedAck != NULL) {
+                        // already committed;  ignore
                         continue;
                     }
-                    committedAck = NULL;
+
                     if (reply.replytype() == (uint32_t)MessageType::COMMIT_REPLY) {
                         committedAck = new Reply(reply);
                         committedReply_.assign(reqKey, committedAck);
-
                     }
                     else if (replyQuorum[reqKey].find(reply.replicaid()) == replyQuorum[reqKey].end()) {
                         replyQuorum[reqKey][reply.replicaid()] = reply;
@@ -295,7 +296,7 @@ namespace nezha
 
                     uint64_t reqKey = CONCAT_UINT32(request.clientid(), request.reqid());
                     Reply* commitAck = committedReply_.get(reqKey);
-                    if (commitAck != NULL && false) {
+                    if (commitAck != NULL) {
                         std::string replyStr = commitAck->SerializeAsString();
                         sendto(requestReceiveFds_[id], replyStr.c_str(), replyStr.length(), 0, (struct sockaddr*)&receiverAddr, len);
                         continue;
@@ -308,7 +309,7 @@ namespace nezha
                     }
 
                     forwardCnt++;
-                    if (forwardCnt % 1000 == 0) {
+                    if (forwardCnt % 100 == 0) {
                         VLOG(1) << "ForwardId=" << id << "\t" << "count =" << forwardCnt;
                     }
                 }

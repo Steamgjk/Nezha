@@ -3,7 +3,7 @@ print-config: true
 proxy-info:
   proxy-ips:
     - "127.0.0.4"
-  proxy-shards: 1
+  proxy-shards: 2
   request-port-base: 32000
 client-info:
   client-id: 1
