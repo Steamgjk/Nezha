@@ -252,7 +252,6 @@ namespace nezha {
                     Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()][mapIdx / proxyAddrs_.size()];
                     requestEP_->SendMsgTo(*roundRobinAddr, requestStr);
                     outstandingRequestSendTime_.assign(request->reqid(), GetMicrosecondTimestamp());
-                    nextReqId_++;
                     roundRobinIdx++;
                 }
             }
@@ -291,7 +290,10 @@ namespace nezha {
             if (logQu_.try_dequeue(log)) {
                 // erase the footprint of commited requests
                 outstandingRequestSendTime_.erase(log->reqId);
-                while (committedReqId_ + 1 < log->reqId) {
+
+                // LOG(INFO) << "committedReqId_=" << committedReqId_ << "\t" << "reqId=" << log->reqId;
+
+                while (committedReqId_ + 1 <= log->reqId) {
                     if (outstandingRequestSendTime_.get(committedReqId_ + 1) == 0) {
                         // this reqId has also been committed (i.e. cannot find its footprint)
                         // advance committedReqId;
@@ -317,6 +319,7 @@ namespace nezha {
                     if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
                         // timeout, should retry
                         Request* request = outstandingRequests_.get(reqId);
+                        LOG(INFO) << "Timeout Retry " << request->reqid();
                         outstandingRequestSendTime_.erase(reqId);
                         retryQu_.enqueue(request);
                     }
@@ -332,7 +335,6 @@ namespace nezha {
                     delete request;
                 }
                 reclaimedReqId_++;
-
             }
         }
     }

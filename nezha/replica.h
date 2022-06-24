@@ -162,6 +162,9 @@ namespace nezha {
         std::uint64_t stateTransferTerminateTime_;
         /** If the state transfer cannot be completed within  stateTransferTerminateTime_, execute the following callback and terminate the state transfer */
         std::function<void(void)> stateTransferTerminateCallback_;
+        std::vector<uint32_t> filterUnSyncedLogIds_;
+
+
 
         /** Used for log merge to build new logs. Key: <deadline, reqKey>; Value: <request, the number of remaining replicas containing this request>  */
         std::map<std::pair<uint64_t, uint64_t>, std::pair<RequestBody*, uint32_t>> requestsToMerge_;
