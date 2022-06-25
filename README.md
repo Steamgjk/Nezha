@@ -65,7 +65,7 @@ Stale files and experiemental files are put into archive folder, and will be del
 Currently, we provide two ways of compiling/building Nezha
 
 ### Makefile
-The Makefile building system follows the same style as NOPaxos codebase [[NOPaxos Codebase](https://github.com/UWSysLab/NOPaxos)]. There is a main Makefile at the top level of folder. 
+The Makefile building system follows the same style as [NOPaxos Codebase](https://github.com/UWSysLab/NOPaxos). There is a main Makefile at the top level of folder. 
 
 ```
     cd nezhav2 && make
@@ -104,11 +104,32 @@ GLOG_v=2 nezhav2/bazel-bin/nezha_proxy --config nezhav2/configs/nezha-proxy-conf
 GLOG_v=2 nezhav2/bazel-bin/nezha_client  --config nezhav2/configs/nezha-client-config.yaml
 
 
+# Kill 1 replica (the leader, Replica-0), Crtl+C 
+
+# We can see the remaining 2 replicas do the view change.
+# The 2 replicas enter a new view (viewId=1), with Replica-1 as the leader
+
+# Relaunch Replica-0 to rejoin as one follower
+GLOG_v=2 nezhav2/bazel-bin/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+
+# Add the flag --isRecovering true to indicate it is recovering
+
 ```
 
 
-## Some Important Configuration Parameters
-To be continued
+## Important Configuration Parameters
+### Replica
+- replica-ips must include 2f+1 ips
+- replica-id starts from 0 to 2f
+- index-transfer-batch, request-key-transfer-batch, request-transfer-batch. The values of the three <em>batch parameters</em> should be carefully chosen in order not to overflow the [maximum size of UDP packets](https://stackoverflow.com/questions/1098897/what-is-the-largest-safe-udp-packet-size-on-the-internet). 
+
+### Client
+- is-openloop: We support two types of clients, i.e., open-loop clients and closed-loop clients. When this flag is true, --poission-rate becomes meaningful.
+- skew-factor and key-number decides the workload, which further affects the commutativity optimization
+
+### Proxy
+- shard-num decides how many threads will be launched. 1 shard includes 1 forwarding thread to forward client requests to replicas and 1 replying thread to receive and replies from replicas and does quorum check
+- max-owd  is used in the clamping function to estimate one-way delay, more details are described in Sec 4 [Adpative latency bound] of the paper.
 
 
 ## Authors and Acknowledgment
