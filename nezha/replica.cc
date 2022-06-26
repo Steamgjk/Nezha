@@ -2229,7 +2229,7 @@ namespace nezha {
             if (i == replicaId_) {
                 continue;
             }
-            LOG(INFO) << "Broadcast CV Req ";
+            LOG(INFO) << "Broadcast CV Req to Replica " << i;
             masterContext_.endPoint_->SendMsgTo(*(masterReceiver_[i]), request, MessageType::CRASH_VECTOR_REQUEST);
         }
 

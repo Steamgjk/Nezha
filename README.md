@@ -91,17 +91,17 @@ In the following sections, we assume the users are using bazel to build the syst
 ```
 # Launch one beefy machine (e.g., with 16 or 32 CPUs)
 # Launch 3 replicas (All the configuration info is written in ONE yaml file)
-GLOG_v=2 nezhav2/bazel-bin/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml
-GLOG_v=2 nezhav2/bazel-bin/nezha_replica --config nezhav2/configs/nezha-replica-config-1.yaml
-GLOG_v=2 nezhav2/bazel-bin/nezha_replica --config nezhav2/configs/nezha-replica-config-2.yaml
+GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml
+GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-1.yaml
+GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-2.yaml
 
 # GLOG_v is the flag provided by glog, which allows users to specify the verbose level of logs. It can be completely removed if the user does not want to see too many logs
 
 # Launch 1 proxy
-GLOG_v=2 nezhav2/bazel-bin/nezha_proxy --config nezhav2/configs/nezha-proxy-config.yaml
+GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_proxy --config nezhav2/configs/nezha-proxy-config.yaml
 
 # Lauch 1 client
-GLOG_v=2 nezhav2/bazel-bin/nezha_client  --config nezhav2/configs/nezha-client-config.yaml
+GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_client  --config nezhav2/configs/nezha-client-config.yaml
 
 
 # Kill 1 replica (the leader, Replica-0), Crtl+C 
@@ -110,7 +110,7 @@ GLOG_v=2 nezhav2/bazel-bin/nezha_client  --config nezhav2/configs/nezha-client-c
 # The 2 replicas enter a new view (viewId=1), with Replica-1 as the leader
 
 # Relaunch Replica-0 to rejoin as one follower
-GLOG_v=2 nezhav2/bazel-bin/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
 
 # Add the flag --isRecovering true to indicate it is recovering
 
@@ -130,6 +130,25 @@ GLOG_v=2 nezhav2/bazel-bin/nezha_replica --config nezhav2/configs/nezha-replica-
 ### Proxy
 - shard-num decides how many threads will be launched. 1 shard includes 1 forwarding thread to forward client requests to replicas and 1 replying thread to receive and replies from replicas and does quorum check
 - max-owd  is used in the clamping function to estimate one-way delay, more details are described in Sec 4 [Adpative latency bound] of the paper.
+
+## One-Box Demo
+First, launch 3 replicas and 1 proxy. Each one has its own configuration file, specified with --config
+
+![Initial Launch](figs/initial-launch.png)
+
+Second, launch 1 client (open-loop), we can see the client is committing requests to replicas.
+
+![Client Launch](figs/openloop-client.png)
+
+
+Third, kill the leader replica (replica-0) with Crtl+C, then we can see (1) the other two replicas will start a view change and finally enter the new view (view-1) (2) the client experiences service unavailability (cannot commit requests), but finally can continue to commit requests after replicas complete view change.
+
+![View Change](figs/kill-replica.png)
+
+Last, we want to the killed replica to rejoin the system, so we specify the flag --isRecovering true.
+
+![Replica Rejoin](figs/replica-rejoin.png)
+
 
 
 ## Authors and Acknowledgment
