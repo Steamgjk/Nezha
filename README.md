@@ -133,6 +133,9 @@ Please refer to [more detailed instructions](demo.md) to run the one-box demo.
 - shard-num decides how many threads will be launched. 1 shard includes 1 forwarding thread to forward client requests to replicas and 1 replying thread to receive and replies from replicas and does quorum check
 - max-owd  is used in the clamping function to estimate one-way delay, more details are described in Sec 4 [Adpative latency bound] of the paper.
 
+## Performance Benchmark
+To be continued
+
 
 ## Authors and Acknowledgment
 Show your appreciation to those who have contributed to the project.
