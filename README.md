@@ -145,11 +145,16 @@ Third, kill the leader replica (replica-0) with Crtl+C, then we can see (1) the 
 
 ![View Change](figs/kill-replica.png)
 
-Last, we want to the killed replica to rejoin the system, so we specify the flag --isRecovering true.
+Last, we want the killed replica to rejoin the system, so we specify the flag --isRecovering true.
 
 ![Replica Rejoin](figs/replica-rejoin.png)
 
 
+Note: The time cost for the replicas to rejoin the system depends on how many logs have been committed. 
+
+![Rejoin Complete](figs/rejoin-complete.png)
+
+In this demo, there have already been 4387 logs committed, the rejoining replica needs to complete the state transfer of 4387 logs before it can recover, which may take several seconds. A possible optimization is to let replicas periodically dump snapshots to disk. In this way, when a crashed replica rejoin the system, it can first recover some state from the local disk, instead of doing state transfer from scratch.
 
 ## Authors and Acknowledgment
 Show your appreciation to those who have contributed to the project.
