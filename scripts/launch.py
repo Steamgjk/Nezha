@@ -2,9 +2,11 @@ import os
 import subprocess
 from subprocess import PIPE, Popen
 import time
+import ruamel.yaml
 from termcolor import colored
 
-
+LOGIN_PATH = "/home/steam1994"
+TAG = "opensource-test"
 SSH_KEY = "/home/steam1994/.ssh/id_rsa"
 ssh_identity = '-i {}'.format(SSH_KEY) if SSH_KEY else ''
 # Prefix for SSH and SCP.
@@ -16,7 +18,7 @@ USERNAME = "steam1994"
 CMD_RETRY_TIMES = 3
 
 
-def generate_cfg_file(internal_ip, is_reference=False, use_ntp=False):
+def generate_ttcs_cfg_file(internal_ip, is_reference=False, use_ntp=False):
     if is_reference:
         content_str = '''management_address: "InternalIP"
 log_dir: "/var/opt/ttcs/log"
@@ -78,7 +80,7 @@ def start_ttcs_node(internal_ip, is_reference, use_ntp=False):
     #install_deb_cmd = "sudo dpkg -i /root/ttcs-agent_1.0.12_amd64.deb"
     run_command([internal_ip], install_deb_cmd, in_background=False)
 
-    cfg_file = generate_cfg_file(internal_ip, is_reference, use_ntp)
+    cfg_file = generate_ttcs_cfg_file(internal_ip, is_reference, use_ntp)
     local_file_path = "./ttcs-agent.cfg"
     remote_dir = "/etc/opt/ttcs"
     remote_path = remote_dir + "/ttcs-agent.cfg"
@@ -322,81 +324,156 @@ def start_instance_list(instance_list, zone="us-central1-a"):
     os.system(start_cmd)
 
 if __name__ == '__main__':
-    # cfg_file_name = generate_cfg_file("10.128.3.79", is_reference=True, use_ntp=False)
-    # print(cfg_file_name)
-
-    # vm_list = ["opensource-test-"+str(i).zfill(4) for i in range(vm_num) ]
-    # instance_name = "{prefix}-{idx}".format(prefix = prefix,
-    #                                     idx=str(idx).zfill(4))
+    num_replicas = 3
+    num_proxies = 1
+    num_clients = 1
     
-    vm_list = ["opensource-test-replica-0", "opensource-test-replica-1", 
-                "opensource-test-replica-2", "opensource-test-proxy-0",
-                "opensource-test-client-0",   "opensource-test-client-1" 
-    ]
-    machine_types = [
-        "n1-standard-8", "n1-standard-8",
-        "n1-standard-8", "n1-standard-8",
-        "n1-standard-4", "n1-standard-4"
-    ]
-    vm_num = len(vm_list)
-    custom_ips = ["10.128.2."+str(i+10) for i in range(vm_num)]
+    # cfg_file_name = generate_ttcs_cfg_file("10.128.3.79", is_reference=True, use_ntp=False)
+    
+    replica_ips = ["10.128.2."+str(i+10) for i in range(num_replicas)]
+    proxy_ips = ["10.128.2."+str(i+10) for i in range(num_replicas, num_proxies+num_replicas) ]
+    client_ips = ["10.128.2."+str(i+10) for i in range(num_replicas+num_proxies, num_clients+num_proxies+num_replicas) ]
 
-    # for i in range(vm_num):
-    #     create_instance(instance_name = vm_list[i],
+    replica_name_list = [TAG+"-replica-"+str(i) for i in range(num_replicas) ]
+    proxy_name_list = [ TAG+"-proxy-"+str(i) for i in range(num_proxies) ]
+    client_name_list = [ TAG+"-client-"+str(i) for i in range(num_clients) ]
+
+    vm_ips = replica_ips + proxy_ips + client_ips
+    vm_name_list = replica_name_list + proxy_name_list + client_name_list
+
+    replica_vm_type = "n1-standard-16"
+    proxy_vm_type = "n1-standard-16"
+    client_vm_type = "n1-standard-4"
+
+    binary_path = "{login_path}/nezhav2/bazel-bin/nezha".format(login_path = LOGIN_PATH)
+
+    config_path = "{login_path}/nezhav2/configs".format(login_path = LOGIN_PATH)
+
+    yaml = ruamel.yaml.YAML()
+
+
+
+    # for i in range(num_replicas):
+    #     create_instance(instance_name = replica_name_list[i],
     #                     image= "opensource-nezha",
-    #                     machine_type = machine_types[i],
+    #                     machine_type =  replica_vm_type,
     #                     customzedZone="us-central1-a",
-    #                     customzedIp = custom_ips[i] )
+    #                     customzedIp = replica_ips[i] )
+    #     print(colored("Created "+replica_name_list[i], "green", attrs=['bold']))
+        
     
-    # print(colored("Created "+str(vm_num), "green", attrs=['bold']))
+    # for i in range(num_proxies):
+    #     create_instance(instance_name = proxy_name_list[i],
+    #                     image= "opensource-nezha",
+    #                     machine_type =  proxy_vm_type,
+    #                     customzedZone="us-central1-a",
+    #                     customzedIp = proxy_ips[i] )
+    #     print(colored("Created "+proxy_name_list[i], "green", attrs=['bold']))
+        
+
+    # for i in range(num_clients):
+    #     create_instance(instance_name = client_name_list[i],
+    #                     image= "opensource-nezha",
+    #                     machine_type =  client_vm_type,
+    #                     customzedZone="us-central1-a",
+    #                     customzedIp = client_ips[i] )
+    #     print(colored("Created "+client_name_list[i], "green", attrs=['bold']))
+
     # time.sleep(10)
-    # for i in range(vm_num):
-    #     start_ttcs_node(custom_ips[i],False)
+    # for i in range(len(vm_ips)):
+    #     start_ttcs_node(vm_ips[i],False)
     
-    # del_instance_list(instance_list=vm_list)
-    # start_instance_list(instance_list = vm_list)
-    # launch_ttcs(custom_ips)
+    # del_instance_list(instance_list=vm_name_list)
+    # start_instance_list(instance_list = vm_name_list)
+    # launch_ttcs(vm_ips)
 
-
-    stop_instance_list(instance_list = vm_list)
-    exit(0)
-
-
-
-    custom_ips = custom_ips[0:1] #+ [ custom_ips[3], custom_ips[4] ]
-    vm_list = vm_list[0:1] # + [ vm_list[3], vm_list[4] ]
-    # print(custom_ips)
-    # start_instance_list(instance_list = vm_list)
-    # time.sleep(30)
-    # launch_ttcs(custom_ips)
-
-    # custom_ips = custom_ips[1:2]
-    # vm_list = vm_list[1:2]
-
-    # cmd = "sudo apt-get install libgflags-dev -y"
-    # run_command(custom_ips, cmd, in_background=False)
+    # stop_instance_list(instance_list = vm_name_list)
     # exit(0)
 
 
-    remote_path = "/home/steam1994/nezhav2/.bin/*"
+
+
+    # Generate configs
+    for i in range(num_replicas):
+        config_template = "{config_path}/nezha-replica-config-template.yaml".format(config_path = config_path)
+        config_file =  "{config_path}/nezha-replica-config-{idx}.yaml".format(config_path=config_path, idx =i)
+        f = open(config_template, "r")
+        yaml_data = yaml.load(f)
+        yaml_data["replica-id"] = 1
+        yaml_data["replica-ips"] = replica_ips
+        out_file = open(config_file, "w")
+        yaml.indent(sequence=4, offset=2)
+        yaml.dump(yaml_data, out_file)
+        
+
+    for i in range(num_proxies):
+        config_template = "{config_path}/nezha-proxy-config-template.yaml".format(config_path = config_path)
+        config_file =  "{config_path}/nezha-proxy-config-{idx}.yaml".format(config_path=config_path, idx =i+1)
+        f = open(config_template, "r")
+        yaml_data = yaml.load(f)
+        yaml_data["proxy-info"]["proxy-id"] = i + 1
+        yaml_data["proxy-info"]["proxy-ip"] = proxy_ips[i]
+        yaml_data["replica-info"]["replica-ips"] = replica_ips
+        out_file = open(config_file, "w")
+        yaml.indent(sequence=4, offset=2)
+        yaml.dump(yaml_data, out_file)
+        
+
+    for i in range(num_clients):
+        config_template = "{config_path}/nezha-client-config-template.yaml".format(config_path = config_path)
+        config_file =  "{config_path}/nezha-client-config-{idx}.yaml".format(config_path = config_path, idx= i+1)
+
+        f = open(config_template, "r")
+        yaml_data = yaml.load(f)
+        yaml_data["proxy-info"]["proxy-ips"] = proxy_ips
+        yaml_data["client-info"]["client-id"] = i+1
+        yaml_data["client-info"]["client-ip"] = client_ips[i]
+        out_file = open(config_file, "w")
+        yaml.indent(sequence=4, offset=2)
+        yaml.dump(yaml_data, out_file)
+        
+    exit(0)
+
+
+    remote_path = "{login_path}/nezhav2/bazel-bin/*".format(login_path = LOGIN_PATH)
     rm_cmd = "sudo rm -f {remote_path}".format(remote_path=remote_path)
     run_command(custom_ips, rm_cmd, in_background=False)
 
-    binary_file = "/home/steam1994/nezhav2/.bin/nezha-client"
+    binary_file = "{binary_path}/nezha_client".format(binary_path=binary_path)
     scp_files(custom_ips, binary_file, binary_file, to_remote = True)
 
-    binary_file = "/home/steam1994/nezhav2/.bin/nezha-replica"
+    binary_file = "{binary_path}/nezha-replica"
     scp_files(custom_ips, binary_file, binary_file, to_remote = True)
     
-    binary_file = "/home/steam1994/nezhav2/.bin/nezha-proxy"
+    binary_file = "{binary_path}/nezha-proxy"
     scp_files(custom_ips, binary_file, binary_file, to_remote = True)
 
-    for i in range(3):
-        config_file =  "/home/steam1994/nezhav2/configs/nezha-replica-config-{idx}.yaml".format(idx =i)
-        scp_files(custom_ips, config_file, config_file, to_remote = True)
+    ## Launch replicas (id starts from 0)
+    for i in range(num_replicas):
+        scp_files([replica_ips[i]], config_file, config_file, to_remote = True)
+        replica_cmd = "{binary_path}/nezha_replica --config {config_path}/nezha-replica-config-{idx}.yaml".format(
+            binary_path = binary_path,
+            config_path = config_path,
+            idx  =i 
+        )
+        run_command([replica_ips[i]], replica_cmd, in_background=False)
 
-    config_file =  "/home/steam1994/nezhav2/configs/nezha-proxy-config.yaml"
-    scp_files(custom_ips, config_file, config_file, to_remote = True)
+    # Launch proxies (id starts from 1)
+    for i in range(num_proxies):
+        scp_files([proxy_ips[i]], config_file, config_file, to_remote = True)
+        proxy_cmd = "{binary_path}/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml".format(
+            binary_path = binary_path,
+            config_path = config_path,
+            idx = i+1
+        )
+        run_command([proxy_ips[i]], proxy_cmd, in_background = False)
 
-    config_file =  "/home/steam1994/nezhav2/configs/nezha-client-config.yaml"
-    scp_files(custom_ips, config_file, config_file, to_remote = True)
+    # Launch clients (id starts from 2)
+    for i in range(num_clients):
+        scp_files([client_ips[i]], config_file, config_file, to_remote = True)
+        client_cmd = "{binary_path}/nezha_client --config {config_path}/nezha-client-config-{idx}.yaml".format(
+            binary_path = binary_path,
+            config_path = config_path,
+            idx = i+1
+        ) 
+        run_command([client_ips[i]], client_cmd, in_background = True)
