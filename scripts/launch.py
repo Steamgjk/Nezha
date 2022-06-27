@@ -352,33 +352,6 @@ if __name__ == '__main__':
     yaml = ruamel.yaml.YAML()
 
 
-
-    # for i in range(num_replicas):
-    #     create_instance(instance_name = replica_name_list[i],
-    #                     image= "opensource-nezha",
-    #                     machine_type =  replica_vm_type,
-    #                     customzedZone="us-central1-a",
-    #                     customzedIp = replica_ips[i] )
-    #     print(colored("Created "+replica_name_list[i], "green", attrs=['bold']))
-        
-    
-    # for i in range(num_proxies):
-    #     create_instance(instance_name = proxy_name_list[i],
-    #                     image= "opensource-nezha",
-    #                     machine_type =  proxy_vm_type,
-    #                     customzedZone="us-central1-a",
-    #                     customzedIp = proxy_ips[i] )
-    #     print(colored("Created "+proxy_name_list[i], "green", attrs=['bold']))
-        
-
-    # for i in range(num_clients):
-    #     create_instance(instance_name = client_name_list[i],
-    #                     image= "opensource-nezha",
-    #                     machine_type =  client_vm_type,
-    #                     customzedZone="us-central1-a",
-    #                     customzedIp = client_ips[i] )
-    #     print(colored("Created "+client_name_list[i], "green", attrs=['bold']))
-
     # time.sleep(10)
     # for i in range(len(vm_ips)):
     #     start_ttcs_node(vm_ips[i],False)
