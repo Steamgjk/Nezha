@@ -255,6 +255,13 @@ namespace nezha {
                     roundRobinIdx++;
                 }
             }
+            if (GetMicrosecondTimestamp() >= endTime) {
+                // Client has executed long enough, should terminate
+                LOG(INFO) << "Terminating soon...";
+                sleep(10);
+                running_ = false;
+                return;
+            }
         }
 
     }

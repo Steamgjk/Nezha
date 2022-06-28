@@ -352,13 +352,41 @@ if __name__ == '__main__':
     yaml = ruamel.yaml.YAML()
 
 
-    # time.sleep(10)
+    # for i in range(num_replicas):
+    #     create_instance(instance_name = replica_name_list[i],
+    #                     image= "opensource-nezha",
+    #                     machine_type =  replica_vm_type,
+    #                     customzedZone="us-central1-a",
+    #                     customzedIp = replica_ips[i] )
+    #     print(colored("Created "+replica_name_list[i], "green", attrs=['bold']))
+        
+    
+    # for i in range(num_proxies):
+    #     create_instance(instance_name = proxy_name_list[i],
+    #                     image= "opensource-nezha",
+    #                     machine_type =  proxy_vm_type,
+    #                     customzedZone="us-central1-a",
+    #                     customzedIp = proxy_ips[i] )
+    #     print(colored("Created "+proxy_name_list[i], "green", attrs=['bold']))
+        
+
+    # for i in range(num_clients):
+    #     create_instance(instance_name = client_name_list[i],
+    #                     image= "opensource-nezha",
+    #                     machine_type =  client_vm_type,
+    #                     customzedZone="us-central1-a",
+    #                     customzedIp = client_ips[i] )
+    #     print(colored("Created "+client_name_list[i], "green", attrs=['bold']))
+
+    # time.sleep(60)
     # for i in range(len(vm_ips)):
     #     start_ttcs_node(vm_ips[i],False)
-    
+    # exit(0)
+
     # del_instance_list(instance_list=vm_name_list)
     # start_instance_list(instance_list = vm_name_list)
     # launch_ttcs(vm_ips)
+    # exit(0)
 
     # stop_instance_list(instance_list = vm_name_list)
     # exit(0)
@@ -372,7 +400,7 @@ if __name__ == '__main__':
         config_file =  "{config_path}/nezha-replica-config-{idx}.yaml".format(config_path=config_path, idx =i)
         f = open(config_template, "r")
         yaml_data = yaml.load(f)
-        yaml_data["replica-id"] = 1
+        yaml_data["replica-id"] = i
         yaml_data["replica-ips"] = replica_ips
         out_file = open(config_file, "w")
         yaml.indent(sequence=4, offset=2)
@@ -404,49 +432,81 @@ if __name__ == '__main__':
         out_file = open(config_file, "w")
         yaml.indent(sequence=4, offset=2)
         yaml.dump(yaml_data, out_file)
-        
-    exit(0)
 
+
+    # Copy config
+    for i in range(num_replicas):
+        config_file =  "{config_path}/nezha-replica-config-{idx}.yaml".format(config_path=config_path, idx =i)
+        scp_files([replica_ips[i]], config_file, config_file, to_remote = True)
+
+    for i in range(num_proxies):
+        config_file =  "{config_path}/nezha-proxy-config-{idx}.yaml".format(config_path=config_path, idx =i+1)
+        scp_files([proxy_ips[i]], config_file, config_file, to_remote = True)
+    
+    for i in range(num_clients):
+        config_file =  "{config_path}/nezha-client-config-{idx}.yaml".format(config_path = config_path, idx= i+1)
+        scp_files([client_ips[i]], config_file, config_file, to_remote = True)
+
+    # exit(0)
 
     remote_path = "{login_path}/nezhav2/bazel-bin/*".format(login_path = LOGIN_PATH)
-    rm_cmd = "sudo rm -f {remote_path}".format(remote_path=remote_path)
-    run_command(custom_ips, rm_cmd, in_background=False)
+    rm_cmd = "sudo rm -rf {remote_path}".format(remote_path=remote_path)
+    run_command(vm_ips, rm_cmd, in_background=False)
+
+    mkdir_cmd = "mkdir -p {login_path}/nezhav2/bazel-bin/nezha".format(login_path = LOGIN_PATH)
+    run_command(vm_ips, mkdir_cmd, in_background=False)
 
     binary_file = "{binary_path}/nezha_client".format(binary_path=binary_path)
-    scp_files(custom_ips, binary_file, binary_file, to_remote = True)
+    scp_files(vm_ips, binary_file, binary_file, to_remote = True)
 
-    binary_file = "{binary_path}/nezha-replica"
-    scp_files(custom_ips, binary_file, binary_file, to_remote = True)
+    binary_file = "{binary_path}/nezha_replica".format(binary_path=binary_path)
+    scp_files(vm_ips, binary_file, binary_file, to_remote = True)
     
-    binary_file = "{binary_path}/nezha-proxy"
-    scp_files(custom_ips, binary_file, binary_file, to_remote = True)
+    binary_file = "{binary_path}/nezha_proxy".format(binary_path=binary_path)
+    scp_files(vm_ips, binary_file, binary_file, to_remote = True)
+    
+
+    # Kill existing procs
+    kill_cmd = "sudo pkill -9 replica"
+    run_command(vm_ips, kill_cmd, in_background=False)
+    kill_cmd = "sudo pkill -9 proxy"
+    run_command(vm_ips, kill_cmd, in_background=False)
+    kill_cmd = "sudo pkill -9 client"
+    run_command(vm_ips, kill_cmd, in_background=False)
+
 
     ## Launch replicas (id starts from 0)
     for i in range(num_replicas):
-        scp_files([replica_ips[i]], config_file, config_file, to_remote = True)
-        replica_cmd = "{binary_path}/nezha_replica --config {config_path}/nezha-replica-config-{idx}.yaml".format(
+        replica_cmd = "{binary_path}/nezha_replica --config {config_path}/nezha-replica-config-{idx}.yaml > {log_file} 2>&1 &".format(
             binary_path = binary_path,
             config_path = config_path,
-            idx  =i 
+            idx  =i,
+            log_file = "replica-log-"+str(i) 
         )
+        print(colored(replica_cmd, "yellow", attrs=['bold']))
         run_command([replica_ips[i]], replica_cmd, in_background=False)
 
     # Launch proxies (id starts from 1)
     for i in range(num_proxies):
-        scp_files([proxy_ips[i]], config_file, config_file, to_remote = True)
-        proxy_cmd = "{binary_path}/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml".format(
+        proxy_cmd = "{binary_path}/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml  > {log_file} 2>&1 &".format(
             binary_path = binary_path,
             config_path = config_path,
-            idx = i+1
+            idx = i+1,
+            log_file = "proxy-log-"+str(i+1) 
         )
+        print(colored(proxy_cmd, "yellow", attrs=['bold']))
         run_command([proxy_ips[i]], proxy_cmd, in_background = False)
 
     # Launch clients (id starts from 2)
     for i in range(num_clients):
-        scp_files([client_ips[i]], config_file, config_file, to_remote = True)
-        client_cmd = "{binary_path}/nezha_client --config {config_path}/nezha-client-config-{idx}.yaml".format(
+        client_cmd = "{binary_path}/nezha_client --config {config_path}/nezha-client-config-{idx}.yaml >{log_file} 2>&1 &".format(
             binary_path = binary_path,
             config_path = config_path,
-            idx = i+1
+            idx = i+1,
+            log_file = "client-log-"+str(i+1) 
         ) 
+        print(colored(client_cmd, "yellow", attrs=['bold']))
         run_command([client_ips[i]], client_cmd, in_background = True)
+
+    print("Sleep...")
+    time.sleep(90)
