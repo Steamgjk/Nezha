@@ -13,3 +13,16 @@ rules_proto_dependencies()
 rules_proto_toolchains()
 
 
+http_archive(
+    name = "com_github_grpc_grpc",
+    sha256 = "9f387689b7fdf6c003fd90ef55853107f89a2121792146770df5486f0199f400",
+    urls = [
+        "https://github.com/grpc/grpc/archive/refs/tags/v1.42.0.zip",
+    ],
+    strip_prefix = "grpc-1.42.0",
+)
+load("@com_github_grpc_grpc//bazel:grpc_deps.bzl", "grpc_deps")
+grpc_deps()
+load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
+grpc_extra_deps()
+

@@ -388,8 +388,8 @@ if __name__ == '__main__':
     # launch_ttcs(vm_ips)
     # exit(0)
 
-    # stop_instance_list(instance_list = vm_name_list)
-    # exit(0)
+    stop_instance_list(instance_list = vm_name_list)
+    exit(0)
 
 
 

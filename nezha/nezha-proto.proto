@@ -147,3 +147,5 @@ message CommitInstruction {
     uint32 replicaid = 3;
     uint32 committedlogid = 4;
 }
+
+
