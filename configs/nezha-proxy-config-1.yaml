@@ -12,7 +12,7 @@ replica-info:
 proxy-info:
   proxy-id: 1
   proxy-ip: 10.128.2.13
-  shard-num: 1
-  max-owd: 80
+  shard-num: 4
+  max-owd: 200
   request-port-base: 32000
   reply-port-base: 33000

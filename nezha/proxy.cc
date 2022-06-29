@@ -166,6 +166,7 @@ namespace nezha
         Reply reply;
         Reply* committedAck = NULL;
         uint32_t replyNum = 0;
+        uint64_t startTime, endTime;
         while (running_) {
             if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
                 if ((uint32_t)sz <= sizeof(MessageHeader)) {
@@ -179,10 +180,8 @@ namespace nezha
                     continue;
                 }
                 if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
-                    replyNum++;
-                    if (replyNum % 100 == 0) {
-                        VLOG(1) << "id=" << id << "\t" << "replyNum=" << replyNum;
-                    }
+
+
                     uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
                     if (reply.owd() > 0) {
                         owdQu_.enqueue(std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
@@ -228,6 +227,18 @@ namespace nezha
                         // Add to cache
                         committedReply_.assign(reqKey, committedAck);
                         replyQuorum.erase(reqKey);
+                        replyNum++;
+                        if (replyNum == 1) {
+                            startTime = GetMicrosecondTimestamp();
+                        }
+                        else if (replyNum % 10000 == 0) {
+                            endTime = GetMicrosecondTimestamp();
+                            float rate = 10000 / ((endTime - startTime) * 1e-6);
+                            LOG(INFO) << "id=" << id << "\t"
+                                << "replyNum=" << replyNum << "\t"
+                                << "rate = " << rate;
+                            startTime = endTime;
+                        }
                     }
                 }
 
@@ -273,6 +284,7 @@ namespace nezha
         socklen_t len = sizeof(receiverAddr);
         Request request;
         uint32_t forwardCnt = 0;
+        uint64_t startTime, endTime;
         while (running_) {
             if (stopForwarding_) {
                 // TODO: Ack some signal back to clients
@@ -309,8 +321,16 @@ namespace nezha
                     }
 
                     forwardCnt++;
-                    if (forwardCnt % 100 == 0) {
-                        VLOG(1) << "ForwardId=" << id << "\t" << "count =" << forwardCnt;
+                    if (forwardCnt == 1) {
+                        startTime = GetMicrosecondTimestamp();
+                    }
+                    else if (forwardCnt % 10000 == 0) {
+                        endTime = GetMicrosecondTimestamp();
+                        float rate = 10000 / ((endTime - startTime) * 1e-6);
+                        LOG(INFO) << "ForwardId=" << id << "\t"
+                            << "count =" << forwardCnt << "\t"
+                            << "rate=" << rate;
+                        startTime = endTime;
                     }
                 }
             }

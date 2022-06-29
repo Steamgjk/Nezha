@@ -64,6 +64,8 @@ namespace nezha {
         committedReqId_ = 0;
         reclaimedReqId_ = 0;
         nextReqId_ = 1;
+        retryNumber_ = 0;
+        committedNum_ = 0;
 
     }
 
@@ -135,16 +137,18 @@ namespace nezha {
         }
         Reply reply;
         if (reply.ParseFromArray(msgBuffer, bufferLen)) {
-            Request* request = outstandingRequests_.get(reply.reqid());
-            if (request) {
+            committedNum_++;
+            uint64_t sendTime = outstandingRequestSendTime_.get(reply.reqid());
+            if (sendTime > 0) {
+                // Still Outstanding
                 LogInfo* log = new LogInfo();
                 *log = { reply.reqid(),
-                        outstandingRequestSendTime_.get(reply.reqid()),
+                        sendTime,
                         GetMicrosecondTimestamp(),
                         reply.replytype() };
+                outstandingRequestSendTime_.erase(reply.reqid());
                 logQu_.enqueue(log);
             }
-
         }
     }
 
@@ -153,6 +157,8 @@ namespace nezha {
         uint64_t startTime = GetMicrosecondTimestamp();
         uint64_t endTime = startTime + clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
 
+        endTime += 10 * 1000ul * 1000ul;
+        LOG(INFO) << "expected to end at " << endTime;
         // Poisson rate is ``10ms as one unit''
         for (uint32_t i = 0; i < clientConfig_["client-info"]["duration-sec"].as<uint32_t>() * 100; i++) {
             if (!running_) {
@@ -162,6 +168,12 @@ namespace nezha {
                 while (suspending_) {
                     usleep(1000);
                 }
+            }
+            if (GetMicrosecondTimestamp() >= endTime) {
+                // Client has executed long enough, should terminate
+                LOG(INFO) << "Terminating soon...";
+                running_ = false;
+                return;
             }
             uint32_t reqNum = poissonTrace_[i % poissonTrace_.size()];
             if (reqNum <= 0) {
@@ -197,18 +209,17 @@ namespace nezha {
                     outstandingRequestSendTime_.assign(request->reqid(), GetMicrosecondTimestamp());
                     nextReqId_++;
                     roundRobinIdx++;
-
                 }
 
             }
-            if (GetMicrosecondTimestamp() >= endTime) {
-                // Client has executed long enough, should terminate
-                LOG(INFO) << "Terminating soon...";
-                sleep(10);
-                running_ = false;
-                return;
-            }
         }
+
+        LOG(INFO) << "Terminating soon...";
+        while (GetMicrosecondTimestamp() < endTime) {
+            // Client has executed long enough, should terminate
+            usleep(1000);
+        }
+        running_ = false;
 
 
     }
@@ -217,6 +228,8 @@ namespace nezha {
         int roundRobinIdx = 0;
         uint64_t startTime = GetMicrosecondTimestamp();
         uint64_t endTime = startTime + clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
+        endTime += 10 * 1000ul * 1000ul;
+        LOG(INFO) << "expected to end at " << endTime;
         while (running_) {
             if (suspending_) {
                 // do something
@@ -226,6 +239,8 @@ namespace nezha {
             }
             if (GetMicrosecondTimestamp() >= endTime) {
                 // Client has executed long enough, should terminate
+                LOG(INFO) << "Terminating soon...";
+                running_ = false;
                 return;
             }
             Request* request = NULL;
@@ -255,51 +270,53 @@ namespace nezha {
                     roundRobinIdx++;
                 }
             }
-            if (GetMicrosecondTimestamp() >= endTime) {
-                // Client has executed long enough, should terminate
-                LOG(INFO) << "Terminating soon...";
-                sleep(10);
-                running_ = false;
-                return;
-            }
         }
+        LOG(INFO) << "Terminating soon...";
+        while (GetMicrosecondTimestamp() < endTime) {
+            // Client has executed long enough, should terminate
+            usleep(1000);
+        }
+        running_ = false;
 
     }
 
+
     void Client::LogTd() {
         LogInfo* log = NULL;
-        uint32_t countCommitedReqs = 0; // this var is for stats, it is different from committedReqId_, committedReqId_ will only be advanced after all previous reqs have been committed
         uint64_t startTime, endTime;
         uint32_t lastSubmitteddReqId = 0;
         uint32_t lastCountCommitedReq = 0;
         uint32_t latencySample = 0;
 
+        std::ofstream ofs("Client-Stats-" + std::to_string(clientId_));
+        ofs << "ReqId,SendTime,CommitTime,CommitType" << std::endl;
+
         startTime = GetMicrosecondTimestamp();
         while (running_) {
             endTime = GetMicrosecondTimestamp();
-            if (endTime - startTime >= 1000000) {
+            if (endTime - startTime >= 5000000) {
                 float duration = (endTime - startTime) * 1e-6;
                 uint32_t submittedReqNum = nextReqId_ - 1 - lastSubmitteddReqId;
-                uint32_t committedReqNum = countCommitedReqs - lastCountCommitedReq;
+                uint32_t committedReqNum = committedNum_ - lastCountCommitedReq;
                 float submissionRate = submittedReqNum / duration;
                 float commitRate = committedReqNum / duration;
                 lastSubmitteddReqId = nextReqId_ - 1;
-                lastCountCommitedReq = countCommitedReqs;
+                lastCountCommitedReq = committedNum_;
                 startTime = endTime;
-                LOG(INFO) << "countCommitedReqs=" << countCommitedReqs << "\t"
+                LOG(INFO) << "endTime=" << endTime << "\t"
+                    << "committedNum_ = " << committedNum_ << "\t"
+                    << "logQuLen =" << logQu_.size_approx() << "\t"
                     << "committedReqId_=" << committedReqId_ << "\t"
                     << "nextReqId_=" << nextReqId_ << "\t"
                     << "submissionRate=" << submissionRate << " req/sec\t"
                     << "commitRate=" << commitRate << " req/sec" << "\t"
-                    << "latency(Sample)=" << latencySample << " us";
+                    << "latency(Sample)=" << latencySample << " us" << "\t"
+                    << "retryNum=" << retryNumber_;
 
+                ofs.flush();
             }
             if (logQu_.try_dequeue(log)) {
-                // erase the footprint of commited requests
-                outstandingRequestSendTime_.erase(log->reqId);
-
                 // LOG(INFO) << "committedReqId_=" << committedReqId_ << "\t" << "reqId=" << log->reqId;
-
                 while (committedReqId_ + 1 <= log->reqId) {
                     if (outstandingRequestSendTime_.get(committedReqId_ + 1) == 0) {
                         // this reqId has also been committed (i.e. cannot find its footprint)
@@ -312,8 +329,10 @@ namespace nezha {
                 }
 
                 latencySample = log->commitTime - log->sendTime;
+
+                // log stats
+                ofs << log->toString() << std::endl;
                 delete log;
-                countCommitedReqs++;
 
             }
 
@@ -326,9 +345,10 @@ namespace nezha {
                     if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
                         // timeout, should retry
                         Request* request = outstandingRequests_.get(reqId);
-                        LOG(INFO) << "Timeout Retry " << request->reqid();
+                        VLOG(1) << "Timeout Retry " << request->reqid();
                         outstandingRequestSendTime_.erase(reqId);
                         retryQu_.enqueue(request);
+                        retryNumber_++;
                     }
                 }
             }
@@ -344,6 +364,14 @@ namespace nezha {
                 reclaimedReqId_++;
             }
         }
+
+        while (logQu_.try_dequeue(log)) {
+            // log stats
+            ofs << log->toString() << std::endl;
+            delete log;
+        }
+        ofs.flush();
+        LOG(INFO) << "Dump Finished";
     }
 
     void Client::Terminate() {

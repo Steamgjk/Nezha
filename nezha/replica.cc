@@ -1,7 +1,7 @@
 #include "nezha/replica.h"
 
 namespace nezha {
-#define GJK_DEBUG
+    // #define GJK_DEBUG
 #ifdef GJK_DEBUG
 #define ASSERT(x) assert(x)
 #else 

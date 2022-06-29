@@ -29,6 +29,11 @@ namespace nezha {
         uint64_t sendTime;
         uint64_t commitTime;
         uint32_t commitType;
+        std::string toString() {
+            std::string ret = (std::to_string(reqId) + "," + std::to_string(sendTime) + ","
+                + std::to_string(commitTime) + "," + std::to_string(commitType));
+            return ret;
+        }
     };
     class Client
     {
@@ -55,6 +60,8 @@ namespace nezha {
         /** To communicate between ProcessReplyTd and LogTd */
         ConcurrentQueue<LogInfo*> logQu_;
         uint32_t retryTimeoutus_;
+        uint32_t retryNumber_;
+        uint32_t committedNum_;
 
         void LaunchThreads();
         void ProcessReplyTd();
