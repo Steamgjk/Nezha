@@ -485,9 +485,9 @@ if __name__ == '__main__':
             log_file = "replica-log-"+str(i) 
         )
         print(colored(replica_cmd, "yellow", attrs=['bold']))
-        # run_command([replica_ips[i]], replica_cmd, in_background=False)
+        run_command([replica_ips[i]], replica_cmd, in_background=False)
 
-    input("stop...")
+    # input("stop...")
     # Launch proxies (id starts from 1)
     for i in range(num_proxies):
         proxy_cmd = "{binary_path}/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml  > {log_file} 2>&1 &".format(
