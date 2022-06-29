@@ -385,6 +385,7 @@ if __name__ == '__main__':
 
     # del_instance_list(instance_list=vm_name_list)
     # start_instance_list(instance_list = vm_name_list)
+    # time.sleep(60)
     # launch_ttcs(vm_ips)
     # exit(0)
 
@@ -497,6 +498,7 @@ if __name__ == '__main__':
         print(colored(proxy_cmd, "yellow", attrs=['bold']))
         run_command([proxy_ips[i]], proxy_cmd, in_background = False)
 
+   
     # Launch clients (id starts from 2)
     for i in range(num_clients):
         client_cmd = "{binary_path}/nezha_client --config {config_path}/nezha-client-config-{idx}.yaml >{log_file} 2>&1 &".format(
@@ -510,3 +512,24 @@ if __name__ == '__main__':
 
     print("Sleep...")
     time.sleep(90)
+
+    # Copy Stats File
+    folder_name = "stats"
+    stats_folder = "{login_path}/{folder_name}".format(
+        login_path = LOGIN_PATH,
+        folder_name = folder_name
+    )
+    mkdir_cmd = "sudo mkdir -p -m 777 {stats_folder}".format(stats_folder = stats_folder)
+    os.system(mkdir_cmd)
+
+    for i in range(num_clients):
+        file_name = "Client-Stats-"+str(i+1)
+        local_file_path = "{stats_folder}/{file_name}".format(
+            stats_folder = stats_folder,
+            file_name = file_name
+        )
+        remote_path = "{stats_folder}/{file_name}".format(
+            stats_folder = LOGIN_PATH,
+            file_name = file_name
+        )
+        scp_files([client_ips[i]], local_file_path, remote_path, to_remote=False)
