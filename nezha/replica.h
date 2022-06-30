@@ -94,9 +94,14 @@ namespace nezha {
         /** Each thread is given a unique name (key) */
         std::map<std::string, std::thread*> threadPool_;
 
+        /** SlowReplyTd(s) track the maxSyncedLogId to advance  slowRepliedLogId_ */
+        std::vector<uint32_t> slowRepliedLogId_;
         /** committedLogId_ and toCommitLogId_ are used for peridical synchronization (to accelerate failure recovery) */
         std::atomic<uint32_t> committedLogId_;
         std::atomic<uint32_t> toCommitLogId_;
+        uint32_t duplicateNum_; // For debug, will be deleted 
+        uint32_t duplicateNum1_;
+        uint32_t duplicateNum2_;
 
         /** Context (including a message handler and a monitor timer) */
         Context masterContext_;

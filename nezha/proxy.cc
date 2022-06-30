@@ -73,7 +73,7 @@ namespace nezha
             clientIter.next();
         }
 
-        ConcurrentMap<uint32_t, Reply*>::Iterator iter(committedReply_);
+        ConcurrentMap<uint64_t, Reply*>::Iterator iter(committedReply_);
         while (iter.isValid()) {
             Reply* reply = iter.getValue();
             if (reply) {
@@ -329,7 +329,8 @@ namespace nezha
                         float rate = 10000 / ((endTime - startTime) * 1e-6);
                         LOG(INFO) << "ForwardId=" << id << "\t"
                             << "count =" << forwardCnt << "\t"
-                            << "rate=" << rate;
+                            << "rate=" << rate << " req/sec" << "\t"
+                            << "req is " << request.clientid() << "\t" << request.reqid();
                         startTime = endTime;
                     }
                 }

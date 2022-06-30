@@ -10,6 +10,10 @@ namespace nezha {
 
     Replica::Replica(const std::string& configFile, bool isRecovering) :viewId_(0), lastNormalView_(0)
     {
+        duplicateNum_ = 0;
+        duplicateNum1_ = 0;
+        duplicateNum2_ = 0;
+
         // Load Config
         replicaConfig_ = YAML::LoadFile(configFile);
         if (isRecovering) {
@@ -126,6 +130,7 @@ namespace nezha {
         maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
         maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         toCommitLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
@@ -234,6 +239,7 @@ namespace nezha {
         // Create reply queues (one queue per fast/slow reply thread)
         fastReplyQu_.resize(replyShardNum);
         slowReplyQu_.resize(replyShardNum);
+        slowRepliedLogId_.resize(replyShardNum, CONCURRENT_MAP_START_INDEX - 1);
 
         // Create CrashVector Context
         std::vector<uint32_t> cvVec(replicaNum_, 0);
@@ -343,8 +349,12 @@ namespace nezha {
             earlyBuffer_.erase(earlyBuffer_.begin());
         }
 
+
         committedLogId_.store(maxSyncedLogId_.load());
         toCommitLogId_.store(maxSyncedLogId_.load());
+        for (uint32_t i = 0; i < slowRepliedLogId_.size(); i++) {
+            slowRepliedLogId_[i] = maxSyncedLogId_;
+        }
 
         // Reset lastReleasedEntryByKeys_, no need to care about UnSyncedLogs, because they are all cleared
         for (uint32_t key = 0; key < keyNum_; key++) {
@@ -633,6 +643,7 @@ namespace nezha {
                         // update proxy id in case the client has changed its proxy
                         entry->body.proxyId = rb->proxyId;
                         VLOG(1) << "duplicate " << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey);
+                        duplicateNum_++;
                         fastReplyQu_[(roundRobinProcessIdx_++) % fastReplyQu_.size()].enqueue(entry);
                         // free this RequestBody
                         delete rb;
@@ -649,6 +660,7 @@ namespace nezha {
                         LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
                         entry->body.proxyId = rb->proxyId;
                         slowReplyQu_[(roundRobinProcessIdx_++) % slowReplyQu_.size()].enqueue(entry);
+                        duplicateNum1_++;
                     }
                     else {
                         duplicateLogIdx = unsyncedReq2LogId_.get(rb->reqKey);
@@ -675,6 +687,7 @@ namespace nezha {
                         else {
                             VLOG(1) << "duplicated (unsynced) " << duplicateLogIdx << "\t"
                                 << ((rb->reqKey) >> 32) << "\t" << (uint32_t)(rb->reqKey);
+                            duplicateNum2_++;
                             // As a very rare case, if the request is duplicate but also unsynced, follower does not handle it, for fear of data race with other threads (e.g. GarbageCollectTd)
                             // But this will not harm liveness, because eventually the request will become synced request, so the former if-branch will handle it and resend a slow reply
                             delete rb;
@@ -762,6 +775,8 @@ namespace nezha {
         reply.set_replytype(MessageType::FAST_REPLY);
         reply.set_replicaid(replicaId_);
         CrashVectorStruct* cv = crashVectorInUse_[cvId];
+        uint32_t replyNum = 0;
+        uint64_t startTime, endTime;
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             bool amLeader = AmLeader();
@@ -854,6 +869,22 @@ namespace nezha {
                         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
                     }
                 }
+                // replyNum++;
+                // if (replyNum == 1) {
+                //     startTime = GetMicrosecondTimestamp();
+                // }
+                // else if (replyNum % 10000 == 0) {
+                //     endTime = GetMicrosecondTimestamp();
+                //     float rate = 10000 / ((endTime - startTime) * 1e-6);
+                //     LOG(INFO) << "id=" << id << "\t Fast Reply Rate=" << rate << "\t"
+                //         << "maxSyncedLogId_ = " << maxSyncedLogId_ << "\t"
+                //         << "duplicateNum_ =" << duplicateNum_ << "\t"
+                //         << "duplicateNum1_ =" << duplicateNum1_ << "\t"
+                //         << "duplicateNum2_ =" << duplicateNum2_ << "\t"
+                //         << "slowRepliedNum=" << slowRepliedLogId_[0];
+                //     startTime = endTime;
+                // }
+
             }
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
@@ -866,7 +897,8 @@ namespace nezha {
         Reply reply;
         reply.set_replicaid(replicaId_);
         reply.set_hash("");
-        uint32_t repliedLogId = maxSyncedLogId_;
+        uint32_t replyNum = 0;
+        uint64_t startTime, endTime;
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
             if (AmLeader()) {
@@ -880,13 +912,16 @@ namespace nezha {
             // (2) Some clients retry some requests, and the corresponding entries have already been synced with the leader, so SlowReplyTd also resend slow-replies for these entries
 
             // TODO: SlowReplyTd can be merged with FastReplyTd, just needs to piggyback the most recent synced-log-id on fast-reply, and that is enough for proxies to do quorum check, even without slow-reply messages
-            if (repliedLogId <= maxSyncedLogId_) {
-                entry = syncedEntries_.get(repliedLogId);
-                repliedLogId++;
+            if (slowRepliedLogId_[id] < maxSyncedLogId_) {
+                slowRepliedLogId_[id]++;
+                if (slowRepliedLogId_[id] % slowRepliedLogId_.size() == (uint32_t)id) {
+                    entry = syncedEntries_.get(slowRepliedLogId_[id]);
+                }
             }
-            else {
+            if (!entry) {
                 slowReplyQu_[id].try_dequeue(entry);
             }
+
             if (entry) {
                 uint32_t logId = syncedReq2LogId_.get(entry->body.reqKey);
                 reply.set_view(viewId_);
@@ -906,8 +941,17 @@ namespace nezha {
                 Address* addr = proxyAddressMap_.get(entry->body.proxyId);
                 if (addr != NULL) {
                     slowReplySender_[id]->SendMsgTo(*addr, reply, MessageType::SLOW_REPLY);
-                    // LOG(INFO) << "Slow Reply " << reply.reqid() << "\t";
                 }
+                // replyNum++;
+                // if (replyNum == 1) {
+                //     startTime = GetMicrosecondTimestamp();
+                // }
+                // else if (replyNum % 10000 == 0) {
+                //     endTime = GetMicrosecondTimestamp();
+                //     float rate = 10000 / ((endTime - startTime) * 1e-6);
+                //     LOG(INFO) << "id=" << id << "\t Slow Reply Rate=" << rate;
+                //     startTime = endTime;
+                // }
             }
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
@@ -1111,18 +1155,10 @@ namespace nezha {
 
                     LogEntry* entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
                     ASSERT(entry != NULL);
-                    syncedReq2LogId_.assign(reqKey, logId);
                     syncedEntries_.assign(logId, entry);
+                    syncedReq2LogId_.assign(reqKey, logId);
                     maxSyncedLogIdByKey_[rb->opKey] = logId;
                     maxSyncedLogId_++;
-                    // For debug
-                    if (viewId_ == 1) {
-                        LogEntry* test = syncedEntries_.get(maxSyncedLogId_);
-                        if (test == NULL) {
-                            LOG(INFO) << "logId=" << logId << "\t" << maxSyncedLogId_;
-                        }
-                        ASSERT(test != NULL);
-                    }
 
                     // Chunk UnSynced logs
                     uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[rb->opKey];
@@ -1180,27 +1216,23 @@ namespace nezha {
 
         if (msgBuffer[0] == MessageType::MISSED_INDEX_ASK && askIndex.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgLen - sizeof(MessageHeader))) {
             uint32_t logBegin = askIndex.logidbegin();
-            while (logBegin <= maxSyncedLogId_) {
-                // This replica can help
+            uint32_t logEnd = std::min(maxSyncedLogId_.load(), askIndex.logidend());
+            for (uint32_t i = logBegin; i <= logEnd; i += indexTransferBatch_) {
                 IndexSync indexSyncMsg;
                 indexSyncMsg.set_view(this->viewId_);
-                indexSyncMsg.set_logidbegin(logBegin);
-                uint32_t logEnd = maxSyncedLogId_;
-                if (logEnd > askIndex.logidend()) {
-                    logEnd = askIndex.logidend();
-                }
-                if (logEnd > logBegin + indexTransferBatch_) {
-                    logEnd = logBegin + indexTransferBatch_;
-                }
-                indexSyncMsg.set_logidend(logEnd);
-                for (uint32_t logid = indexSyncMsg.logidbegin(); logid <= indexSyncMsg.logidend(); logid++) {
+                indexSyncMsg.set_logidbegin(i);
+                uint32_t end = std::min(i + indexTransferBatch_ - 1, logEnd);
+                indexSyncMsg.set_logidend(end);
+                uint32_t logid = i;
+                while (logid <= end) {
                     LogEntry* entry = syncedEntries_.get(logid);
                     indexSyncMsg.add_deadlines(entry->body.deadline);
                     indexSyncMsg.add_reqkeys(entry->body.reqKey);
+                    logid++;
                 }
+                indexAcker_->SendMsgTo(*(indexReceiver_[askIndex.replicaid()]),
+                    indexSyncMsg, MessageType::SYNC_INDEX);
 
-                indexAcker_->SendMsgTo(*(indexReceiver_[askIndex.replicaid()]), indexSyncMsg, MessageType::SYNC_INDEX);
-                logBegin = logEnd + 1;
             }
         }
     }
@@ -1266,8 +1298,12 @@ namespace nezha {
         askIndexMsg.set_replicaid(this->replicaId_);
         askIndexMsg.set_logidbegin(missedIndices_.first);
         askIndexMsg.set_logidend(missedIndices_.second);
+
+        // roundRobinIndexAskIdx_ = 0;// Debug
+
         // Do not ask leader every time, choose random replica to ask to avoid leader bottleneck
-        reqRequester_->SendMsgTo(*(requestAskReceiver_[roundRobinIndexAskIdx_ % replicaNum_]), askIndexMsg, MessageType::MISSED_INDEX_ASK);
+        reqRequester_->SendMsgTo(*(indexAskReceiver_[roundRobinIndexAskIdx_ % replicaNum_]),
+            askIndexMsg, MessageType::MISSED_INDEX_ASK);
         roundRobinIndexAskIdx_++;
         if (roundRobinIndexAskIdx_ % replicaNum_ == replicaId_) {
             roundRobinIndexAskIdx_++;

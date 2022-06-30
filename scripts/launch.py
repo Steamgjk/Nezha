@@ -326,7 +326,7 @@ def start_instance_list(instance_list, zone="us-central1-a"):
 if __name__ == '__main__':
     num_replicas = 3
     num_proxies = 1
-    num_clients = 1
+    num_clients = 2
     
     # cfg_file_name = generate_ttcs_cfg_file("10.128.3.79", is_reference=True, use_ntp=False)
     
@@ -377,6 +377,7 @@ if __name__ == '__main__':
     #                     customzedZone="us-central1-a",
     #                     customzedIp = client_ips[i] )
     #     print(colored("Created "+client_name_list[i], "green", attrs=['bold']))
+
 
     # time.sleep(60)
     # for i in range(len(vm_ips)):
@@ -485,9 +486,9 @@ if __name__ == '__main__':
             log_file = "replica-log-"+str(i) 
         )
         print(colored(replica_cmd, "yellow", attrs=['bold']))
-        run_command([replica_ips[i]], replica_cmd, in_background=False)
+        # run_command([replica_ips[i]], replica_cmd, in_background=False)
 
-    # input("stop...")
+    input("stop...")
     # Launch proxies (id starts from 1)
     for i in range(num_proxies):
         proxy_cmd = "{binary_path}/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml  > {log_file} 2>&1 &".format(
@@ -510,6 +511,7 @@ if __name__ == '__main__':
         ) 
         print(colored(client_cmd, "yellow", attrs=['bold']))
         run_command([client_ips[i]], client_cmd, in_background = True)
+        
 
     print("Sleep...")
     time.sleep(90)

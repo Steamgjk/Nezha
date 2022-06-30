@@ -52,7 +52,7 @@ namespace nezha {
         int fastQuorum_;
         std::vector<std::vector<struct sockaddr_in*>> replicaAddrs_;
         ConcurrentMap<uint32_t, struct sockaddr_in*> clientAddrs_;
-        ConcurrentMap<uint32_t, Reply*> committedReply_; // used as cache
+        ConcurrentMap<uint64_t, Reply*> committedReply_; // used as cache
 
 
     public:

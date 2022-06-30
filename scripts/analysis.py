@@ -9,7 +9,7 @@ COMMIT_REPLY = 8
 if __name__ == '__main__':
     num_replicas = 3
     num_proxies = 1
-    num_clients = 1
+    num_clients = 2
 
     folder_name = "stats"
     stats_folder = "{login_path}/{folder_name}".format(
