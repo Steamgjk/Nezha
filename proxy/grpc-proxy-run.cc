@@ -1,4 +1,4 @@
-#include "nezha/grpc-proxy.h"
+#include "proxy/grpc-proxy.h"
 DEFINE_string(config, "nezhav2/config/nezha-proxy-config-0.yaml", "The config file for the proxy");
 
 using namespace nezha::kubeproxy;

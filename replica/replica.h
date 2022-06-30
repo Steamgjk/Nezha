@@ -22,7 +22,7 @@
 #include <boost/uuid/uuid_generators.hpp> 
 #include <boost/uuid/uuid_io.hpp>     
 #include <concurrentqueue.h>    
-#include "nezha/nezha-proto.pb.h"
+#include "proto/nezha-proto.pb.h"
 #include "lib/utils.h"
 #include "lib/udp_socket_endpoint.h"
 

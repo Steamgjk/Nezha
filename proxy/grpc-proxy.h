@@ -18,9 +18,9 @@
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
-#include "nezha/nezha-proto.pb.h"
-#include "nezha/kube-grpc-service.pb.h"
-#include "nezha/kube-grpc-service.grpc.pb.h"
+#include "proto/nezha-proto.pb.h"
+#include "proto/kube-grpc-service.pb.h"
+#include "proto/kube-grpc-service.grpc.pb.h"
 #include "lib/utils.h"
 #include "lib/address.h"
 

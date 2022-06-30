@@ -1,5 +1,8 @@
-#include "nezha/grpc-proxy.h"
-
+#include "proto/kube-grpc-service.pb.h"
+#include "proto/kube-grpc-service.grpc.pb.h"
+#include <grpcpp/ext/proto_server_reflection_plugin.h>
+#include <grpcpp/grpcpp.h>
+#include <grpcpp/health_check_service_interface.h>
 using namespace nezha::kubeproxy;
 
 

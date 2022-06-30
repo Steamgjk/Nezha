@@ -1,15 +1,16 @@
-#include "nezha/proxy.h"
+#include "proxy/grpc-proxy.h"
 
 namespace nezha
 {
-    Proxy::Proxy(const std::string& configFile)
+
+    GRPCProxy::GRPCProxy(const std::string& configFile)
     {
         proxyConfig_ = YAML::LoadFile(configFile);
         PrintConfig();
         CreateContext();
     }
 
-    void Proxy::PrintConfig() {
+    void GRPCProxy::PrintConfig() {
         if (proxyConfig_["print-config"].as<bool>()) {
             LOG(INFO) << "Print configs as follows";
             LOG(INFO) << "Replica Information";
@@ -33,12 +34,12 @@ namespace nezha
         }
     }
 
-    void Proxy::Terminate() {
+    void GRPCProxy::Terminate() {
         LOG(INFO) << "Terminating...";
         running_ = false;
     }
 
-    void Proxy::Run() {
+    void GRPCProxy::Run() {
         running_ = true;
         LaunchThreads();
         for (auto& kv : threadPool_) {
@@ -50,7 +51,7 @@ namespace nezha
 
     }
 
-    Proxy::~Proxy()
+    GRPCProxy::~GRPCProxy()
     {
         for (auto& kv : threadPool_) {
             delete kv.second;
@@ -73,7 +74,7 @@ namespace nezha
             clientIter.next();
         }
 
-        ConcurrentMap<uint64_t, Reply*>::Iterator iter(committedReply_);
+        ConcurrentMap<uint32_t, Reply*>::Iterator iter(committedReply_);
         while (iter.isValid()) {
             Reply* reply = iter.getValue();
             if (reply) {
@@ -83,7 +84,7 @@ namespace nezha
         }
     }
 
-    int Proxy::CreateSocketFd(const std::string& sip, const int sport) {
+    int GRPCProxy::CreateSocketFd(const std::string& sip, const int sport) {
         int fd = socket(PF_INET, SOCK_DGRAM, 0);
         if (fd < 0) {
             LOG(ERROR) << "Receiver Fd fail ";
@@ -113,22 +114,22 @@ namespace nezha
     }
 
 
-    void Proxy::LaunchThreads() {
+    void GRPCProxy::LaunchThreads() {
         int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
 
-        threadPool_["CalcLatencyBound"] = new std::thread(&Proxy::CalcLatencyBound, this);
+        threadPool_["CalcLatencyBound"] = new std::thread(&GRPCProxy::CalcLatencyBound, this);
         for (int i = 0; i < shardNum; i++) {
             std::string key = "CheckQuorum-" + std::to_string(i);
-            threadPool_[key] = new std::thread(&Proxy::CheckQuorum, this, i);
+            threadPool_[key] = new std::thread(&GRPCProxy::CheckQuorum, this, i);
         }
 
         for (int i = 0; i < shardNum; i++) {
             std::string key = "ForwardRequests-" + std::to_string(i);
-            threadPool_[key] = new std::thread(&Proxy::ForwardRequests, this, i);
+            threadPool_[key] = new std::thread(&GRPCProxy::ForwardRequests, this, i);
         }
     }
 
-    void Proxy::CalcLatencyBound() {
+    void GRPCProxy::CalcLatencyBound() {
         std::pair<uint32_t, uint32_t> owdSample;
         std::vector<uint32_t> replicaOWDs;
         replicaOWDs.resize(proxyConfig_["replica-info"]["replica-ips"].size(), proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>());
@@ -156,7 +157,7 @@ namespace nezha
         }
     }
 
-    void Proxy::CheckQuorum(const int id) {
+    void GRPCProxy::CheckQuorum(const int id) {
         std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
         int sz = 0;
         char buffer[UDP_BUFFER_SIZE];
@@ -166,7 +167,6 @@ namespace nezha
         Reply reply;
         Reply* committedAck = NULL;
         uint32_t replyNum = 0;
-        uint64_t startTime, endTime;
         while (running_) {
             if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
                 if ((uint32_t)sz <= sizeof(MessageHeader)) {
@@ -180,8 +180,10 @@ namespace nezha
                     continue;
                 }
                 if (reply.ParseFromArray(buffer + sizeof(MessageHeader), msghdr->msgLen)) {
-
-
+                    replyNum++;
+                    if (replyNum % 100 == 0) {
+                        VLOG(1) << "id=" << id << "\t" << "replyNum=" << replyNum;
+                    }
                     uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
                     if (reply.owd() > 0) {
                         owdQu_.enqueue(std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
@@ -227,18 +229,6 @@ namespace nezha
                         // Add to cache
                         committedReply_.assign(reqKey, committedAck);
                         replyQuorum.erase(reqKey);
-                        replyNum++;
-                        if (replyNum == 1) {
-                            startTime = GetMicrosecondTimestamp();
-                        }
-                        else if (replyNum % 10000 == 0) {
-                            endTime = GetMicrosecondTimestamp();
-                            float rate = 10000 / ((endTime - startTime) * 1e-6);
-                            LOG(INFO) << "id=" << id << "\t"
-                                << "replyNum=" << replyNum << "\t"
-                                << "rate = " << rate;
-                            startTime = endTime;
-                        }
                     }
                 }
 
@@ -247,7 +237,7 @@ namespace nezha
         }
     }
 
-    Reply* Proxy::QuorumReady(std::map<uint32_t, Reply>& quorum) {
+    Reply* GRPCProxy::QuorumReady(std::map<uint32_t, Reply>& quorum) {
         // These replies are of the same view for sure (we have previously forbidden inconsistency)
         uint32_t view = quorum.begin()->second.view();
         uint32_t leaderId = view % replicaNum_;
@@ -276,7 +266,7 @@ namespace nezha
     }
 
 
-    void Proxy::ForwardRequests(const int id) {
+    void GRPCProxy::ForwardRequests(const int id) {
         char buffer[UDP_BUFFER_SIZE];
         MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
         int sz = -1;
@@ -284,7 +274,6 @@ namespace nezha
         socklen_t len = sizeof(receiverAddr);
         Request request;
         uint32_t forwardCnt = 0;
-        uint64_t startTime, endTime;
         while (running_) {
             if (stopForwarding_) {
                 // TODO: Ack some signal back to clients
@@ -321,17 +310,8 @@ namespace nezha
                     }
 
                     forwardCnt++;
-                    if (forwardCnt == 1) {
-                        startTime = GetMicrosecondTimestamp();
-                    }
-                    else if (forwardCnt % 10000 == 0) {
-                        endTime = GetMicrosecondTimestamp();
-                        float rate = 10000 / ((endTime - startTime) * 1e-6);
-                        LOG(INFO) << "ForwardId=" << id << "\t"
-                            << "count =" << forwardCnt << "\t"
-                            << "rate=" << rate << " req/sec" << "\t"
-                            << "req is " << request.clientid() << "\t" << request.reqid();
-                        startTime = endTime;
+                    if (forwardCnt % 100 == 0) {
+                        VLOG(1) << "ForwardId=" << id << "\t" << "count =" << forwardCnt;
                     }
                 }
             }
@@ -340,7 +320,7 @@ namespace nezha
     }
 
 
-    void Proxy::CreateContext() {
+    void GRPCProxy::CreateContext() {
         stopForwarding_ = false;
         running_ = true;
         int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();

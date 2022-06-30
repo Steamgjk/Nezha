@@ -1,4 +1,4 @@
-#include "nezha/replica.h"
+#include "replica/replica.h"
 DEFINE_string(config, "nezhav2/config/nezha-replica-config-0.yaml", "The config file for the replica");
 DEFINE_bool(isRecovering, false, "If this flag is true, then the replica will start recovery process once it is launched");
 

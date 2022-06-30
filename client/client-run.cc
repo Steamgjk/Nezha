@@ -1,4 +1,4 @@
-#include "nezha/client.h"
+#include "client/client.h"
 DEFINE_string(config, "nezhav2/config/nezha-client-config-0.yaml", "The config file for the client");
 nezha::Client* client = NULL;
 void Terminate(int para) {

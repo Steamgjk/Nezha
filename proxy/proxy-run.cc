@@ -1,4 +1,4 @@
-#include "nezha/proxy.h"
+#include "proxy/proxy.h"
 DEFINE_string(config, "nezhav2/config/nezha-proxy-config-0.yaml", "The config file for the proxy");
 
 nezha::Proxy* proxy = NULL;

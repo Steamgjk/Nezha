@@ -46,44 +46,32 @@ git clone  https://gitlab.com/steamgjk/nezhav2.git
 
 
 ## File Structure
-The core part is the nezha folder, which includes three processes, i.e., 
+The core part includes three modules (folders), i.e., 
 - replica
 - proxy
 - client 
 
-Each process is composed of three files: 
+Each module is composed of three files: 
 - a header file (e.g., nezha-replica.h), 
 - a source implementation file (nezha-replica.cc), 
 - a launching file (e.g., nezha-replica-run.cc). 
 
-Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) to get its full configuration
+Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) to get its full configuration, the sample configuration files are placed in the configs folder
 
 Stale files and experiemental files are put into archive folder, and will be deleted finally.
 
 
-## Build Nezha
-Currently, we provide two ways of compiling/building Nezha
+## Build Nezha with Bazel
 
-### Makefile
-The Makefile building system follows the same style as [NOPaxos Codebase](https://github.com/UWSysLab/NOPaxos). There is a main Makefile at the top level of folder. 
+Since Bazel is becoming popular, we have migrated nezha from Makefile-based building system to the bazel building system. The bazel version in use is 5.2.0
 
 ```
-    cd nezhav2 && make
-```
-
-After building the project successfully, the executable files will be generated in the folder named .bin
-
-### Bazel
-Since Bazel is becoming popular, we are migrating nezha to the bazel building system. The bazel version in use is 5.2.0
-
-```
-    cd nezhav2 && bazel build nezha:all
+    cd nezhav2 && bazel build //...
 ```
 
 
 After building the project successfully, the executable files will be generated in the folder named bazel-bin
 
-In the following sections, we assume the users are using bazel to build the system.
 
 
 ## All-in-One-Box Test
@@ -91,17 +79,17 @@ In the following sections, we assume the users are using bazel to build the syst
 ```
 # Launch one beefy machine (e.g., with 16 or 32 CPUs)
 # Launch 3 replicas (All the configuration info is written in ONE yaml file)
-GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml
-GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-1.yaml
-GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-2.yaml
+GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml
+GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-1.yaml
+GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-2.yaml
 
 # GLOG_v is the flag provided by glog, which allows users to specify the verbose level of logs. It can be completely removed if the user does not want to see too many logs
 
 # Launch 1 proxy
-GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_proxy --config nezhav2/configs/nezha-proxy-config.yaml
+GLOG_v=2 nezhav2/bazel-bin/proxy/nezha_proxy --config nezhav2/configs/nezha-proxy-config.yaml
 
 # Lauch 1 client
-GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_client  --config nezhav2/configs/nezha-client-config.yaml
+GLOG_v=2 nezhav2/bazel-bin/client/nezha_client  --config nezhav2/configs/nezha-client-config.yaml
 
 
 # Kill 1 replica (the leader, Replica-0), Crtl+C 
@@ -110,7 +98,7 @@ GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_client  --config nezhav2/configs/nezha-cl
 # The 2 replicas enter a new view (viewId=1), with Replica-1 as the leader
 
 # Relaunch Replica-0 to rejoin as one follower
-GLOG_v=2 nezhav2/bazel-bin/nezha/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
 
 # Add the flag --isRecovering true to indicate it is recovering
 

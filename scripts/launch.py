@@ -390,8 +390,8 @@ if __name__ == '__main__':
     # launch_ttcs(vm_ips)
     # exit(0)
 
-    # stop_instance_list(instance_list = vm_name_list)
-    # exit(0)
+    stop_instance_list(instance_list = vm_name_list)
+    exit(0)
 
 
 
@@ -486,7 +486,7 @@ if __name__ == '__main__':
             log_file = "replica-log-"+str(i) 
         )
         print(colored(replica_cmd, "yellow", attrs=['bold']))
-        # run_command([replica_ips[i]], replica_cmd, in_background=False)
+        run_command([replica_ips[i]], replica_cmd, in_background=False)
 
     input("stop...")
     # Launch proxies (id starts from 1)
