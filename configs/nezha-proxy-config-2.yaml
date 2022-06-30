@@ -1,18 +1,17 @@
----
 print-config: true
 # Replica Info
 replica-info:
   replica-ips:
-    - "127.0.0.1"
-    - "127.0.0.2"
-    - "127.0.0.3"
+    - 10.128.2.10
+    - 10.128.2.11
+    - 10.128.2.12
   receiver-shards: 1 # The number of threads to receive threads
   receiver-port: 33333 # The port is exposed to client/proxy and is used to receive client/proxy requests. When receiver-shards>1, the corresponding ports are receiver-ports + shard-index
   initial-owd: 80 # The initial one-way delay (us) between replicas and proxies
 # Proxy Info
 proxy-info:
-  proxy-id: 1
-  proxy-ip: "127.0.0.4"
+  proxy-id: 2
+  proxy-ip: 10.128.2.24
   shard-num: 12
   max-owd: 200
   request-port-base: 32000

@@ -325,14 +325,14 @@ def start_instance_list(instance_list, zone="us-central1-a"):
 
 if __name__ == '__main__':
     num_replicas = 3
-    num_proxies = 1
-    num_clients = 2
+    num_proxies = 2
+    num_clients = 10
     
     # cfg_file_name = generate_ttcs_cfg_file("10.128.3.79", is_reference=True, use_ntp=False)
     
     replica_ips = ["10.128.2."+str(i+10) for i in range(num_replicas)]
-    proxy_ips = ["10.128.2."+str(i+10) for i in range(num_replicas, num_proxies+num_replicas) ]
-    client_ips = ["10.128.2."+str(i+10) for i in range(num_replicas+num_proxies, num_clients+num_proxies+num_replicas) ]
+    proxy_ips = ["10.128.2."+str(i+20) for i in range(num_replicas, num_proxies+num_replicas) ]
+    client_ips = ["10.128.2."+str(i+30) for i in range(num_replicas+num_proxies, num_clients+num_proxies+num_replicas) ]
 
     replica_name_list = [TAG+"-replica-"+str(i) for i in range(num_replicas) ]
     proxy_name_list = [ TAG+"-proxy-"+str(i) for i in range(num_proxies) ]
@@ -342,7 +342,7 @@ if __name__ == '__main__':
     vm_name_list = replica_name_list + proxy_name_list + client_name_list
 
     replica_vm_type = "n1-standard-16"
-    proxy_vm_type = "n1-standard-16"
+    proxy_vm_type = "n1-standard-32"
     client_vm_type = "n1-standard-4"
 
     binary_path = "{login_path}/nezhav2/bazel-bin/nezha".format(login_path = LOGIN_PATH)
@@ -379,7 +379,7 @@ if __name__ == '__main__':
     #     print(colored("Created "+client_name_list[i], "green", attrs=['bold']))
 
 
-    # time.sleep(60)
+    # time.sleep(120)
     # for i in range(len(vm_ips)):
     #     start_ttcs_node(vm_ips[i],False)
     # exit(0)

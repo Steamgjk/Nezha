@@ -534,9 +534,7 @@ namespace nezha {
                     **/
                     proxyAddressMap_.assign(request.proxyid(), addr);
                 }
-
                 RequestBody* rb = new RequestBody(request.sendtime() + request.bound(), CONCAT_UINT32(request.clientid(), request.reqid()), request.key(), request.proxyid(), request.command());
-
                 processQu_.enqueue(rb);
             }
             else {
@@ -701,8 +699,9 @@ namespace nezha {
             uint64_t nowTime = GetMicrosecondTimestamp();
 
             while ((!earlyBuffer_.empty()) && nowTime >= earlyBuffer_.begin()->first.first) {
+                rb = earlyBuffer_.begin()->second;
                 lastReleasedEntryByKeys_[rb->opKey] = earlyBuffer_.begin()->first;
-                ProcessRequest(earlyBuffer_.begin()->second, amLeader, true);
+                ProcessRequest(rb, amLeader, true);
                 earlyBuffer_.erase(earlyBuffer_.begin());
             }
 

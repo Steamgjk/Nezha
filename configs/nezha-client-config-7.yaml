@@ -1,13 +1,13 @@
----
 print-config: true
 proxy-info:
   proxy-ips:
-    - "127.0.0.4"
+    - 10.128.2.23
+    - 10.128.2.24
   proxy-shards: 12
   request-port-base: 32000
 client-info:
-  client-id: 1
-  client-ip: "127.0.0.5"
+  client-id: 7
+  client-ip: 10.128.2.41
   request-port: 32912
   is-openloop: true
   poisson-rate: 100 # it means the client sends x reqs/10ms on average (should be larger than 10, otherwise, the submission rate is not accurate)

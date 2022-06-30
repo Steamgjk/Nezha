@@ -11,8 +11,8 @@ replica-info:
 # Proxy Info
 proxy-info:
   proxy-id: 1
-  proxy-ip: 10.128.2.13
-  shard-num: 4
+  proxy-ip: 10.128.2.23
+  shard-num: 12
   max-owd: 200
   request-port-base: 32000
   reply-port-base: 33000
