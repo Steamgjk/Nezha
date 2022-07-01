@@ -21,6 +21,8 @@
 #include "proto/nezha-proto.pb.h"
 #include "proto/kube-grpc-service.pb.h"
 #include "proto/kube-grpc-service.grpc.pb.h"
+#include "proto/etcd-rpc.pb.h"
+#include "proto/etcd-rpc.grpc.pb.h"
 #include "lib/utils.h"
 #include "lib/address.h"
 

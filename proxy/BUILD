@@ -17,6 +17,7 @@ cc_library(
     deps = [
         "//proto:nezha_cc_proto",
         "//proto:kube_grpc_service_grpc",
+        "//proto:etcd_rpc_grpc",
         "//lib:utils",
         "//lib:address",
         "@com_github_grpc_grpc//:grpc++",
