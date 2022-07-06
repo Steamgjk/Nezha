@@ -15,22 +15,11 @@
 #include "lib/endpoint.h"
 
 
-struct UDPMsgHandler {
-    std::function<void(char*, int, Address*, void*, Endpoint*)> msgHandler_;
-    void* context_;
-    Endpoint* attachedEP_;
-    char* buffer_;
-    Address sender_;
-    struct ev_io* evWatcher_;
 
-    UDPMsgHandler(std::function<void(char*, int, Address*, void*, Endpoint*)> msghdl,
-        void* ctx = NULL, Endpoint* aep = NULL)
-        :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
-
-        buffer_ = new char[UDP_BUFFER_SIZE];
-        evWatcher_ = new ev_io();
-        evWatcher_->data = (void*)this;
-
+struct UDPMsgHandler : EndpointMsgHandler {
+    char buffer_[UDP_BUFFER_SIZE];
+    UDPMsgHandler(std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> msghdl,
+        void* ctx = NULL, Endpoint* aep = NULL) :EndpointMsgHandler(msghdl, ctx, aep) {
         ev_init(evWatcher_, [](struct ev_loop* loop, struct ev_io* w, int revents) {
             UDPMsgHandler* m = (UDPMsgHandler*)(w->data);
             if (m->attachedEP_ == NULL) {
@@ -40,17 +29,19 @@ struct UDPMsgHandler {
             socklen_t sockLen = sizeof(struct sockaddr_in);
             int msgLen = recvfrom(w->fd, m->buffer_, UDP_BUFFER_SIZE, 0,
                 (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
-            m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_, m->attachedEP_);
+            MessageHeader* msgHeader = (MessageHeader*)(void*)(m->buffer_);
+
+            if (msgLen < 0 || (uint32_t)msgLen < sizeof(MessageHeader)) {
+                msgHeader->msgType = MessageType::ERROR_MSG;
+                msgHeader->msgLen = 0;
+            }
+            m->msgHandler_(msgHeader, m->buffer_ + sizeof(MessageHeader),
+                &(m->sender_), m->context_, m->attachedEP_);
             });
     }
-    ~UDPMsgHandler() {
-        delete evWatcher_;
-        delete[]buffer_;
-    }
+    ~UDPMsgHandler() {}
 };
 
-
-// TODO: In the future, we will extract a base class, and from that class, we derive two sub-classes: one for UDP and the other for TCP
 
 class UDPSocketEndpoint :public Endpoint
 {
@@ -73,8 +64,6 @@ public:
     void LoopRun();
     void LoopBreak();
 };
-
-
 
 
 #endif 

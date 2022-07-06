@@ -50,6 +50,7 @@ namespace MessageType {
     extern char SYNC_STATUS_REPORT;
     extern char COMMIT_INSTRUCTION;
     extern char SUSPEND_REPLY;
+    extern char ERROR_MSG;
 };
 
 namespace StateTransferType {

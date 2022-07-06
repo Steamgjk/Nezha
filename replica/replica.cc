@@ -46,7 +46,7 @@ namespace nezha {
 
     void Replica::Run() {
         // Master thread run
-        masterContext_.Register();
+        masterContext_.Register(endPointType_);
         if (status_ == ReplicaStatus::RECOVERING) {
             masterContext_.endPoint_->RegisterTimer(crashVectorRequestTimer_);
         }
@@ -73,6 +73,7 @@ namespace nezha {
 
     void Replica::PrintConfig() {
         if (replicaConfig_["print-config"].as<bool>()) {
+            LOG(INFO) << "Endpoint Type (1 for UDP, 2 for TCP) " << replicaConfig_["endpoint-type"].as<uint32_t>();
             LOG(INFO) << "Replica IPs";
             for (uint32_t i = 0; i < replicaConfig_["replica-ips"].size(); i++) {
                 LOG(INFO) << "\t" << replicaConfig_["replica-ips"][i].as<std::string>();
@@ -117,6 +118,7 @@ namespace nezha {
     }
 
     void Replica::CreateContext() {
+        endPointType_ = replicaConfig_["endpoint-type"].as<uint32_t>();
         replicaId_ = replicaConfig_["replica-id"].as<int>();
         replicaNum_ = replicaConfig_["replica-ips"].size();
         keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
@@ -134,18 +136,18 @@ namespace nezha {
         committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
         toCommitLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
-
         // Create master endpoints and context
         std::string ip = replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
         int port = replicaConfig_["master-port"].as<int>();
         int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
 
         masterContext_.endPoint_ = new UDPSocketEndpoint(ip, port, true);
-        masterContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->ReceiveMasterMessage(msgBuffer, bufferLen, sender, receiverEP);
+        masterContext_.msgHandler_ = new UDPMsgHandler(
+            [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->ReceiveMasterMessage(msgHeader, msgBuffer);
             }, this);
         // Register a timer to monitor replica status
-        masterContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
+        masterContext_.monitorTimer_ = new EndpointTimer([](void* ctx, Endpoint* receiverEP) {
             if (((Replica*)ctx)->status_ == ReplicaStatus::TERMINATED) {
                 // Master thread will only break its loop when status comes to TERMINATED
                 receiverEP->LoopBreak();
@@ -158,14 +160,16 @@ namespace nezha {
             int port = replicaConfig_["receiver-port"].as<int>() + i;
             requestContext_[i].endPoint_ = new UDPSocketEndpoint(ip, port);
             // Register a request handler to this endpoint
-            requestContext_[i].msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
-                ((Replica*)ctx)->ReceiveClientRequest(msgBuffer, bufferLen, sender, receiverEP);
+            requestContext_[i].msgHandler_ = new UDPMsgHandler(
+                [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
+                    ((Replica*)ctx)->ReceiveClientRequest(msgHeader, msgBuffer, sender);
                 }, this);
             // Register a timer to monitor replica status
-            requestContext_[i].monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-                if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-                    receiverEP->LoopBreak();
-                }
+            requestContext_[i].monitorTimer_ = new EndpointTimer(
+                [](void* ctx, Endpoint* receiverEP) {
+                    if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
+                        receiverEP->LoopBreak();
+                    }
                 }, this, monitorPeriodMs);
         }
 
@@ -192,41 +196,47 @@ namespace nezha {
         port = replicaConfig_["index-sync-port"].as<int>();
         indexSyncContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
         // Register a msg handler to this endpoint to handle index sync messages
-        indexSyncContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->ReceiveIndexSyncMessage(msgBuffer, bufferLen);
+        indexSyncContext_.msgHandler_ = new UDPMsgHandler(
+            [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->ReceiveIndexSyncMessage(msgHeader, msgBuffer);
             }, this);
         // Register a timer to monitor replica status
-        indexSyncContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-                receiverEP->LoopBreak();
-            }
+        indexSyncContext_.monitorTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
+                    receiverEP->LoopBreak();
+                }
             }, this, monitorPeriodMs);
         // Create an endpoint to handle others' requests for missed index
         port = replicaConfig_["index-ask-port"].as<int>();
         missedIndexAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
         // Register message handler 
-        missedIndexAckContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->ReceiveAskMissedIdx(msgBuffer, bufferLen);
+        missedIndexAckContext_.msgHandler_ = new UDPMsgHandler(
+            [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->ReceiveAskMissedIdx(msgHeader, msgBuffer);
             }, this);
         // Register a timer to monitor replica status
-        missedIndexAckContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-                receiverEP->LoopBreak();
-            }
+        missedIndexAckContext_.monitorTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
+                    receiverEP->LoopBreak();
+                }
             }, this, monitorPeriodMs);
 
         // Create an endpoint to handle others' requests for missed req
         port = replicaConfig_["request-ask-port"].as<int>();
         missedReqAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
         // Register message handler
-        missedReqAckContext_.msgHandler_ = new MsgHandlerStruct([](char* msgBuffer, int bufferLen, Address* sender, void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->ReceiveAskMissedReq(msgBuffer, bufferLen);
+        missedReqAckContext_.msgHandler_ = new UDPMsgHandler(
+            [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->ReceiveAskMissedReq(msgHeader, msgBuffer);
             }, this);
         // Register a timer to monitor replica status
-        missedReqAckContext_.monitorTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-                receiverEP->LoopBreak();
-            }
+        missedReqAckContext_.monitorTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
+                    receiverEP->LoopBreak();
+                }
             }, this, monitorPeriodMs);
 
 
@@ -253,32 +263,37 @@ namespace nezha {
         }
 
         // Create other useful timers
-        heartbeatCheckTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            // Followers use this timer to check leader's heartbeat
-            ((Replica*)ctx)->CheckHeartBeat();
+        heartbeatCheckTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                // Followers use this timer to check leader's heartbeat
+                ((Replica*)ctx)->CheckHeartBeat();
             }, this, monitorPeriodMs);
 
-        indexAskTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->AskMissedIndex();
+        indexAskTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->AskMissedIndex();
             }, this, replicaConfig_["index-ask-period-ms"].as<int>());
         roundRobinIndexAskIdx_ = 0;
         // Initially, no missed indices, so we make first > second
         missedIndices_ = { 1, 0 };
 
-        requestAskTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->AskMissedRequest();
+        requestAskTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->AskMissedRequest();
             }, this, replicaConfig_["request-ask-period-ms"].as<int>());
         roundRobinRequestAskIdx_ = 0;
         missedReqKeys_.clear();
 
-        viewChangeTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->BroadcastViewChange();
+        viewChangeTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->BroadcastViewChange();
             }, this, replicaConfig_["view-change-period-ms"].as<int>());
         roundRobinProcessIdx_ = 0;
 
 
-        periodicSyncTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->SendSyncStatusReport();
+        periodicSyncTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->SendSyncStatusReport();
             }, this, replicaConfig_["sync-report-period-ms"].as<int>());
 
 
@@ -286,18 +301,21 @@ namespace nezha {
         indexTransferBatch_ = replicaConfig_["index-transfer-batch"].as<uint32_t>();
         requestKeyTransferBatch_ = replicaConfig_["request-key-transfer-batch"].as<uint32_t>();
 
-        stateTransferTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->SendStateTransferRequest();
+        stateTransferTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->SendStateTransferRequest();
             }, this, replicaConfig_["state-transfer-period-ms"].as<int>());
 
         stateTransferTimeout_ = replicaConfig_["state-transfer-timeout-ms"].as<uint64_t>();
 
-        crashVectorRequestTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->BroadcastCrashVectorRequest();
+        crashVectorRequestTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->BroadcastCrashVectorRequest();
             }, this, replicaConfig_["crash-vector-request-period-ms"].as<int>());
 
-        recoveryRequestTimer_ = new TimerStruct([](void* ctx, UDPSocketEndpoint* receiverEP) {
-            ((Replica*)ctx)->BroadcastRecoveryRequest();
+        recoveryRequestTimer_ = new EndpointTimer(
+            [](void* ctx, Endpoint* receiverEP) {
+                ((Replica*)ctx)->BroadcastRecoveryRequest();
             }, this, replicaConfig_["recovery-request-period-ms"].as<int>());
 
         slidingWindowLen_ = replicaConfig_["owd-estimation-window"].as<uint32_t>();
@@ -508,12 +526,7 @@ namespace nezha {
 
     }
 
-    void Replica::ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
-        if (!CheckMsgLength(msgBuffer, msgLen)) {
-            return;
-        }
-
-        MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
+    void Replica::ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer, Address* sender) {
         if (msgHdr->msgType == MessageType::CLIENT_REQUEST) {
             Request request;
             if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
@@ -599,7 +612,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            requestContext_[id].Register();
+            requestContext_[id].Register(endPointType_);
             requestContext_[id].endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
@@ -1011,27 +1024,21 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            indexSyncContext_.Register();
+            indexSyncContext_.Register(endPointType_);
             indexSyncContext_.endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
         VLOG(2) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
     }
 
-    void Replica::ReceiveIndexSyncMessage(char* msgBuffer, int msgLen) {
+    void Replica::ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer) {
         // Promise to the GarbageCollectTd, that I will not use the data before safeToClearLateBufferLogId_ and safeToClearUnSyncedLogId_, so that GarbageCollectTd can safely reclaim them
         safeToClearLateBufferLogId_.store(prepareToClearLateBufferLogId_.load());
         safeToClearUnSyncedLogId_[fastReplyQu_.size()].store(prepareToClearUnSyncedLogId_.load());
 
-        if (!CheckMsgLength(msgBuffer, msgLen)) {
-            return;
-        }
-        MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
-        char* buffer = msgBuffer + sizeof(MessageHeader);
-
         if (msgHdr->msgType == MessageType::SYNC_INDEX) {
             IndexSync idxSyncMsg;
-            if (idxSyncMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
+            if (idxSyncMsg.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 if (!CheckView(idxSyncMsg.view(), false)) {
                     return;
                 }
@@ -1053,19 +1060,17 @@ namespace nezha {
         }
         else if (msgHdr->msgType == MessageType::MISSED_REQ) {
             MissedReq missedReqMsg;
-            if (missedReqMsg.ParseFromArray(buffer, msgHdr->msgLen)) {
+            if (missedReqMsg.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 for (int i = 0; i < missedReqMsg.reqs().size(); i++) {
                     const RequestBodyMsg& rbMsg = missedReqMsg.reqs(i);
                     if (missedReqKeys_.find(rbMsg.reqkey()) != missedReqKeys_.end()) {
-
                         RequestBody* rb = new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(), rbMsg.command());
                         // We must handle it to ProcessTd instead of processing it here, to avoid data race (and further memroy leakage), although it is a trivial possibility
-
                         processQu_.enqueue(rb);
                         missedReqKeys_.erase(rbMsg.reqkey());
                         if (missedReqKeys_.empty()) {
                             // Can stop the timer now
-                            indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
+                            indexSyncContext_.endPoint_->UnRegisterTimer(requestAskTimer_);
                         }
                     }
                 }
@@ -1099,7 +1104,7 @@ namespace nezha {
             // Already fixed missing idices 
             missedIndices_ = { 1, 0 };
             if (indexSyncContext_.endPoint_->isRegistered(indexAskTimer_)) {
-                indexSyncContext_.endPoint_->UnregisterTimer(indexAskTimer_);
+                indexSyncContext_.endPoint_->UnRegisterTimer(indexAskTimer_);
             }
         }
         else {
@@ -1183,7 +1188,7 @@ namespace nezha {
         }
         if (missedReqKeys_.empty()) {
             if (indexSyncContext_.endPoint_->isRegistered(requestAskTimer_)) {
-                indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
+                indexSyncContext_.endPoint_->UnRegisterTimer(requestAskTimer_);
             }
             return true;
         }
@@ -1200,20 +1205,18 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            missedIndexAckContext_.Register();
+            missedIndexAckContext_.Register(endPointType_);
             missedIndexAckContext_.endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
         VLOG(2) << "MissedIndexAckTd Terminated " << preVal - 1 << " worker remaining";
     }
 
-    void Replica::ReceiveAskMissedIdx(char* msgBuffer, int msgLen) {
-        if (NULL == CheckMsgLength(msgBuffer, msgLen)) {
-            return;
-        }
-        AskIndex askIndex;
+    void Replica::ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer) {
 
-        if (msgBuffer[0] == MessageType::MISSED_INDEX_ASK && askIndex.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgLen - sizeof(MessageHeader))) {
+        AskIndex askIndex;
+        if (msgHdr->msgType == MessageType::MISSED_INDEX_ASK
+            && askIndex.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
             uint32_t logBegin = askIndex.logidbegin();
             uint32_t logEnd = std::min(maxSyncedLogId_.load(), askIndex.logidend());
             for (uint32_t i = logBegin; i <= logEnd; i += indexTransferBatch_) {
@@ -1240,7 +1243,7 @@ namespace nezha {
         activeWorkerNum_.fetch_add(1);
         while (status_ != ReplicaStatus::TERMINATED) {
             BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-            missedReqAckContext_.Register();
+            missedReqAckContext_.Register(endPointType_);
             missedReqAckContext_.endPoint_->LoopRun();
         }
         uint32_t preVal = activeWorkerNum_.fetch_sub(1);
@@ -1248,12 +1251,10 @@ namespace nezha {
     }
 
 
-    void Replica::ReceiveAskMissedReq(char* msgBuffer, int msgLen) {
-        if (!CheckMsgLength(msgBuffer, msgLen)) {
-            return;
-        }
+    void Replica::ReceiveAskMissedReq(MessageHeader* msgHdr, char* msgBuffer) {
         AskReq askReqMsg;
-        if (msgBuffer[0] == MessageType::MISSED_REQ_ASK && askReqMsg.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgLen - sizeof(MessageHeader))) {
+        if (msgHdr->msgType == MessageType::MISSED_REQ_ASK
+            && askReqMsg.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
             MissedReq missedReqMsg;
             missedReqMsg.set_replicaid(this->replicaId_);
             for (int i = 0; i < askReqMsg.missedreqkeys_size(); i++) {
@@ -1290,7 +1291,7 @@ namespace nezha {
 
     void Replica::AskMissedIndex() {
         if (missedIndices_.first > missedIndices_.second) {
-            indexSyncContext_.endPoint_->UnregisterTimer(indexAskTimer_);
+            indexSyncContext_.endPoint_->UnRegisterTimer(indexAskTimer_);
             return;
         }
         AskIndex askIndexMsg;
@@ -1314,7 +1315,7 @@ namespace nezha {
         // TODO: Test and confirm ev_timer_again start immediately after register
         if (missedReqKeys_.empty()) {
             // no need to start timer
-            indexSyncContext_.endPoint_->UnregisterTimer(requestAskTimer_);
+            indexSyncContext_.endPoint_->UnRegisterTimer(requestAskTimer_);
             return;
         }
         AskReq askReqMsg;
@@ -1491,79 +1492,75 @@ namespace nezha {
         }
     }
 
-    void Replica::ReceiveMasterMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP) {
-        MessageHeader* msgHdr = CheckMsgLength(msgBuffer, msgLen);
-        if (!msgHdr) {
-            return;
-        }
+    void Replica::ReceiveMasterMessage(MessageHeader* msgHdr, char* msgBuffer) {
         VLOG(4) << "msgType " << (uint32_t)(msgHdr->msgType);
 
         if (msgHdr->msgType == MessageType::VIEWCHANGE_REQ) {
             ViewChangeRequest viewChangeReq;
-            if (viewChangeReq.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (viewChangeReq.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessViewChangeReq(viewChangeReq);
             }
 
         }
         else if (msgHdr->msgType == MessageType::VIEWCHANGE) {
             ViewChange viewChangeMsg;
-            if (viewChangeMsg.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (viewChangeMsg.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessViewChange(viewChangeMsg);
             }
 
         }
         else if (msgHdr->msgType == MessageType::STATE_TRANSFER_REQUEST) {
             StateTransferRequest stateTransferReq;
-            if (stateTransferReq.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (stateTransferReq.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessStateTransferRequest(stateTransferReq);
             }
         }
         else if (msgHdr->msgType == MessageType::STATE_TRANSFER_REPLY) {
             StateTransferReply stateTransferRep;
-            if (stateTransferRep.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (stateTransferRep.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessStateTransferReply(stateTransferRep);
             }
         }
         else if (msgHdr->msgType == MessageType::START_VIEW) {
             StartView startView;
-            if (startView.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (startView.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessStartView(startView);
             }
         }
         else if (msgHdr->msgType == MessageType::CRASH_VECTOR_REQUEST) {
             CrashVectorRequest request;
-            if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (request.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessCrashVectorRequest(request);
             }
         }
         else if (msgHdr->msgType == MessageType::CRASH_VECTOR_REPLY) {
             CrashVectorReply reply;
-            if (reply.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (reply.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 VLOG(2) << "CrashVectorReply = " << reply.DebugString();
                 ProcessCrashVectorReply(reply);
             }
         }
         else if (msgHdr->msgType == MessageType::RECOVERY_REQUEST) {
             RecoveryRequest request;
-            if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (request.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessRecoveryRequest(request);
             }
         }
         else if (msgHdr->msgType == MessageType::RECOVERY_REPLY) {
             RecoveryReply reply;
-            if (reply.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (reply.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessRecoveryReply(reply);
             }
         }
         else if (msgHdr->msgType == MessageType::SYNC_STATUS_REPORT) {
             SyncStatusReport report;
-            if (report.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (report.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessSyncStatusReport(report);
             }
         }
         else if (msgHdr->msgType == MessageType::COMMIT_INSTRUCTION) {
             CommitInstruction commit;
-            if (commit.ParseFromArray(msgBuffer + sizeof(MessageHeader), msgHdr->msgLen)) {
+            if (commit.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
                 ProcessCommitInstruction(commit);
             }
         }
@@ -1681,7 +1678,7 @@ namespace nezha {
     void Replica::BroadcastViewChange() {
         if (status_ == ReplicaStatus::NORMAL) {
             // Can stop the timer
-            masterContext_.endPoint_->UnregisterTimer(viewChangeTimer_);
+            masterContext_.endPoint_->UnRegisterTimer(viewChangeTimer_);
             return;
         }
         // Broadcast VIEW-CHANGE-REQ to all replicas
@@ -1847,7 +1844,7 @@ namespace nezha {
                     myvc.set_lastnormalview(lastNormalView_);
                     viewChangeSet_[replicaId_] = myvc;
                     // Has got enough viewChange messages, stop viewChangeTimer
-                    masterContext_.endPoint_->UnregisterTimer(viewChangeTimer_);
+                    masterContext_.endPoint_->UnRegisterTimer(viewChangeTimer_);
                     TransferSyncedLog();
                 }
 
@@ -2003,7 +2000,7 @@ namespace nezha {
     void Replica::SendStateTransferRequest() {
         if (GetMicrosecondTimestamp() >= stateTransferTerminateTime_) {
             // If statetransfer cannot be completed within a certain amount of time, rollback to view change
-            masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
+            masterContext_.endPoint_->UnRegisterTimer(stateTransferTimer_);
             stateTransferTerminateCallback_();
             return;
         }
@@ -2094,7 +2091,7 @@ namespace nezha {
             return;
         }
         else if (stateTransferReply.view() > viewId_) {
-            masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
+            masterContext_.endPoint_->UnRegisterTimer(stateTransferTimer_);
             if (status_ == ReplicaStatus::RECOVERING) {
                 // This state transfer is useless, stop it and restart recovery request
                 masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
@@ -2157,7 +2154,7 @@ namespace nezha {
 
         if (stateTransferIndices_.empty()) {
             // This state transfer is completed, unregister the timer
-            masterContext_.endPoint_->UnregisterTimer(stateTransferTimer_);
+            masterContext_.endPoint_->UnRegisterTimer(stateTransferTimer_);
             // If we have a callback, then call it
             if (stateTransferCallback_) {
                 stateTransferCallback_();
@@ -2333,7 +2330,7 @@ namespace nezha {
             for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
                 crashVectorInUse_[i] = newCV;
             }
-            masterContext_.endPoint_->UnregisterTimer(crashVectorRequestTimer_);
+            masterContext_.endPoint_->UnRegisterTimer(crashVectorRequestTimer_);
             crashVectorReplySet_.clear();
             // Start Recovery Request
             masterContext_.endPoint_->RegisterTimer(recoveryRequestTimer_);
@@ -2387,7 +2384,7 @@ namespace nezha {
         recoveryReplySet_[reply.replicaid()] = reply;
         if (recoveryReplySet_.size() >= replicaNum_ / 2 + 1) {
             // Got enough quorum
-            masterContext_.endPoint_->UnregisterTimer(recoveryRequestTimer_);
+            masterContext_.endPoint_->UnRegisterTimer(recoveryRequestTimer_);
             uint32_t maxView = 0;
             uint32_t syncedLogId = 0;
             for (const auto& kv : recoveryReplySet_) {

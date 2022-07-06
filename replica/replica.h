@@ -25,6 +25,7 @@
 #include "proto/nezha-proto.pb.h"
 #include "lib/utils.h"
 #include "lib/udp_socket_endpoint.h"
+#include "lib/tcp_socket_endpoint.h"
 
 namespace nezha {
     using namespace nezha::proto;
@@ -33,13 +34,27 @@ namespace nezha {
 
     struct Context
     {
-        UDPSocketEndpoint* endPoint_;
-        MsgHandlerStruct* msgHandler_;
-        TimerStruct* monitorTimer_;
-        Context(UDPSocketEndpoint* ep = NULL, MsgHandlerStruct* m = NULL, TimerStruct* t = NULL) :endPoint_(ep), msgHandler_(m), monitorTimer_(t) {}
-        void Register() {
-            endPoint_->RegisterMsgHandler(msgHandler_);
+        Endpoint* endPoint_;
+        uint32_t channeldId_; // The dest IP and port
+        EndpointMsgHandler* msgHandler_;
+        EndpointTimer* monitorTimer_;
+        Context(Endpoint* ep = NULL, uint32_t cid = 0,
+            EndpointMsgHandler* m = NULL, EndpointTimer* t = NULL)
+            :endPoint_(ep), channeldId_(cid), msgHandler_(m), monitorTimer_(t) {}
+        void Register(uint32_t endpointType = 1) {
             endPoint_->RegisterTimer(monitorTimer_);
+            if (endpointType == 1) {
+                // UDP Endpoint
+                ((UDPSocketEndpoint*)endPoint_)->RegisterMsgHandler((UDPMsgHandler*)msgHandler_);
+            }
+            else if (endpointType == 2) {
+                // TCP Endpoint
+                ((TCPSocketEndpoint*)endPoint_)->RegisterMsgHandler(
+                    channeldId_, (TCPMsgHandler*)msgHandler_);
+            }
+            else {
+                LOG(ERROR) << "unknown endpoint type " << endpointType;
+            }
         }
     };
 
@@ -48,6 +63,7 @@ namespace nezha {
     {
     private:
         YAML::Node replicaConfig_;
+        uint32_t endPointType_; // 1 for UDP, 2 for TCP
         /** viewId_ starts from 0 */
         std::atomic<uint32_t> viewId_;
         std::atomic<uint32_t> lastNormalView_;
@@ -110,22 +126,22 @@ namespace nezha {
         Context missedIndexAckContext_;
         Context missedReqAckContext_;
         /** Timers */
-        TimerStruct* heartbeatCheckTimer_;
-        TimerStruct* indexAskTimer_;
-        TimerStruct* requestAskTimer_;
-        TimerStruct* viewChangeTimer_;
-        TimerStruct* stateTransferTimer_;
-        TimerStruct* periodicSyncTimer_;
-        TimerStruct* crashVectorRequestTimer_;
-        TimerStruct* recoveryRequestTimer_;
+        EndpointTimer* heartbeatCheckTimer_;
+        EndpointTimer* indexAskTimer_;
+        EndpointTimer* requestAskTimer_;
+        EndpointTimer* viewChangeTimer_;
+        EndpointTimer* stateTransferTimer_;
+        EndpointTimer* periodicSyncTimer_;
+        EndpointTimer* crashVectorRequestTimer_;
+        EndpointTimer* recoveryRequestTimer_;
         /** Endpoints */
-        std::vector<UDPSocketEndpoint*> indexSender_;
-        std::vector<UDPSocketEndpoint*> fastReplySender_;
-        std::vector<UDPSocketEndpoint*> slowReplySender_;
-        UDPSocketEndpoint* indexRequster_;
-        UDPSocketEndpoint* reqRequester_;
-        UDPSocketEndpoint* indexAcker_;
-        UDPSocketEndpoint* reqAcker_;
+        std::vector<Endpoint*> indexSender_;
+        std::vector<Endpoint*> fastReplySender_;
+        std::vector<Endpoint*> slowReplySender_;
+        Endpoint* indexRequster_;
+        Endpoint* reqRequester_;
+        Endpoint* indexAcker_;
+        Endpoint* reqAcker_;
         /** Addresses */
         std::vector<Address*> indexReceiver_;
         std::vector<Address*> indexAskReceiver_;
@@ -303,11 +319,11 @@ namespace nezha {
         ~Replica();
 
         /** Registered event functions */
-        void ReceiveClientRequest(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
-        void ReceiveIndexSyncMessage(char* msgBuffer, int msgLen);
-        void ReceiveAskMissedReq(char* msgBuffer, int msgLen);
-        void ReceiveAskMissedIdx(char* msgBuffer, int msgLen);
-        void ReceiveMasterMessage(char* msgBuffer, int msgLen, Address* sender, UDPSocketEndpoint* receiverEP);
+        void ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer, Address* sender);
+        void ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer);
+        void ReceiveAskMissedReq(MessageHeader* msgHdr, char* msgBuffer);
+        void ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer);
+        void ReceiveMasterMessage(MessageHeader* msgHdr, char* msgBuffer);
         void AskMissedIndex();
         void AskMissedRequest();
         void CheckHeartBeat();

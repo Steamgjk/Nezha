@@ -31,6 +31,7 @@ namespace MessageType {
     char SYNC_STATUS_REPORT = 19;
     char COMMIT_INSTRUCTION = 20;
     char SUSPEND_REPLY = 21;
+    char ERROR_MSG = 22;
 };
 
 

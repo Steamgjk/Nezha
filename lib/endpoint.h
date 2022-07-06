@@ -68,6 +68,25 @@ struct EndpointTimer {
     }
 };
 
+struct EndpointMsgHandler {
+    std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> msgHandler_;
+    void* context_;
+    Endpoint* attachedEP_;
+    Address sender_;
+    struct ev_io* evWatcher_;
+    EndpointMsgHandler(std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> msghdl,
+        void* ctx = NULL, Endpoint* aep = NULL)
+        :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
+        evWatcher_ = new ev_io();
+        evWatcher_->data = (void*)this;
+    }
+    ~EndpointMsgHandler() {
+        delete evWatcher_;
+    }
+};
+
+
+
 
 
 #endif 

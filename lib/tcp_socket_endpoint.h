@@ -14,20 +14,14 @@
 
 
 
-struct TCPMsgHandler {
-    std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> handleFunc_;
-    void* context_;
-    Endpoint* attachedEP_;
-    struct ev_io* evWatcher_;
+struct TCPMsgHandler : EndpointMsgHandler {
     char header_[sizeof(MessageHeader)];
     char* payload_;
     uint32_t currentHeaderLen_;
     uint32_t currentPayloadLen_;
-    Address sender_;
-
     TCPMsgHandler(std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> func,
         void* ctx = NULL, Endpoint* aep = NULL)
-        :handleFunc_(func), context_(ctx), attachedEP_(aep),
+        :EndpointMsgHandler(func, ctx, aep),
         payload_(NULL), currentHeaderLen_(0), currentPayloadLen_(0) {
         evWatcher_ = new ev_io();
         evWatcher_->data = (void*)this;
@@ -67,7 +61,7 @@ struct TCPMsgHandler {
                     }
                 }
                 if (m->currentPayloadLen_ == msgHeader->msgLen) {
-                    m->handleFunc_(msgHeader, m->payload_, &(m->sender_),
+                    m->msgHandler_(msgHeader, m->payload_, &(m->sender_),
                         m->context_, m->attachedEP_);
                     m->currentPayloadLen_ = 0;
                     m->currentHeaderLen_ = 0;

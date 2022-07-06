@@ -5,7 +5,8 @@ cc_library(
     deps = [
         "//proto:nezha_cc_proto",
         "//lib:utils",
-        "//lib:udp_socket_endpoint"
+        "//lib:udp_socket_endpoint",
+        "//lib:tcp_socket_endpoint"
     ],
 
 )
