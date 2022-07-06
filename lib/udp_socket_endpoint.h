@@ -12,98 +12,68 @@
 #include <google/protobuf/message.h>
 #include "lib/address.h"
 #include "lib/utils.h"
+#include "lib/endpoint.h"
 
 
-
-// TODO: In the future, we will extract a base class, and from that class, we derive two sub-classes: one for UDP and the other for TCP
-
-class UDPSocketEndpoint
-{
-private:
-    /* data */
-    Address addr_;
-    int fd_;
-    struct ev_loop* evLoop_;
-    std::set<struct MsgHandlerStruct*> msgHandlers_;
-    std::set<struct TimerStruct*> eventTimers_;
-public:
-
-    int epId_; // for debug
-    UDPSocketEndpoint();
-    UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
-    UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
-    ~UDPSocketEndpoint();
-
-    int SendMsgTo(const Address& dstAddr, const std::string& msg);
-    int SendMsgTo(const Address& dstAddr, const char* buffer, const uint32_t bufferLen);
-    int SendMsgTo(const Address& dstAddr, const google::protobuf::Message& msg, const char msgType);
-
-    bool RegisterMsgHandler(MsgHandlerStruct* msgHdl);
-    bool UnregisterMsgHandler(MsgHandlerStruct* msgHdl);
-    bool isRegistered(MsgHandlerStruct* msgHdl);
-
-    bool RegisterTimer(TimerStruct* timer);
-    bool UnregisterTimer(TimerStruct* timer);
-    bool isRegistered(TimerStruct* timer);
-    void UnRegisterAllTimers();
-
-
-    void LoopRun();
-
-    void LoopBreak();
-
-
-};
-
-struct MsgHandlerStruct {
-    std::function<void(char*, int, Address*, void*, UDPSocketEndpoint*)> msgHandler_;
+struct UDPMsgHandler {
+    std::function<void(char*, int, Address*, void*, Endpoint*)> msgHandler_;
     void* context_;
-    UDPSocketEndpoint* attachedEP_;
+    Endpoint* attachedEP_;
     char* buffer_;
     Address sender_;
     struct ev_io* evWatcher_;
 
-    MsgHandlerStruct(std::function<void(char*, int, Address*, void*, UDPSocketEndpoint*)> msghdl, void* ctx = NULL, UDPSocketEndpoint* aep = NULL) :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
+    UDPMsgHandler(std::function<void(char*, int, Address*, void*, Endpoint*)> msghdl,
+        void* ctx = NULL, Endpoint* aep = NULL)
+        :msgHandler_(msghdl), context_(ctx), attachedEP_(aep) {
+
         buffer_ = new char[UDP_BUFFER_SIZE];
         evWatcher_ = new ev_io();
         evWatcher_->data = (void*)this;
 
         ev_init(evWatcher_, [](struct ev_loop* loop, struct ev_io* w, int revents) {
-            MsgHandlerStruct* m = (MsgHandlerStruct*)(w->data);
+            UDPMsgHandler* m = (UDPMsgHandler*)(w->data);
             if (m->attachedEP_ == NULL) {
                 LOG(ERROR) << "This message handler is not attached to any endpoints";
                 return;
             }
             socklen_t sockLen = sizeof(struct sockaddr_in);
-            int msgLen = recvfrom(w->fd, m->buffer_, UDP_BUFFER_SIZE, 0, (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
+            int msgLen = recvfrom(w->fd, m->buffer_, UDP_BUFFER_SIZE, 0,
+                (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
             m->msgHandler_(m->buffer_, msgLen, &(m->sender_), m->context_, m->attachedEP_);
             });
     }
-    ~MsgHandlerStruct() {
+    ~UDPMsgHandler() {
         delete evWatcher_;
         delete[]buffer_;
     }
 };
 
-struct TimerStruct {
-    std::function<void(void*, UDPSocketEndpoint*)> timerFunc_;
-    void* context_;
-    UDPSocketEndpoint* attachedEP_;
-    struct ev_timer* evTimer_;
 
-    TimerStruct(std::function<void(void*, UDPSocketEndpoint*)> timerf, void* ctx = NULL, uint32_t periodMs = 1, UDPSocketEndpoint* aep = NULL) :timerFunc_(timerf), context_(ctx), attachedEP_(aep) {
-        evTimer_ = new ev_timer();
-        evTimer_->data = (void*)this;
-        evTimer_->repeat = periodMs * 1e-3;
-        ev_init(evTimer_, [](struct ev_loop* loop, struct ev_timer* w, int revents) {
-            TimerStruct* t = (TimerStruct*)(w->data);
-            t->timerFunc_(t->context_, t->attachedEP_);
-            });
-    }
-    ~TimerStruct() {
-        delete evTimer_;
-    }
+// TODO: In the future, we will extract a base class, and from that class, we derive two sub-classes: one for UDP and the other for TCP
+
+class UDPSocketEndpoint :public Endpoint
+{
+private:
+    /* data */
+    std::set<struct UDPMsgHandler*> msgHandlers_;
+public:
+
+    UDPSocketEndpoint();
+    UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
+    UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
+    ~UDPSocketEndpoint();
+
+    int SendMsgTo(const Address& dstAddr, const google::protobuf::Message& msg, const char msgType);
+
+    bool RegisterMsgHandler(UDPMsgHandler* msgHdl);
+    bool UnregisterMsgHandler(UDPMsgHandler* msgHdl);
+    bool isRegistered(UDPMsgHandler* msgHdl);
+
+    void LoopRun();
+    void LoopBreak();
 };
+
 
 
 

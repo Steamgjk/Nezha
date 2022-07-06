@@ -23,6 +23,29 @@ cc_library(
 )
 
 
+cc_library(
+    name = "endpoint",
+    srcs = ["endpoint.cc"],
+    hdrs = ["endpoint.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":address",
+        ":utils"
+    ],
+)
+
+
+cc_library(
+    name = "tcp_socket_endpoint",
+    srcs = ["tcp_socket_endpoint.cc"],
+    hdrs = ["tcp_socket_endpoint.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":endpoint"
+    ],
+)
+
+
 
 cc_library(
     name = "udp_socket_endpoint",
@@ -31,6 +54,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":utils"
+        ":utils",
+        ":endpoint"
     ],
 )
