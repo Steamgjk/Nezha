@@ -14,7 +14,6 @@
 #include "lib/message_type.h"
 
 
-
 class Endpoint
 {
 protected:
@@ -43,6 +42,8 @@ public:
 
 };
 
+
+typedef std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> MsgHandlerFunc;
 
 
 struct EndpointTimer {

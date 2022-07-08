@@ -30,30 +30,27 @@ namespace nezha {
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
 
-    struct UDPContext {
-        UDPSocketEndpoint* endPoint_;
-        UDPMsgHandler* msgHandler_;
-        EndpointTimer* monitorTimer_;
-    };
     struct Context
     {
         Endpoint* endPoint_;
-        uint64_t channeldId_; // Represent the IP and port of the other end (UDP does not need this because it is connectionless)
-        EndpointMsgHandler* msgHandler_;
+        void* context_;
+        MsgHandlerFunc msgHandlerFunc_;
         EndpointTimer* monitorTimer_;
-        Context(Endpoint* ep = NULL, uint64_t cid = 0,
-            EndpointMsgHandler* m = NULL, EndpointTimer* t = NULL)
-            :endPoint_(ep), channeldId_(cid), msgHandler_(m), monitorTimer_(t) {}
+        Context(Endpoint* ep = NULL, void* ctx = NULL, MsgHandlerFunc msgFunc = nullptr,
+            EndpointTimer* t = NULL)
+            :endPoint_(ep), context_(ctx), msgHandlerFunc_(msgFunc), monitorTimer_(t) {}
         void Register(char endpointType = 1) {
             endPoint_->RegisterTimer(monitorTimer_);
             if (endpointType == EndpointType::UDP_ENDPOINT) {
                 // UDP Endpoint
-                ((UDPSocketEndpoint*)endPoint_)->RegisterMsgHandler((UDPMsgHandler*)msgHandler_);
+                UDPMsgHandler* udpMsgHandler = new UDPMsgHandler(msgHandlerFunc_, context_, endPoint_);
+                ((UDPSocketEndpoint*)endPoint_)->RegisterMsgHandler(udpMsgHandler);
+                ((UDPSocketEndpoint*)endPoint_)->RegisterTimer(monitorTimer_);
             }
             else if (endpointType == EndpointType::TCP_ENDPOINT) {
                 // TCP Endpoint
-                ((TCPSocketEndpoint*)endPoint_)->RegisterMsgHandler(
-                    channeldId_, (TCPMsgHandler*)msgHandler_);
+                ((TCPSocketEndpoint*)endPoint_)->RegisterServerCallBack(msgHandlerFunc_, context_);
+                ((TCPSocketEndpoint*)endPoint_)->RegisterTimer(monitorTimer_);
             }
             else {
                 LOG(ERROR) << "unknown endpoint type " << (int)endpointType;
@@ -123,11 +120,11 @@ namespace nezha {
         uint32_t duplicateNum2_;
 
         /** Context (including a message handler and a monitor timer) */
-        Context masterContext_;
-        std::vector<Context> requestContext_;
-        Context indexSyncContext_;
-        Context missedIndexAckContext_;
-        Context missedReqAckContext_;
+        Context* masterContext_;
+        std::vector<Context*> requestContext_;
+        Context* indexSyncContext_;
+        Context* missedIndexAckContext_;
+        Context* missedReqAckContext_;
         /** Timers */
         EndpointTimer* heartbeatCheckTimer_;
         EndpointTimer* indexAskTimer_;
