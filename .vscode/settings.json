@@ -1,4 +1,6 @@
 {
+    "C_Cpp.formatting": "clangFormat",
+    "C_Cpp.clang_format_fallbackStyle": "{BasedOnStyle: Google, IncludeBlocks: Preserve, DerivePointerAlignment: false, PointerAlignment: Left}",
     "editor.formatOnSave": true,
     "files.associations": {
         "*.inc": "cpp",

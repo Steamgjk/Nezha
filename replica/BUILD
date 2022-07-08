@@ -10,16 +10,16 @@ cc_library(
 )
 
 
-
 cc_binary(
     name = "nezha_replica",
-    srcs = ["replica-run.cc"],
+    srcs = ["replica_run.cc"],
     deps = [
         ":replica_class"
     ],
     copts = [
         "-I/usr/local/include"
     ],
-    linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
+    linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
+                "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
 
 )
