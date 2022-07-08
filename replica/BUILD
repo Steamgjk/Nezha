@@ -4,9 +4,7 @@ cc_library(
     hdrs = ["replica.h"],
     deps = [
         "//proto:nezha_cc_proto",
-        "//lib:utils",
-        "//lib:udp_socket_endpoint",
-        "//lib:tcp_socket_endpoint"
+        "//lib:utils"
     ],
 
 )

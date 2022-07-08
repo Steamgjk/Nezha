@@ -44,6 +44,7 @@ namespace nezha {
         // For now, it is fine because all the memory is freed after the process is terminated
     }
 
+
     void Replica::Run() {
         // Master thread run
         masterContext_.Register(endPointType_);
@@ -141,8 +142,8 @@ namespace nezha {
         int port = replicaConfig_["master-port"].as<int>();
         int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
 
-        masterContext_.endPoint_ = new UDPSocketEndpoint(ip, port, true);
-        masterContext_.msgHandler_ = new UDPMsgHandler(
+        masterContext_.endPoint_ = CreateEndpoint(endPointType_, ip, port, true);
+        masterContext_.msgHandler_ = CreateMsgHandler(endPointType_,
             [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
                 ((Replica*)ctx)->ReceiveMasterMessage(msgHeader, msgBuffer);
             }, this);
@@ -158,9 +159,9 @@ namespace nezha {
         requestContext_.resize(replicaConfig_["receiver-shards"].as<int>());
         for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
             int port = replicaConfig_["receiver-port"].as<int>() + i;
-            requestContext_[i].endPoint_ = new UDPSocketEndpoint(ip, port);
+            requestContext_[i].endPoint_ = CreateEndpoint(endPointType_, ip, port);
             // Register a request handler to this endpoint
-            requestContext_[i].msgHandler_ = new UDPMsgHandler(
+            requestContext_[i].msgHandler_ = CreateMsgHandler(endPointType_,
                 [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
                     ((Replica*)ctx)->ReceiveClientRequest(msgHeader, msgBuffer, sender);
                 }, this);
@@ -177,10 +178,8 @@ namespace nezha {
         for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
             indexSender_.push_back(new UDPSocketEndpoint());
         }
-        indexAcker_ = new UDPSocketEndpoint();
-        reqAcker_ = new UDPSocketEndpoint();
-        indexRequster_ = new UDPSocketEndpoint();
-        reqRequester_ = new UDPSocketEndpoint();
+        indexAcker_ = CreateEndpoint(endPointType_);
+        reqRequester_ = CreateEndpoint(endPointType_);
         for (uint32_t i = 0; i < replicaNum_; i++) {
             std::string ip = replicaConfig_["replica-ips"][i].as<std::string>();
             int indexPort = replicaConfig_["index-sync-port"].as<int>();
@@ -194,9 +193,9 @@ namespace nezha {
         }
         // (Followers:) Create index-sync endpoint to receive indices
         port = replicaConfig_["index-sync-port"].as<int>();
-        indexSyncContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
+        indexSyncContext_.endPoint_ = CreateEndpoint(endPointType_, ip, port);
         // Register a msg handler to this endpoint to handle index sync messages
-        indexSyncContext_.msgHandler_ = new UDPMsgHandler(
+        indexSyncContext_.msgHandler_ = CreateMsgHandler(endPointType_,
             [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
                 ((Replica*)ctx)->ReceiveIndexSyncMessage(msgHeader, msgBuffer);
             }, this);
@@ -209,9 +208,9 @@ namespace nezha {
             }, this, monitorPeriodMs);
         // Create an endpoint to handle others' requests for missed index
         port = replicaConfig_["index-ask-port"].as<int>();
-        missedIndexAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
+        missedIndexAckContext_.endPoint_ = CreateEndpoint(endPointType_, ip, port);
         // Register message handler 
-        missedIndexAckContext_.msgHandler_ = new UDPMsgHandler(
+        missedIndexAckContext_.msgHandler_ = CreateMsgHandler(endPointType_,
             [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
                 ((Replica*)ctx)->ReceiveAskMissedIdx(msgHeader, msgBuffer);
             }, this);
@@ -225,9 +224,9 @@ namespace nezha {
 
         // Create an endpoint to handle others' requests for missed req
         port = replicaConfig_["request-ask-port"].as<int>();
-        missedReqAckContext_.endPoint_ = new UDPSocketEndpoint(ip, port);
+        missedReqAckContext_.endPoint_ = CreateEndpoint(endPointType_, ip, port);
         // Register message handler
-        missedReqAckContext_.msgHandler_ = new UDPMsgHandler(
+        missedReqAckContext_.msgHandler_ = CreateMsgHandler(endPointType_,
             [](MessageHeader* msgHeader, char* msgBuffer, Address* sender, void* ctx, Endpoint* receiverEP) {
                 ((Replica*)ctx)->ReceiveAskMissedReq(msgHeader, msgBuffer);
             }, this);

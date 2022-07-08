@@ -1,19 +1,8 @@
 #ifndef NEZHA_UDP_SOCKET_SENDER_H
 #define NEZHA_UDP_SOCKET_SENDER_H 
 
-#include <string>
-#include <netinet/in.h>
-#include <glog/logging.h>
-#include <ev.h>
-#include <arpa/inet.h>
-#include <functional>
-#include <set>
-#include <fcntl.h>
-#include <google/protobuf/message.h>
-#include "lib/address.h"
-#include "lib/utils.h"
-#include "lib/endpoint.h"
 
+#include "lib/endpoint.h"
 
 
 struct UDPMsgHandler : EndpointMsgHandler {
@@ -49,10 +38,7 @@ private:
     /* data */
     std::set<struct UDPMsgHandler*> msgHandlers_;
 public:
-
-    UDPSocketEndpoint();
-    UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
-    UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
+    UDPSocketEndpoint(const std::string& sip = "", const int sport = -1, const bool isMasterReceiver = false);
     ~UDPSocketEndpoint();
 
     int SendMsgTo(const Address& dstAddr, const google::protobuf::Message& msg, const char msgType);

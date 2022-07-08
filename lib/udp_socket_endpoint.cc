@@ -1,16 +1,5 @@
 #include "lib/udp_socket_endpoint.h"
 
-UDPSocketEndpoint::UDPSocketEndpoint() :Endpoint() {
-    fd_ = socket(PF_INET, SOCK_DGRAM, 0);
-    if (fd_ < 0) {
-        LOG(ERROR) << "Receiver Fd fail ";
-    }
-    // Set Non-Blocking
-    int status = fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL, 0) | O_NONBLOCK);
-    if (status < 0) {
-        LOG(ERROR) << " Set NonBlocking Fail";
-    }
-}
 
 UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver) :
     Endpoint(sip, sport, isMasterReceiver) {
@@ -37,14 +26,7 @@ UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport, co
     }
 }
 
-UDPSocketEndpoint::UDPSocketEndpoint(const Address& addr, const bool isMasterReceiver)
-    :UDPSocketEndpoint(addr.ip_, addr.port_, isMasterReceiver) {}
-
-
-UDPSocketEndpoint::~UDPSocketEndpoint() {
-    LoopBreak();
-    ev_loop_destroy(evLoop_);
-}
+UDPSocketEndpoint::~UDPSocketEndpoint() {}
 
 
 int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr, const google::protobuf::Message& msg, char msgType) {

@@ -11,7 +11,7 @@
 #include <fcntl.h>
 #include <google/protobuf/message.h>
 #include "lib/address.h"
-#include "lib/utils.h"
+#include "lib/message_type.h"
 
 
 
@@ -22,12 +22,11 @@ protected:
     Address addr_;
     int fd_;
     struct ev_loop* evLoop_;
-    std::set<struct EndpointTimer*> eventTimers_;
+    std::set<struct EndpointTimer*> eventTimers_; // One endpoint can have multiple timers
 public:
     int epId_; // for debug
     Endpoint();
-    Endpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
-    Endpoint(const Address& addr, const bool isMasterReceiver = false);
+    Endpoint(const std::string& sip = "", const int sport = -1, const bool isMasterReceiver = false);
     ~Endpoint();
 
     virtual int SendMsgTo(const Address& dstAddr,

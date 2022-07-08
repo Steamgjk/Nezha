@@ -2,7 +2,7 @@
 
 
 TCPSocketEndpoint::TCPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver)
-    :Endpoint(sip, sport, isMasterReceiver) {
+    :Endpoint(sip, sport, isMasterReceiver), serverCallBack_(nullptr) {
     fd_ = socket(PF_INET, SOCK_STREAM, 0);
     if (fd_ < 0) {
         LOG(ERROR) << "Accept Fd fail ";
@@ -34,40 +34,29 @@ TCPSocketEndpoint::TCPSocketEndpoint(const std::string& sip, const int sport, co
     connectionWatcher_->data = this;
     ev_io_init(connectionWatcher_, [](struct ev_loop* loop, struct ev_io* w, int revents) {
         struct sockaddr_in peerAddr;
-        struct sockaddr_in myAddr;
         socklen_t len;
         int newFd = accept(w->fd, (struct sockaddr*)&peerAddr, &len);
         if (newFd > 0) {
             // Get 5-tuples of the connection
             uint32_t peerIP = peerAddr.sin_addr.s_addr;
             uint32_t peerPort = htons(peerAddr.sin_port);
-            uint64_t otherPoint = CONCAT_UINT32(peerIP, peerPort);
-            getsockname(newFd, (struct sockaddr*)&myAddr, &len);
-            uint32_t myIP = myAddr.sin_addr.s_addr;
-            uint32_t myPort = htons(myAddr.sin_port);
-            uint64_t myPoint = CONCAT_UINT32(myIP, myPort);
-            // New Connection should be given a msgHandler
+            uint64_t channelId = CONCAT_UINT32(peerIP, peerPort);
             TCPSocketEndpoint* ep = (TCPSocketEndpoint*)(w->data);
-            TCPChannel* channel = ep->GetChannel(otherPoint);
-            if (channel) {
-                channel->myFd_ = newFd;
-                channel->myPoint_ = myPoint;
-                TCPMsgHandler* m = channel->msgHandler_;
-                m->attachedEP_ = ep;
-                ev_io_set(m->evWatcher_, channel->myFd_, EV_READ);
-                ev_io_start(ep->evLoop_, m->evWatcher_);
-            }
+            // New Connection should be given a msgHandler
+            TCPMsgHandler* tcpHdl = new TCPMsgHandler(ep->serverCallBack_, ep->context_, ep);
+            ep->channelFds_[channelId] = newFd;
+            ep->channelMsgHandlers_[channelId] = tcpHdl;
+            ep->msgHandlers_.insert(tcpHdl);
+            ev_io_set(tcpHdl->evWatcher_, newFd, EV_READ);
+            ev_io_start(ep->evLoop_, tcpHdl->evWatcher_);
         }
         }, fd_, EV_READ);
     ev_io_start(evLoop_, connectionWatcher_);
 
 }
 
-TCPSocketEndpoint::TCPSocketEndpoint(const Address& addr, const bool isMasterReceiver)
-    :TCPSocketEndpoint(addr.ip_, addr.port_, isMasterReceiver) {}
 
 TCPSocketEndpoint::~TCPSocketEndpoint() {
-    ev_io_stop(evLoop_, connectionWatcher_);
     delete connectionWatcher_;
 }
 
@@ -76,9 +65,10 @@ int TCPSocketEndpoint::SendMsgTo(const Address& dstAddr,
     uint32_t dstIP = dstAddr.addr_.sin_addr.s_addr;
     uint32_t dstPort = htons(dstAddr.addr_.sin_port);
     uint64_t channelId = CONCAT_UINT32(dstIP, dstPort);
-    TCPChannel* channel = GetChannel(channelId);
-    if (channel->myPoint_ > 0) {
+    auto kv = channelFds_.find(channelId);
+    if (kv != channelFds_.end()) {
         // Send 
+        int fd = kv->second;
         std::string serializedStr = msg.SerializeAsString();
         uint32_t len = serializedStr.length() + sizeof(MessageHeader);
         char* buffer = new char[len];
@@ -89,7 +79,7 @@ int TCPSocketEndpoint::SendMsgTo(const Address& dstAddr,
         uint32_t sentLen = 0;
         int ans = sentLen;
         while (sentLen < len) {
-            int ret = send(channel->myFd_, buffer + sentLen, len - sentLen, 0);
+            int ret = send(fd, buffer + sentLen, len - sentLen, 0);
             if (ret <= 0) {
                 LOG(ERROR) << "send fail " << ret;
                 if (errno == ECONNRESET) {
@@ -111,24 +101,18 @@ int TCPSocketEndpoint::SendMsgTo(const Address& dstAddr,
     }
 }
 
-int TCPSocketEndpoint::ConnectTo(const Address& myAddr, const Address& dstAddr) {
+// Return channelId if the connection succeeds
+uint64_t TCPSocketEndpoint::ConnectTo(const Address& dstAddr) {
     uint32_t dstIP = dstAddr.addr_.sin_addr.s_addr;
     uint32_t dstPort = htons(dstAddr.addr_.sin_port);
     uint64_t channelId = CONCAT_UINT32(dstIP, dstPort);
-    TCPChannel* channel = GetChannel(channelId);
-    if (channel) {
+
+    if (channelFds_.find(channelId) != channelFds_.end()) {
         LOG(ERROR) << "Already Connected-Channel Established ";
-        return 0;
+        return channelId;
     }
 
     int newFd = socket(PF_INET, SOCK_STREAM, 0);
-
-    // Bind socket to Address
-    int bindRet = bind(fd_, (struct sockaddr*)&(myAddr.addr_), sizeof(struct sockaddr));
-    if (bindRet != 0) {
-        LOG(ERROR) << "Bind error\t" << bindRet;
-        return bindRet;
-    }
 
     int ret = connect(newFd, (struct sockaddr*)&(dstAddr.addr_), sizeof(sockaddr));
     if (ret < 0) {
@@ -141,46 +125,59 @@ int TCPSocketEndpoint::ConnectTo(const Address& myAddr, const Address& dstAddr) 
     // Set Non-Blocking
     int status = fcntl(newFd, F_SETFL, fcntl(newFd, F_GETFL, 0) | O_NONBLOCK);
     if (status < 0) {
-        LOG(ERROR) << " Set NonBlocking Fail";
+        LOG(ERROR) << " Set NonBlocking Fail status=" << status;
         close(newFd);
-        return status;
+        return 0;
     }
-    channel = new TCPChannel();
-    channel->myFd_ = newFd;
-    uint32_t myIP = myAddr.addr_.sin_addr.s_addr;
-    uint32_t myPort = htons(myAddr.addr_.sin_port);
-    channel->myPoint_ = CONCAT_UINT32(myIP, myPort);
-    return 0;
+
+    channelFds_[channelId] = newFd;
+    if (channelMsgHandlers_.find(channelId) != channelMsgHandlers_.end()) {
+        // We have some pre-registed msg handler
+        TCPMsgHandler* tcpHdl = channelMsgHandlers_[channelId];
+        ev_io_set(tcpHdl->evWatcher_, newFd, EV_READ);
+        ev_io_start(evLoop_, tcpHdl->evWatcher_);
+    }
+    return channelId;
 }
 
-bool TCPSocketEndpoint::RegisterMsgHandler(uint64_t channelId, TCPMsgHandler* tcpMsgHdl) {
-    if (isRegistered(channelId)) {
-        LOG(ERROR) << "channel: " << channelId << " has been registered";
+
+
+void TCPSocketEndpoint::RegisterServerCallBack(
+    std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)>& func, void* ctx) {
+    serverCallBack_ = func;
+    context_ = ctx;
+}
+
+void TCPSocketEndpoint::UnRegisterServerCallBack() {
+    serverCallBack_ = nullptr;
+    context_ = NULL;
+}
+
+bool TCPSocketEndpoint::RegisterMsgHandler(const Address& dstAddr, TCPMsgHandler* tcpMsgHdl) {
+    uint32_t dstIP = dstAddr.addr_.sin_addr.s_addr;
+    uint32_t dstPort = htons(dstAddr.addr_.sin_port);
+    uint64_t channelId = CONCAT_UINT32(dstIP, dstPort);
+    if (channelMsgHandlers_.find(channelId) != channelMsgHandlers_.end()) {
+        LOG(ERROR) << "channel: " << channelId << " has some registered handlers";
         return false;
     }
-    TCPChannel* channel = new TCPChannel(tcpMsgHdl);
-    channels_[channelId] = channel;
+    if (msgHandlers_.find(tcpMsgHdl) != msgHandlers_.end()) {
+        LOG(ERROR) << " This msgHandler has already been registered to other channels";
+        return false;
+    }
+    msgHandlers_.insert(tcpMsgHdl);
+    channelMsgHandlers_[channelId] = tcpMsgHdl;
     return true;
 }
 
-bool TCPSocketEndpoint::UnRegisterMsgHandler(uint64_t channelId) {
-    if (!isRegistered(channelId)) {
-        LOG(ERROR) << "channel: " << channelId << " has not been registered";
-        return false;
+bool TCPSocketEndpoint::UnRegisterMsgHandler(const Address& dstAddr) {
+    uint32_t dstIP = dstAddr.addr_.sin_addr.s_addr;
+    uint32_t dstPort = htons(dstAddr.addr_.sin_port);
+    uint64_t channelId = CONCAT_UINT32(dstIP, dstPort);
+    if (channelMsgHandlers_.find(channelId) != channelMsgHandlers_.end()) {
+        msgHandlers_.erase(channelMsgHandlers_[channelId]);
+        channelMsgHandlers_.erase(channelId);
     }
-    channels_.erase(channelId);
+
     return true;
-}
-
-bool TCPSocketEndpoint::isRegistered(uint64_t channelId) {
-    return channels_.find(channelId) != channels_.end();
-}
-
-TCPChannel* TCPSocketEndpoint::GetChannel(uint64_t channelId) {
-    if (!isRegistered(channelId)) {
-        return NULL;
-    }
-    else {
-        return channels_[channelId];
-    }
 }

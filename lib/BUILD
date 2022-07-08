@@ -7,12 +7,14 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+
 cc_library(
-    name = "utils",
-    srcs = ["utils.cc"],
-    hdrs = ["utils.h"],
+    name = "message_type",
+    srcs = ["message_type.cc"],
+    hdrs = ["message_type.h"],
     visibility = ["//visibility:public"],
 )
+
 
 
 cc_library(
@@ -30,7 +32,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":utils"
+        ":message_type"
     ],
 )
 
@@ -54,7 +56,17 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":utils",
         ":endpoint"
     ],
+)
+
+cc_library(
+    name = "utils",
+    srcs = ["utils.cc"],
+    hdrs = ["utils.h"],
+    deps = [
+        ":tcp_socket_endpoint",
+        ":udp_socket_endpoint"
+    ],
+    visibility = ["//visibility:public"],
 )

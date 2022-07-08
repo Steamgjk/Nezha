@@ -1,8 +1,5 @@
 #include "lib/endpoint.h"
 
-Endpoint::Endpoint() :addr_("", -1) {
-    evLoop_ = ev_loop_new();
-}
 Endpoint::Endpoint(const std::string& sip, const int sport, const bool isMasterReceiver)
     :addr_(sip, sport) {
     evLoop_ = isMasterReceiver ? ev_default_loop() : ev_loop_new();
@@ -11,9 +8,6 @@ Endpoint::Endpoint(const std::string& sip, const int sport, const bool isMasterR
         return;
     }
 }
-
-Endpoint::Endpoint(const Address& addr, const bool isMasterReceiver)
-    :Endpoint(addr.ip_, addr.port_, isMasterReceiver) {}
 
 
 Endpoint::~Endpoint() {
@@ -63,6 +57,8 @@ void Endpoint::UnRegisterAllTimers() {
 bool Endpoint::isRegistered(EndpointTimer* timer) {
     return (eventTimers_.find(timer) != eventTimers_.end());
 }
+
+
 
 void Endpoint::LoopRun() {
     ev_run(evLoop_, 0);

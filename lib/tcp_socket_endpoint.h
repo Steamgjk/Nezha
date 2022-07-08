@@ -1,15 +1,6 @@
 #ifndef NEZHA_TCP_SOCKET_ENDPOINT_H
 #define NEZHA_TCP_SOCKET_ENDPOINT_H 
 
-#include <string>
-#include <netinet/in.h>
-#include <glog/logging.h>
-#include <ev.h>
-#include <arpa/inet.h>
-#include <functional>
-#include <set>
-#include <fcntl.h>
-#include <google/protobuf/message.h>
 #include "lib/endpoint.h"
 
 
@@ -61,8 +52,10 @@ struct TCPMsgHandler : EndpointMsgHandler {
                     }
                 }
                 if (m->currentPayloadLen_ == msgHeader->msgLen) {
-                    m->msgHandler_(msgHeader, m->payload_, &(m->sender_),
-                        m->context_, m->attachedEP_);
+                    if (m->msgHandler_) {
+                        m->msgHandler_(msgHeader, m->payload_, &(m->sender_),
+                            m->context_, m->attachedEP_);
+                    }
                     m->currentPayloadLen_ = 0;
                     m->currentHeaderLen_ = 0;
                     delete[](m->payload_);
@@ -79,31 +72,29 @@ struct TCPMsgHandler : EndpointMsgHandler {
 
 };
 
-struct TCPChannel {
-    TCPMsgHandler* msgHandler_;
-    uint64_t myPoint_;
-    int myFd_;
-    TCPChannel(TCPMsgHandler* hdl = NULL) : msgHandler_(hdl), myPoint_(0), myFd_(-1) {}
-};
-
 class TCPSocketEndpoint :public Endpoint
 {
 private:
-    std::unordered_map<uint64_t, TCPChannel*> channels_; // Each channel has a unique channelId, i.e., <dstIP,dstPort>
-    struct ev_io* connectionWatcher_;
+    std::unordered_set<struct TCPMsgHandler*>msgHandlers_;
+    std::unordered_map<uint64_t, struct TCPMsgHandler*> channelMsgHandlers_;
+    std::unordered_map<uint64_t, int> channelFds_;
 
+    struct ev_io* connectionWatcher_;
+    std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)> serverCallBack_;
+    // This func is used to handle incoming messages to this endpoint
+    void* context_;
 public:
-    TCPSocketEndpoint();
-    TCPSocketEndpoint(const std::string& sip, const int sport, const bool isMasterReceiver = false);
-    TCPSocketEndpoint(const Address& addr, const bool isMasterReceiver = false);
+    TCPSocketEndpoint(const std::string& sip = "", const int sport = -1, const bool isMasterReceiver = false);
     ~TCPSocketEndpoint();
     int SendMsgTo(const Address& dstAddr,
         const google::protobuf::Message& msg, const char msgType);
-    int ConnectTo(const Address& myAddr, const Address& dstAddr);
-    bool RegisterMsgHandler(uint64_t channelId, TCPMsgHandler* tcpHdl);
-    bool UnRegisterMsgHandler(uint64_t channelId);
-    bool isRegistered(uint64_t channelId);
-    TCPChannel* GetChannel(uint64_t channelId);
+    uint64_t ConnectTo(const Address& dstAddr);
+
+    void RegisterServerCallBack(std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)>& func, void* ctx);
+    void UnRegisterServerCallBack();
+
+    bool RegisterMsgHandler(const Address& dstAddr, TCPMsgHandler* tcpMsgHdl);
+    bool UnRegisterMsgHandler(const Address& dstAddr);
 
 };
 

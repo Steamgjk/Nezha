@@ -24,36 +24,39 @@
 #include <concurrentqueue.h>    
 #include "proto/nezha-proto.pb.h"
 #include "lib/utils.h"
-#include "lib/udp_socket_endpoint.h"
-#include "lib/tcp_socket_endpoint.h"
 
 namespace nezha {
     using namespace nezha::proto;
     template<typename T1> using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
     template<typename T1, typename T2> using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
 
+    struct UDPContext {
+        UDPSocketEndpoint* endPoint_;
+        UDPMsgHandler* msgHandler_;
+        EndpointTimer* monitorTimer_;
+    };
     struct Context
     {
         Endpoint* endPoint_;
-        uint32_t channeldId_; // The dest IP and port
+        uint64_t channeldId_; // Represent the IP and port of the other end (UDP does not need this because it is connectionless)
         EndpointMsgHandler* msgHandler_;
         EndpointTimer* monitorTimer_;
-        Context(Endpoint* ep = NULL, uint32_t cid = 0,
+        Context(Endpoint* ep = NULL, uint64_t cid = 0,
             EndpointMsgHandler* m = NULL, EndpointTimer* t = NULL)
             :endPoint_(ep), channeldId_(cid), msgHandler_(m), monitorTimer_(t) {}
-        void Register(uint32_t endpointType = 1) {
+        void Register(char endpointType = 1) {
             endPoint_->RegisterTimer(monitorTimer_);
-            if (endpointType == 1) {
+            if (endpointType == EndpointType::UDP_ENDPOINT) {
                 // UDP Endpoint
                 ((UDPSocketEndpoint*)endPoint_)->RegisterMsgHandler((UDPMsgHandler*)msgHandler_);
             }
-            else if (endpointType == 2) {
+            else if (endpointType == EndpointType::TCP_ENDPOINT) {
                 // TCP Endpoint
                 ((TCPSocketEndpoint*)endPoint_)->RegisterMsgHandler(
                     channeldId_, (TCPMsgHandler*)msgHandler_);
             }
             else {
-                LOG(ERROR) << "unknown endpoint type " << endpointType;
+                LOG(ERROR) << "unknown endpoint type " << (int)endpointType;
             }
         }
     };
@@ -63,7 +66,7 @@ namespace nezha {
     {
     private:
         YAML::Node replicaConfig_;
-        uint32_t endPointType_; // 1 for UDP, 2 for TCP
+        int endPointType_; // 1 for UDP, 2 for TCP
         /** viewId_ starts from 0 */
         std::atomic<uint32_t> viewId_;
         std::atomic<uint32_t> lastNormalView_;
@@ -72,7 +75,7 @@ namespace nezha {
         std::atomic<uint32_t> replicaNum_;
 
         /** Worker threads check status_ to decide whether they should be blocked (for view change) */
-        std::atomic<int> status_;
+        std::atomic<char> status_;
         /** earlyBuffer_ uses the pair <deadline, reqKey> as key. std::map will sort them in ascending order by default */
         std::map<std::pair<uint64_t, uint64_t>, RequestBody*> earlyBuffer_;
         /** lastReleasedEntryByKeys_ is used to support communativity, we record the last relased entry for each key. When new requests come, it compares with the last released entry in the same key */
@@ -135,13 +138,11 @@ namespace nezha {
         EndpointTimer* crashVectorRequestTimer_;
         EndpointTimer* recoveryRequestTimer_;
         /** Endpoints */
-        std::vector<Endpoint*> indexSender_;
+        std::vector<Endpoint*> indexSender_; // keep udp 
         std::vector<Endpoint*> fastReplySender_;
         std::vector<Endpoint*> slowReplySender_;
-        Endpoint* indexRequster_;
-        Endpoint* reqRequester_;
-        Endpoint* indexAcker_;
-        Endpoint* reqAcker_;
+        Endpoint* reqRequester_; // can be replaced by indexSyncContext_.endpoint
+        Endpoint* indexAcker_; // can be replaced by missedIndexAckContext_.endpoint
         /** Addresses */
         std::vector<Address*> indexReceiver_;
         std::vector<Address*> indexAskReceiver_;
@@ -236,7 +237,6 @@ namespace nezha {
         std::atomic<uint32_t> safeToClearLateBufferLogId_;
         /** FastReplyTd(s) and IndexSyncTd use these atomic variables to tell GarbageCollectTd, telling that it can safely clear unsynced log entries up to this point [included] */
         std::atomic<uint32_t>* safeToClearUnSyncedLogId_;
-
 
         void CreateContext();
         void LaunchThreads();
