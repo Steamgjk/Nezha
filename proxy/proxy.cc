@@ -172,7 +172,7 @@ void Proxy::CheckQuorum(const int id) {
   std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
   int sz = 0;
   char buffer[UDP_BUFFER_SIZE];
-  MessageHeader* msghdr = (MessageHeader*)(void*)buffer;
+  MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
   struct sockaddr_in recvAddr;
   socklen_t sockLen = sizeof(recvAddr);
   Reply reply;
@@ -182,18 +182,16 @@ void Proxy::CheckQuorum(const int id) {
   while (running_) {
     if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
-      if ((uint32_t)sz <= sizeof(MessageHeader)) {
+      if ((uint32_t)sz < sizeof(MessageHeader) ||
+          (uint32_t)sz < msgHdr->msgLen + sizeof(MessageHeader)) {
         continue;
       }
-      if (msghdr->msgLen + sizeof(MessageHeader) > (uint32_t)sz) {
-        continue;
-      }
-      if (msghdr->msgType == MessageType::SUSPEND_REPLY) {
+      if (msgHdr->msgType == MessageType::SUSPEND_REPLY) {
         stopForwarding_ = true;
         continue;
       }
       if (reply.ParseFromArray(buffer + sizeof(MessageHeader),
-                               msghdr->msgLen)) {
+                               msgHdr->msgLen)) {
         uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
         if (reply.owd() > 0) {
           owdQu_.enqueue(
@@ -235,8 +233,8 @@ void Proxy::CheckQuorum(const int id) {
           // Ack to client
           struct sockaddr_in* clientAddr = clientAddrs_.get(reply.clientid());
           std::string replyMsg = committedAck->SerializeAsString();
-          msghdr->msgType = MessageType::COMMIT_REPLY;
-          msghdr->msgLen = replyMsg.length();
+          msgHdr->msgType = MessageType::COMMIT_REPLY;
+          msgHdr->msgLen = replyMsg.length();
           memcpy(buffer + sizeof(MessageHeader), replyMsg.c_str(),
                  replyMsg.length());
           sendto(replyFds_[id], buffer,
@@ -309,20 +307,13 @@ void Proxy::ForwardRequests(const int id) {
     }
     if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)&receiverAddr, &len)) > 0) {
-      if (request.ParseFromArray(buffer, sz)) {
-        request.set_bound(latencyBound_);
-        request.set_proxyid(proxyIds_[id]);
-        request.set_sendtime(GetMicrosecondTimestamp());
-
-        std::string msg = request.SerializeAsString();
-        msgHdr->msgType = MessageType::CLIENT_REQUEST;
-        msgHdr->msgLen = msg.length();
-        memcpy(buffer + sizeof(MessageHeader), msg.c_str(), msg.length());
-        if (clientAddrs_.get(request.clientid()) == NULL) {
-          struct sockaddr_in* addr = new sockaddr_in(receiverAddr);
-          clientAddrs_.assign(request.clientid(), addr);
-        }
-
+      if ((uint32_t)sz < sizeof(MessageHeader) ||
+          (uint32_t)sz < msgHdr->msgLen + sizeof(MessageHeader)) {
+        continue;
+      }
+      if (msgHdr->msgType == MessageType::CLIENT_REQUEST &&
+          request.ParseFromArray(buffer + sizeof(MessageHeader),
+                                 msgHdr->msgLen)) {
         uint64_t reqKey = CONCAT_UINT32(request.clientid(), request.reqid());
         Reply* commitAck = committedReply_.get(reqKey);
         if (commitAck != NULL) {
@@ -337,6 +328,17 @@ void Proxy::ForwardRequests(const int id) {
           continue;
         }
 
+        request.set_bound(latencyBound_);
+        request.set_proxyid(proxyIds_[id]);
+        request.set_sendtime(GetMicrosecondTimestamp());
+        std::string msg = request.SerializeAsString();
+        msgHdr->msgType = MessageType::CLIENT_REQUEST;
+        msgHdr->msgLen = msg.length();
+        memcpy(buffer + sizeof(MessageHeader), msg.c_str(), msg.length());
+        if (clientAddrs_.get(request.clientid()) == NULL) {
+          struct sockaddr_in* addr = new sockaddr_in(receiverAddr);
+          clientAddrs_.assign(request.clientid(), addr);
+        }
         // Send to every replica
         for (int i = 0; i < replicaNum_; i++) {
           struct sockaddr_in* replicaAddr =
@@ -356,8 +358,8 @@ void Proxy::ForwardRequests(const int id) {
                     << "count =" << forwardCnt << "\t"
                     << "rate=" << rate << " req/sec"
                     << "\t"
-                    << "req is " << request.clientid() << "\t"
-                    << request.reqid();
+                    << "req is <" << request.clientid() << ","
+                    << request.reqid() << ">";
           startTime = endTime;
         }
       }

@@ -13,6 +13,9 @@ UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport,
   if (status < 0) {
     LOG(ERROR) << " Set NonBlocking Fail";
   }
+  if (sip == "" || sport < 0) {
+    return;
+  }
   struct sockaddr_in addr;
   bzero(&addr, sizeof(addr));
   addr.sin_family = AF_INET;
@@ -21,7 +24,7 @@ UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport,
   // Bind socket to Address
   int bindRet = bind(fd_, (struct sockaddr*)&addr, sizeof(addr));
   if (bindRet != 0) {
-    LOG(ERROR) << "bind error\t" << bindRet;
+    LOG(ERROR) << "bind error\t" << bindRet << "\t port=" << sport;
     return;
   }
 }

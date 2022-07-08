@@ -17,7 +17,7 @@ index-ask-port: 37333 # When one follower is missing some index sync msgs, it as
 master-port: 34333 # This port is mainly used to send/receive other messages
 monitor-period-ms: 50 # Each blocking thread has a monitor timer, which periodically checks the replica status and unblock the thread (and exit) when replica status is not Normal
 main-loop-period-ms: 20
-heartbeat-threshold-ms: 5000
+heartbeat-threshold-ms: 50
 index-ask-period-ms: 10 # When missing indices, we launch a timer to periodically ask indices
 request-ask-period-ms: 10 # When missing logs, we launch a timer to periodically ask logs(requests)
 view-change-period-ms: 10

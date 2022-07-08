@@ -44,7 +44,6 @@ struct Context {
         msgHandlerFunc_(msgFunc),
         monitorTimer_(t) {}
   void Register(char endpointType = 1) {
-    endPoint_->RegisterTimer(monitorTimer_);
     if (endpointType == EndpointType::UDP_ENDPOINT) {
       // UDP Endpoint
       UDPMsgHandler* udpMsgHandler =
@@ -190,6 +189,8 @@ class Replica {
   /** key: the target replica to ask for requests; value: the segment <begin,
    * end> of requests that will be transferred */
   std::map<uint32_t, std::pair<uint32_t, uint32_t>> stateTransferIndices_;
+  std::map<uint32_t, std::pair<uint32_t, uint32_t>>
+      stateTransferIndicesRef_;  // Only serves as the references
   std::function<void(void)> stateTransferCallback_;
   /** The max amount of time that the state transfer can last */
   std::uint64_t stateTransferTerminateTime_;

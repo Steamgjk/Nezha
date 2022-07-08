@@ -19,14 +19,13 @@ struct UDPMsgHandler : EndpointMsgHandler {
       socklen_t sockLen = sizeof(struct sockaddr_in);
       int msgLen = recvfrom(w->fd, m->buffer_, UDP_BUFFER_SIZE, 0,
                             (struct sockaddr*)(&(m->sender_.addr_)), &sockLen);
-      MessageHeader* msgHeader = (MessageHeader*)(void*)(m->buffer_);
-
-      if (msgLen < 0 || (uint32_t)msgLen < sizeof(MessageHeader)) {
-        msgHeader->msgType = MessageType::ERROR_MSG;
-        msgHeader->msgLen = 0;
+      if (msgLen > 0 && (uint32_t)msgLen > sizeof(MessageHeader)) {
+        MessageHeader* msgHeader = (MessageHeader*)(void*)(m->buffer_);
+        if (msgHeader->msgLen + sizeof(MessageHeader) >= (uint32_t)msgLen) {
+          m->msgHandler_(msgHeader, m->buffer_ + sizeof(MessageHeader),
+                         &(m->sender_), m->context_, m->attachedEP_);
+        }
       }
-      m->msgHandler_(msgHeader, m->buffer_ + sizeof(MessageHeader),
-                     &(m->sender_), m->context_, m->attachedEP_);
     });
   }
   ~UDPMsgHandler() {}

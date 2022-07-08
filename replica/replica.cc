@@ -175,6 +175,7 @@ void Replica::CreateContext() {
   masterContext_ =
       new Context(masterEP, this, masterCallBack, masterMonitorTimer);
 
+  LOG(INFO) << "Master Created";
   // Create request-receiver endpoints and context
   requestContext_.resize(replicaConfig_["receiver-shards"].as<int>());
   for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
@@ -198,6 +199,7 @@ void Replica::CreateContext() {
         new Context(requestEP, this, requestHandlerFunc, requestEPMonitorTimer);
   }
 
+  LOG(INFO) << "requestContext_ Created";
   // (Leader) Use these endpoints to broadcast indices to followers
   for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
     indexSender_.push_back(new UDPSocketEndpoint());
@@ -236,6 +238,8 @@ void Replica::CreateContext() {
   indexSyncContext_ =
       new Context(idxSyncEP, this, idxHandleFunc, idxSyncMonitorTimer);
 
+  LOG(INFO) << "indexSyncContext_ Created";
+
   // Create an endpoint to handle others' requests for missed index
   port = replicaConfig_["index-ask-port"].as<int>();
   Endpoint* missedIdxEP = CreateEndpoint(endPointType_, ip, port);
@@ -258,6 +262,8 @@ void Replica::CreateContext() {
   missedIndexAckContext_ = new Context(missedIdxEP, this, missedIdxHandleFunc,
                                        missedIdxAckMonitorTimer);
 
+  LOG(INFO) << "missedIndexAckContext_ Created";
+
   // Create an endpoint to handle others' requests for missed req
   port = replicaConfig_["request-ask-port"].as<int>();
   Endpoint* missedReqAckEP = CreateEndpoint(endPointType_, ip, port);
@@ -276,8 +282,10 @@ void Replica::CreateContext() {
       },
       this, monitorPeriodMs);
 
-  indexSyncContext_ = new Context(missedReqAckEP, this, missedReqAckHandleFunc,
-                                  missedReqAckMonitorTimer);
+  missedReqAckContext_ = new Context(
+      missedReqAckEP, this, missedReqAckHandleFunc, missedReqAckMonitorTimer);
+
+  LOG(INFO) << "missedReqAckContext_ Created";
 
   // Create reply endpoints
   int replyShardNum = replicaConfig_["reply-shards"].as<int>();
@@ -586,8 +594,7 @@ void Replica::ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer,
                                    Address* sender) {
   if (msgHdr->msgType == MessageType::CLIENT_REQUEST) {
     Request request;
-    if (request.ParseFromArray(msgBuffer + sizeof(MessageHeader),
-                               msgHdr->msgLen)) {
+    if (request.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
       // Collect OWD sample
       if (GetMicrosecondTimestamp() > request.sendtime()) {
         owdQu_.enqueue(std::pair<uint64_t, uint32_t>(
@@ -1175,7 +1182,7 @@ void Replica::ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer) {
       }
     }
   } else {
-    LOG(WARNING) << "Unexpected msg type " << msgHdr->msgType;
+    LOG(WARNING) << "Unexpected msg type " << (int)(msgHdr->msgType);
   }
 }
 
@@ -2106,6 +2113,8 @@ void Replica::SendStateTransferRequest() {
     // If statetransfer cannot be completed within a certain amount of time,
     // rollback to view change
     masterContext_->endPoint_->UnRegisterTimer(stateTransferTimer_);
+    LOG(INFO)
+        << "The state transfer takes too long, roll back to previous step ";
     stateTransferTerminateCallback_();
     return;
   }
@@ -2276,6 +2285,20 @@ void Replica::ProcessStateTransferReply(
           << " In Progress: " << iter->first << ":" << iter->second.first << "-"
           << iter->second.second;
 
+  uint32_t remainingPercent =
+      stateTransferIndicesRef_[stateTransferReply.replicaid()].second;
+  if (remainingPercent > 10) {
+    uint32_t previousGap =
+        stateTransferIndicesRef_[stateTransferReply.replicaid()].first;
+    uint32_t remainingGap = iter->second.second - iter->second.first;
+    if (remainingGap * 100 / previousGap < remainingPercent) {
+      LOG(INFO) << "State Tranfer from Replica "
+                << stateTransferReply.replicaid() << "\t" << remainingPercent
+                << " remain";
+      stateTransferIndicesRef_[stateTransferReply.replicaid()].second -= 10;
+    }
+  }
+
   if (iter->second.first > iter->second.second) {
     // We have completed the state transfer for this target replica
     stateTransferIndices_.erase(iter->first);
@@ -2385,7 +2408,7 @@ void Replica::BroadcastCrashVectorRequest() {
     if (i == replicaId_) {
       continue;
     }
-    LOG(INFO) << "Broadcast CV Req to Replica " << i;
+    LOG(INFO) << "Ask CrashVector to Replica " << i;
     masterContext_->endPoint_->SendMsgTo(*(masterReceiver_[i]), request,
                                          MessageType::CRASH_VECTOR_REQUEST);
   }
@@ -2460,6 +2483,7 @@ void Replica::ProcessCrashVectorReply(const CrashVectorReply& reply) {
     }
     masterContext_->endPoint_->UnRegisterTimer(crashVectorRequestTimer_);
     crashVectorReplySet_.clear();
+
     // Start Recovery Request
     masterContext_->endPoint_->RegisterTimer(recoveryRequestTimer_);
   }
@@ -2522,7 +2546,12 @@ void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
     // Get the maxView, launch state transfer with the corresponding leader
     viewId_ = maxView;
     recoveryReplySet_.clear();
+    LOG(INFO) << "Replica intends to enter View " << viewId_
+              << "\t after recovery; need to recover log number:"
+              << syncedLogId;
     if (AmLeader()) {
+      LOG(INFO) << "The recovered replica will become the leader in this view, "
+                   "skip it!";
       // If the recoverying replica happens to be the leader of the new view,
       // don't participate. Wait until the healthy replicas elect a new leader
       usleep(1000);  // sleep some time and restart the recovery process
@@ -2535,6 +2564,11 @@ void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
         transferSyncedEntry_ = true;
         stateTransferIndices_[maxView % replicaNum_] = {
             CONCURRENT_MAP_START_INDEX, syncedLogId};
+
+        stateTransferIndicesRef_[maxView % replicaNum_] = {
+            syncedLogId - CONCURRENT_MAP_START_INDEX + 1, 100};
+        LOG(INFO) << "Recover Logs from " << CONCURRENT_MAP_START_INDEX
+                  << "\t to\t" << syncedLogId;
         stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
         stateTransferTerminateTime_ =
             GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;

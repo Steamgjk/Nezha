@@ -11,9 +11,10 @@ replica-info:
   initial-owd: 80 # The initial one-way delay (us) between replicas and proxies
 # Proxy Info
 proxy-info:
+  endpoint-type: 1 # 1 for UDP Endpoint, 2 for GRPC Endpoint [to be supported soon]
   proxy-id: 1
   proxy-ip: "127.0.0.4"
   shard-num: 1
-  max-owd: 80
+  max-owd: 200
   request-port-base: 32000
   reply-port-base: 33000

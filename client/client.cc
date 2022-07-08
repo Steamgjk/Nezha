@@ -249,7 +249,8 @@ void Client::OpenLoopSubmissionTd() {
     }
   }
 
-  LOG(INFO) << "Terminating soon...";
+  LOG(INFO) << "Terminating soon... after "
+            << (endTime - GetMicrosecondTimestamp()) * 1e-6 << " seconds";
   while (GetMicrosecondTimestamp() < endTime) {
     // Client has executed long enough, should terminate
     usleep(1000);
@@ -310,7 +311,8 @@ void Client::CloseLoopSubmissionTd() {
       }
     }
   }
-  LOG(INFO) << "Terminating soon...";
+  LOG(INFO) << "Terminating soon... after "
+            << (endTime - GetMicrosecondTimestamp()) * 1e-6 << " seconds";
   while (GetMicrosecondTimestamp() < endTime) {
     // Client has executed long enough, should terminate
     usleep(1000);
