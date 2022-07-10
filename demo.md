@@ -22,7 +22,7 @@ We have prepared the configuration files in ```configs``` folder, these configur
 **Step 4**: After leader is killed, the remaining 2 replicas start view change to enter a new view, i.e., view 1. In this new view, the leader becomes ```viewId%replicaNum=1```, i.e., replica-1. Since there are still a majority of replicas (i.e., 2 replicas) alive, the system can resume service.
 ![Step-4](figs/nezha-vr-test-figs/step-4.png)
 
-**Step 5**: We want the failed replica to rejoin the system. Therefore, we launch replica-0. This time, we set the flag ```isRecovering``` as true, so that it goes through the recovery process and retrieve the state from the other healthy replicas.
+**Step 5**: We want the failed replica to rejoin the system. Therefore, we launch replica-0. This time, we set the flag ```isRecovering``` as true, so that it goes through the recovery procedure and retrieves the state from the other healthy replicas.
 ![Step-5](figs/nezha-vr-test-figs/step-5.png)
 
 **Step 6**: We can see that replica-0 rejoins the system as a follower, and the current view is 1.
@@ -44,12 +44,12 @@ poisson-rate: 10
 **Step 2**: After the client is launched, we can see it continues to submit requests and the proxy continues to forward requests for the client. For every 5 seconds, the client terminal will print a log to show the stats.
 ![Step-2](figs/nezha-test-with-client/step-2.png)
 
-**Step 3**: While the client is submitting requests, we kill the leader (i.e. replica-0), we can see that the remaining 2 replicas rapidly complete the view change and get the new leader, which takes about ```1657418951138477-1657418950947251=191226 us=191ms```. It can complete the view change so fast, because of the optimization of periodical synchronization (which has been explained in our paper). Because of the periodical synchronization, the new leader replica does not need to do state transfer from scratch, it just needs to do state transfer and log merge from the last commit point. 
+**Step 3**: While the client is submitting requests, we kill the leader (i.e. replica-0), we can see that the remaining 2 replicas rapidly complete the view change and get the new leader, which takes about ```1657418951138477-1657418950947251=191226us=191ms```. It can complete the view change so fast, because of the optimization of periodical synchronization (which has been explained in our paper). Because of the periodical synchronization, the new leader replica does not need to do state transfer from scratch, it just needs to do state transfer and log merge from the last commit point. 
 ![Step-3](figs/nezha-test-with-client/step-3.png)
 
 
 
-**Step 4**: We want to the crashed replica (i.e. replica-0) to rejoin the system. So we set ```isRecovering``` flag as true. 
+**Step 4**: We want the crashed replica (i.e. replica-0) to rejoin the system. So we set ```isRecovering``` flag as true. 
 ![Step-4](figs/nezha-test-with-client/step-4.png)
 
 
