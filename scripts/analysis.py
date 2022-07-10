@@ -1,5 +1,6 @@
 import pandas as pd
 from IPython import embed; 
+import argparse
 
 LOGIN_PATH = "/home/steam1994"
 FAST_REPLY = 6
@@ -7,9 +8,23 @@ SLOW_REPLY = 7
 COMMIT_REPLY = 8
 
 if __name__ == '__main__':
-    num_replicas = 3
-    num_proxies = 2
-    num_clients = 10
+    parser = argparse.ArgumentParser(description='Process some integers.')
+    parser.add_argument('--num_replicas',  type=int, default = 3,
+                        help='Specify the number of replicas ')
+    parser.add_argument('--num_proxies',  type=int, default = 2,
+                        help='Specify the number of proxies ')
+    parser.add_argument('--num_clients',  type=int, default = 10,
+                        help='Specify the number of clients ')
+    args = parser.parse_args()
+
+    num_replicas = args.num_replicas
+    num_proxies = args.num_proxies
+    num_clients = args.num_clients
+
+    print("replicas: ", num_replicas)
+    print("proxies: ", num_proxies)
+    print("clients: ", num_clients)
+
 
     folder_name = "stats"
     stats_folder = "{login_path}/{folder_name}".format(

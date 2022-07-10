@@ -11,7 +11,7 @@ client-info:
   client-ip: "127.0.0.5"
   request-port: 32912
   is-openloop: true
-  poisson-rate: 100 # it means the client sends x reqs/10ms on average (should be larger than 10, otherwise, the submission rate is not accurate)
+  poisson-rate: 150 # it means the client sends x reqs/10ms on average (should be larger than 10, otherwise, the submission rate is not accurate)
   duration-sec: 60 # it means the duration of the client runs (second)
   key-num: 1000000 # when key-num is 1, it means there is no commutativity optimization
   skew-factor: 0.5 # 0-0.99 The higher the zipfian factor is, the more skewed the workload is

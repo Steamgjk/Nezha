@@ -327,10 +327,6 @@ def start_instance_list(instance_list, zone="us-central1-a"):
     os.system(start_cmd)
 
 if __name__ == '__main__':
-    num_replicas = 3
-    num_proxies = 2
-    num_clients = 10
-
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('--num_replicas',  type=int, default = 3,
                         help='Specify the number of replicas ')
@@ -343,7 +339,9 @@ if __name__ == '__main__':
     num_replicas = args.num_replicas
     num_proxies = args.num_proxies
     num_clients = args.num_clients
-
+    print("replicas: ", num_replicas)
+    print("proxies: ", num_proxies)
+    print("clients: ", num_clients)
 
     
     # cfg_file_name = generate_ttcs_cfg_file("10.128.3.79", is_reference=True, use_ntp=False)
@@ -363,7 +361,7 @@ if __name__ == '__main__':
     proxy_vm_type = "n1-standard-32"
     client_vm_type = "n1-standard-4"
 
-    binary_path = "{login_path}/nezhav2/bazel-bin/nezha".format(login_path = LOGIN_PATH)
+    binary_path = "{login_path}/nezhav2/bazel-bin/".format(login_path = LOGIN_PATH)
 
     config_path = "{login_path}/nezhav2/configs".format(login_path = LOGIN_PATH)
 
@@ -402,7 +400,8 @@ if __name__ == '__main__':
     #     start_ttcs_node(vm_ips[i],False)
     # exit(0)
 
-    # del_instance_list(instance_list=vm_name_list)
+    #### del_instance_list(instance_list=vm_name_list)
+
     # start_instance_list(instance_list = vm_name_list)
     # time.sleep(60)
     # launch_ttcs(vm_ips)
@@ -473,16 +472,22 @@ if __name__ == '__main__':
     rm_cmd = "sudo rm -rf {remote_path}".format(remote_path=remote_path)
     run_command(vm_ips, rm_cmd, in_background=False)
 
-    mkdir_cmd = "mkdir -p {login_path}/nezhav2/bazel-bin/nezha".format(login_path = LOGIN_PATH)
+    mkdir_cmd = "mkdir -p {binary_path}/replica".format(binary_path = binary_path)
     run_command(vm_ips, mkdir_cmd, in_background=False)
 
-    binary_file = "{binary_path}/nezha_client".format(binary_path=binary_path)
+    mkdir_cmd = "mkdir -p {binary_path}/proxy".format(binary_path = binary_path)
+    run_command(vm_ips, mkdir_cmd, in_background=False)
+    
+    mkdir_cmd = "mkdir -p {binary_path}/client".format(binary_path = binary_path)
+    run_command(vm_ips, mkdir_cmd, in_background=False)
+
+    binary_file = "{binary_path}/client/nezha_client".format(binary_path=binary_path)
     scp_files(vm_ips, binary_file, binary_file, to_remote = True)
 
-    binary_file = "{binary_path}/nezha_replica".format(binary_path=binary_path)
+    binary_file = "{binary_path}/replica/nezha_replica".format(binary_path=binary_path)
     scp_files(vm_ips, binary_file, binary_file, to_remote = True)
     
-    binary_file = "{binary_path}/nezha_proxy".format(binary_path=binary_path)
+    binary_file = "{binary_path}/proxy/nezha_proxy".format(binary_path=binary_path)
     scp_files(vm_ips, binary_file, binary_file, to_remote = True)
     
 
@@ -497,7 +502,7 @@ if __name__ == '__main__':
 
     ## Launch replicas (id starts from 0)
     for i in range(num_replicas):
-        replica_cmd = "{binary_path}/nezha_replica --config {config_path}/nezha-replica-config-{idx}.yaml > {log_file} 2>&1 &".format(
+        replica_cmd = "{binary_path}/replica/nezha_replica --config {config_path}/nezha-replica-config-{idx}.yaml > {log_file} 2>&1 &".format(
             binary_path = binary_path,
             config_path = config_path,
             idx  =i,
@@ -506,10 +511,10 @@ if __name__ == '__main__':
         print(colored(replica_cmd, "yellow", attrs=['bold']))
         run_command([replica_ips[i]], replica_cmd, in_background=False)
 
-    input("stop...")
+    # input("stop...")
     # Launch proxies (id starts from 1)
     for i in range(num_proxies):
-        proxy_cmd = "{binary_path}/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml  > {log_file} 2>&1 &".format(
+        proxy_cmd = "{binary_path}/proxy/nezha_proxy --config {config_path}/nezha-proxy-config-{idx}.yaml  > {log_file} 2>&1 &".format(
             binary_path = binary_path,
             config_path = config_path,
             idx = i+1,
@@ -521,7 +526,7 @@ if __name__ == '__main__':
    
     # Launch clients (id starts from 2)
     for i in range(num_clients):
-        client_cmd = "{binary_path}/nezha_client --config {config_path}/nezha-client-config-{idx}.yaml >{log_file} 2>&1 &".format(
+        client_cmd = "{binary_path}/client/nezha_client --config {config_path}/nezha-client-config-{idx}.yaml >{log_file} 2>&1 &".format(
             binary_path = binary_path,
             config_path = config_path,
             idx = i+1,
