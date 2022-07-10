@@ -1,4 +1,0 @@
-syntax = "proto3";
-message testMsg {
-    uint32 testint =1;
-}
