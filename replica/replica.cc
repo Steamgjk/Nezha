@@ -138,16 +138,16 @@ void Replica::CreateContext() {
   replicaId_ = replicaConfig_["replica-id"].as<int>();
   replicaNum_ = replicaConfig_["replica-ips"].size();
   keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
-  lastReleasedEntryByKeys_.resize(keyNum_, {0ul, 0ul});
+  lastReleasedEntryByKeys_.assign(keyNum_, {0ul, 0ul});
   // Since ConcurrentMap reserves 0 and 1, log-id starts from from 2
   // So these variables are initialized as 2-1=1
   maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   maxLateBufferId_ = CONCURRENT_MAP_START_INDEX - 1;
-  maxSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-  minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-  maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  maxSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  minUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  maxUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
 
   committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   toCommitLogId_ = CONCURRENT_MAP_START_INDEX - 1;
@@ -296,7 +296,7 @@ void Replica::CreateContext() {
   // Create reply queues (one queue per fast/slow reply thread)
   fastReplyQu_.resize(replyShardNum);
   slowReplyQu_.resize(replyShardNum);
-  slowRepliedLogId_.resize(replyShardNum, CONCURRENT_MAP_START_INDEX - 1);
+  slowRepliedLogId_.assign(replyShardNum, CONCURRENT_MAP_START_INDEX - 1);
 
   // Create CrashVector Context
   std::vector<uint32_t> cvVec(replicaNum_, 0);
@@ -449,8 +449,8 @@ void Replica::ResetContext() {
   maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   minUnSyncedLogIdByKey_.clear();
   maxUnSyncedLogIdByKey_.clear();
-  minUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
-  maxUnSyncedLogIdByKey_.resize(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  minUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  maxUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
   ConcurrentMap<uint32_t, LogEntry*>::Iterator iter(unsyncedEntries_);
   std::vector<uint64_t> keysToRemove;
   while (iter.isValid()) {
@@ -781,7 +781,7 @@ void Replica::ProcessTd(int id) {
            nowTime >= earlyBuffer_.begin()->first.first) {
       rb = earlyBuffer_.begin()->second;
       lastReleasedEntryByKeys_[rb->opKey] = earlyBuffer_.begin()->first;
-      ProcessRequest(rb, amLeader, true);
+      ProcessRequest(rb, amLeader, true, amLeader);
       earlyBuffer_.erase(earlyBuffer_.begin());
     }
   }
@@ -791,7 +791,7 @@ void Replica::ProcessTd(int id) {
 }
 
 void Replica::ProcessRequest(const RequestBody* rb, const bool isSyncedReq,
-                             const bool sendReply) {
+                             const bool sendReply, const bool canExecute) {
   SHA_HASH myHash = CalculateHash(rb->deadline, rb->reqKey);
   SHA_HASH hash = myHash;
   LogEntry* prev = NULL;
@@ -803,9 +803,14 @@ void Replica::ProcessRequest(const RequestBody* rb, const bool isSyncedReq,
       // There are previous (non-commutative) requests appended
       prev = syncedEntries_.get(prevLogId);
       ASSERT(prev != NULL);
+      if (prev == NULL) {
+        LOG(ERROR) << "prevLogId=" << prevLogId << " opKey=" << rb->opKey
+                   << "  tentative logId=" << maxSyncedLogId_ + 1;
+      }
       hash.XOR(prev->hash);
     }
-    std::string result = ApplicationExecute(*rb);
+
+    std::string result = canExecute ? ApplicationExecute(*rb) : "";
     entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, result);
 
     uint32_t logId = maxSyncedLogId_ + 1;
@@ -2002,6 +2007,10 @@ void Replica::TransferSyncedLog() {
         GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
     stateTransferTerminateCallback_ =
         std::bind(&Replica::RollbackToViewChange, this);
+    LOG(INFO) << "Start state transfer targetReplica " << targetReplicaId
+              << "\t"
+              << "seg=" << stateTransferIndices_[targetReplicaId].first << "\t"
+              << stateTransferIndices_[targetReplicaId].second;
     // Start the state tranfer timer
     masterContext_->endPoint_->RegisterTimer(stateTransferTimer_);
   } else {
@@ -2071,7 +2080,7 @@ void Replica::MergeUnSyncedLog() {
         delete rb;
         continue;
       }
-      ProcessRequest(rb, true, false);
+      ProcessRequest(rb, true, false, true);
     }
   }
   requestsToMerge_.clear();
@@ -2242,6 +2251,14 @@ void Replica::ProcessStateTransferReply(
     return;
   }
 
+  // So long as the state transfer is making progress, we should give it more
+  // time instead of early termination
+  // Only if the state transfer has not made progress within
+  // stateTransferTimeout_. then we terminate it and rollback to some previous
+  // function
+  stateTransferTerminateTime_ =
+      GetMicrosecondTimestamp() + +stateTransferTimeout_ * 1000;
+
   if (stateTransferReply.issynced()) {
     // This is the state-transfer for synced requests
     for (uint32_t i = iter->second.first; i <= stateTransferReply.logend();
@@ -2262,7 +2279,7 @@ void Replica::ProcessStateTransferReply(
       RequestBody* rb =
           new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
                           rbMsg.proxyid(), rbMsg.command());
-      ProcessRequest(rb, true, false);
+      ProcessRequest(rb, true, false, false);
     }
   } else {
     // This is the state-transfer for unsynced request (log merge)
@@ -2294,7 +2311,9 @@ void Replica::ProcessStateTransferReply(
     if (remainingGap * 100 / previousGap < remainingPercent) {
       LOG(INFO) << "State Tranfer from Replica "
                 << stateTransferReply.replicaid() << "\t" << remainingPercent
-                << " remain";
+                << "\% of progress (i.e., " << remainingGap
+                << " logs) remaining";
+      ;
       stateTransferIndicesRef_[stateTransferReply.replicaid()].second -= 10;
     }
   }
@@ -2307,6 +2326,8 @@ void Replica::ProcessStateTransferReply(
   if (stateTransferIndices_.empty()) {
     // This state transfer is completed, unregister the timer
     masterContext_->endPoint_->UnRegisterTimer(stateTransferTimer_);
+    stateTransferIndices_.clear();
+    stateTransferIndicesRef_.clear();
     // If we have a callback, then call it
     if (stateTransferCallback_) {
       stateTransferCallback_();
@@ -2547,7 +2568,7 @@ void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
     viewId_ = maxView;
     recoveryReplySet_.clear();
     LOG(INFO) << "Replica intends to enter View " << viewId_
-              << "\t after recovery; need to recover log number:"
+              << "\t after recovery; the number of logs to recover is:"
               << syncedLogId;
     if (AmLeader()) {
       LOG(INFO) << "The recovered replica will become the leader in this view, "
@@ -2733,6 +2754,7 @@ bool Replica::Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv) {
 }
 
 void Replica::RollbackToViewChange() {
+  LOG(INFO) << "Rollback to restart view change";
   status_ = ReplicaStatus::VIEWCHANGE;
   viewChangeSet_.clear();
   if (false == masterContext_->endPoint_->isRegistered(viewChangeTimer_)) {
@@ -2741,8 +2763,22 @@ void Replica::RollbackToViewChange() {
 }
 
 void Replica::RollbackToRecovery() {
+  LOG(INFO) << "Rollback to restart recovery";
   status_ = ReplicaStatus::RECOVERING;
   recoveryReplySet_.clear();
+  // Since we start a new round of recovery, the logs obtained from the previous
+  // round (if any) will not count. Delete them (=clean state) and restart
+  for (uint32_t i = CONCURRENT_MAP_START_INDEX; i <= maxSyncedLogId_; i++) {
+    LogEntry* entry = syncedEntries_.get(i);
+    if (entry) {
+      syncedReq2LogId_.erase(entry->body.reqKey);
+      delete entry;
+      syncedEntries_.erase(i);
+    }
+  }
+  maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  maxSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+
   if (false == masterContext_->endPoint_->isRegistered(recoveryRequestTimer_)) {
     masterContext_->endPoint_->RegisterTimer(recoveryRequestTimer_);
   }

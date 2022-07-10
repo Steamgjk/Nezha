@@ -22,7 +22,7 @@ index-ask-period-ms: 10 # When missing indices, we launch a timer to periodicall
 request-ask-period-ms: 10 # When missing logs, we launch a timer to periodically ask logs(requests)
 view-change-period-ms: 10
 state-transfer-period-ms: 10
-state-transfer-timeout-ms: 100000 # If the state-transfer has not been completed after such long time, then rollback to viewchange
+state-transfer-timeout-ms: 10000 # If the state-transfer has not been completed after such long time, then rollback to viewchange
 index-transfer-batch: 30
 request-key-transfer-batch: 60
 request-transfer-batch: 5

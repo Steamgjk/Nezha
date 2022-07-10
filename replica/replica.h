@@ -305,7 +305,8 @@ class Replica {
   void ProcessSyncStatusReport(const SyncStatusReport& report);
   void ProcessCommitInstruction(const CommitInstruction& commit);
   void ProcessRequest(const RequestBody* rb, const bool isSyncedReq = true,
-                      const bool sendReply = true);
+                      const bool sendReply = true,
+                      const bool canExecute = false);
 
   /** The interfaces to bridge specific applications with Nezha */
   std::string ApplicationExecute(const RequestBody& request);
