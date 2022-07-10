@@ -77,7 +77,8 @@ After building the project successfully, the executable files will be generated 
 ## All-in-One-Box Test
 
 We briefly describe the commands to launch the all-in-one-box test.
-Please refer to [more detailed instructions](demo.md) to run the one-box demo.
+
+The readers can also refer to [more detailed instructions](demo.md) to run the one-box demo.
 
 ```
 # Launch one beefy machine (e.g., with 16 or 32 CPUs)
