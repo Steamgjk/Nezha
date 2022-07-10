@@ -76,6 +76,9 @@ After building the project successfully, the executable files will be generated 
 
 ## All-in-One-Box Test
 
+We briefly describe the commands to launch the all-in-one-box test.
+Please refer to [more detailed instructions](demo.md) to run the one-box demo.
+
 ```
 # Launch one beefy machine (e.g., with 16 or 32 CPUs)
 # Launch 3 replicas (All the configuration info is written in ONE yaml file)
@@ -104,7 +107,7 @@ GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-
 
 ```
 
-Please refer to [more detailed instructions](demo.md) to run the one-box demo.
+
 
 
 ## Important Configuration Parameters
