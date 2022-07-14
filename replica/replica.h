@@ -1,65 +1,62 @@
 #ifndef NEZHA_REPLICA_H
 #define NEZHA_REPLICA_H
 
-#include <arpa/inet.h>
-#include <concurrentqueue.h>
-#include <ev.h>
-#include <glog/logging.h>
-#include <junction/ConcurrentMap_Leapfrog.h>
-#include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <strings.h>
-#include <unistd.h>
 #include <yaml-cpp/yaml.h>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
-#include <chrono>
 #include <condition_variable>
-#include <fstream>
-#include <iostream>
-#include <string>
-#include <thread>
-#include <vector>
 #include "lib/utils.h"
 #include "proto/nezha_proto.pb.h"
 
 namespace nezha {
 using namespace nezha::proto;
-template <typename T1>
-using ConcurrentQueue = moodycamel::ConcurrentQueue<T1>;
-template <typename T1, typename T2>
-using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
-
-struct Context {
+/** Receiver is more complex than sender. A sender only needs an endpoint.
+ * But A Receiver needs an endpoint (endPoint_) to receive messages, and the
+ * message should be handled bu an already-registered handler (msgHandlerFunc_).
+ * Besides, in order to unblock the endpoint during view change, there is also a
+ *  timer (monitorTimer_) needed, to keep monitor the status of the replica.
+ *
+ * We package all the necessary components into ReceiverContext for brievity
+ */
+struct ReceiverContext {
   Endpoint* endPoint_;
   void* context_;
-  MsgHandlerFunc msgHandlerFunc_;
-  EndpointTimer* monitorTimer_;
-  Context(Endpoint* ep = NULL, void* ctx = NULL,
-          MsgHandlerFunc msgFunc = nullptr, EndpointTimer* t = NULL)
+  MessageHandlerFunc msgHandlerFunc_;
+  Timer* monitorTimer_;
+  ReceiverContext(Endpoint* ep = NULL, void* ctx = NULL,
+                  MessageHandlerFunc msgFunc = nullptr, Timer* t = NULL)
       : endPoint_(ep),
         context_(ctx),
         msgHandlerFunc_(msgFunc),
         monitorTimer_(t) {}
-  void Register(char endpointType = 1) {
+  void Register(int endpointType = EndpointType::UDP_ENDPOINT) {
     if (endpointType == EndpointType::UDP_ENDPOINT) {
       // UDP Endpoint
       UDPMsgHandler* udpMsgHandler =
-          new UDPMsgHandler(msgHandlerFunc_, context_, endPoint_);
+          new UDPMsgHandler(msgHandlerFunc_, context_);
       ((UDPSocketEndpoint*)endPoint_)->RegisterMsgHandler(udpMsgHandler);
       ((UDPSocketEndpoint*)endPoint_)->RegisterTimer(monitorTimer_);
     } else {
+      // To support other types of endpoints later
       LOG(ERROR) << "unknown endpoint type " << (int)endpointType;
     }
   }
 };
 
+/**
+ * Refer to replica_run.cc, the runnable program only needs to instantiate a
+ * Replica object with a configuration file. Then it calls Run() method to run
+ * and calls Terminate() method to stop
+ */
+
 class Replica {
  private:
+  /** All the configuration parameters for the replica are included in
+   * replicaConfig_*/
   YAML::Node replicaConfig_;
-  int endPointType_;  // 1 for UDP, 2 for TCP
+  /** 1 for UDP, 2 for GRPC (not supported yet) */
+  int endPointType_;
   /** viewId_ starts from 0 */
   std::atomic<uint32_t> viewId_;
   std::atomic<uint32_t> lastNormalView_;
@@ -70,85 +67,121 @@ class Replica {
   /** Worker threads check status_ to decide whether they should be blocked (for
    * view change) */
   std::atomic<char> status_;
+
+  /** After request is received, it first go through recordMap */
+  std::vector<ConcurrentMap<uint64_t, LogEntry*>> recordMap_;
+
+  /** TrackTd traverses the synced log list and record in
+   * syncedLogEntryByReqKey_ and syncedLogEntryByLogId_ */
+  std::vector<LogEntry*> trackedEntry_;
+
   /** earlyBuffer_ uses the pair <deadline, reqKey> as key. std::map will sort
    * them in ascending order by default */
-  std::map<std::pair<uint64_t, uint64_t>, RequestBody*> earlyBuffer_;
+  std::map<std::pair<uint64_t, uint64_t>, LogEntry*> earlyBuffer_;
+
   /** lastReleasedEntryByKeys_ is used to support communativity, we record the
    * last relased entry for each key. When new requests come, it compares with
    * the last released entry in the same key */
   std::vector<std::pair<uint64_t, uint64_t>> lastReleasedEntryByKeys_;
-  /** lateBuffer_ is only used by followers, the key is logId */
-  ConcurrentMap<uint32_t, RequestBody*> lateBuffer_;
-  /** Inverse Index: used (by followers) to look up request from lateBuffer with
-   * a reqKey. reqKey is concated by clientId and reqId
-   */
-  ConcurrentMap<uint64_t, uint32_t> lateBufferReq2LogId_;
-  std::atomic<uint32_t> maxLateBufferId_;
-
-  /** log-id as the key */
-  ConcurrentMap<uint32_t, LogEntry*> syncedEntries_;
-  ConcurrentMap<uint32_t, LogEntry*> unsyncedEntries_;
-  /** Inverse Index: find logId with a reqKey */
-  ConcurrentMap<uint64_t, uint32_t> syncedReq2LogId_;
-  ConcurrentMap<uint64_t, uint32_t> unsyncedReq2LogId_;
-
-  /** maxSyncedLogId_ and minUnSyncedLogId_ combine to work as sync-point, and
-   * provide convenience for garbage-collection */
-  std::atomic<uint32_t> maxSyncedLogId_;
-  std::atomic<uint32_t> maxUnSyncedLogId_;
-  /** minUnSyncedLogId_ will be used to reduce state transfer amount */
-  uint32_t minUnSyncedLogId_;
 
   /**  keyNum_ indicates the number of keys that requests will work on (to
    * support commutativity optimization). We assume one request will only work
    * on one key */
   uint32_t keyNum_;
-  /** maxSyncedLogIdByKey_, minUnSyncedLogIdByKey_  and maxUnSyncedLogIdByKey_
-   * are fine-grained version of maxSyncedLogId_, maxUnSyncedLogIdByKey_ and
-   * minUnSyncedLogId_, to support commutativity optimization */
-  std::vector<uint32_t> maxSyncedLogIdByKey_;
-  std::vector<uint32_t> maxUnSyncedLogIdByKey_;
-  std::vector<uint32_t> minUnSyncedLogIdByKey_;
 
-  /** Each thread is given a unique name (key) */
+  LogEntry* syncedLogEntryHead_;
+  LogEntry* unSyncedLogEntryHead_;
+  std::atomic<LogEntry*> maxSyncedLogEntry_;
+  std::atomic<LogEntry*> maxUnSyncedLogEntry_;
+  LogEntry* minUnSyncedLogEntry_;
+  std::vector<LogEntry*> maxSyncedLogEntryByKey_;
+  std::vector<LogEntry*> maxUnSyncedLogEntryByKey_;
+  std::vector<LogEntry*> minUnSyncedLogEntryByKey_;
+
+  /** Index Map, facilate for entry look-up */
+  ConcurrentMap<uint64_t, LogEntry*> syncedLogEntryByReqKey_;
+  ConcurrentMap<uint32_t, LogEntry*> syncedLogEntryByLogId_;
+
+  /** Each thread is given a unique name (key) and stored in the pool */
   std::map<std::string, std::thread*> threadPool_;
 
-  /** SlowReplyTd(s) track the maxSyncedLogId to advance  slowRepliedLogId_ */
-  std::vector<uint32_t> slowRepliedLogId_;
   /** committedLogId_ and toCommitLogId_ are used for peridical synchronization
    * (to accelerate failure recovery) */
   std::atomic<uint32_t> committedLogId_;
   std::atomic<uint32_t> toCommitLogId_;
-  uint32_t duplicateNum_;  // For debug, will be deleted
+
+  /**  For debug, will be deleted */
+  uint32_t duplicateNum_;
   uint32_t duplicateNum1_;
   uint32_t duplicateNum2_;
+  std::vector<uint64_t> hbVec_;
+  std::vector<uint64_t> hvCheckVec_;
+  ConcurrentMap<uint64_t, uint64_t> clientTimes_;
+  ConcurrentMap<uint64_t, uint64_t> proxyTimes_;
+  ConcurrentMap<uint64_t, uint64_t> recvTimes_;
+  ConcurrentMap<uint64_t, uint64_t> fastReplyTimes_;
+  ConcurrentMap<uint64_t, uint64_t> slowReplyTimes_;
+  ConcurrentMap<uint64_t, uint64_t> deadlines_;
+  std::unordered_map<uint64_t, LogEntry*> tm1_;
+  std::unordered_map<uint64_t, uint64_t> tm2_;
+  ConcurrentMap<uint64_t, uint64_t> hashMa_[4];
+  std::vector<LogEntry*> vec1_;
 
   /** Context (including a message handler and a monitor timer) */
-  Context* masterContext_;
-  std::vector<Context*> requestContext_;
-  Context* indexSyncContext_;
-  Context* missedIndexAckContext_;
-  Context* missedReqAckContext_;
-  /** Timers */
-  EndpointTimer* heartbeatCheckTimer_;
-  EndpointTimer* indexAskTimer_;
-  EndpointTimer* requestAskTimer_;
-  EndpointTimer* viewChangeTimer_;
-  EndpointTimer* stateTransferTimer_;
-  EndpointTimer* periodicSyncTimer_;
-  EndpointTimer* crashVectorRequestTimer_;
-  EndpointTimer* recoveryRequestTimer_;
-  /** Endpoints */
-  std::vector<Endpoint*> indexSender_;  // keep udp
+  ReceiverContext* masterContext_;
+  std::vector<ReceiverContext*> requestContext_;
+  ReceiverContext* indexSyncContext_;
+  ReceiverContext* missedIndexAckContext_;
+  ReceiverContext* missedReqAckContext_;
+
+  /** Timers
+   *
+   * Since message can be dropped after it is sent. For those messages which are
+   * required to be eventually delivered, we register a timer to the endpoint,
+   * which keeps sending the message, until the sender knows it is
+   * delivered and unregister the timer
+   */
+  Timer* heartbeatCheckTimer_;
+  Timer* indexAskTimer_;
+  Timer* requestAskTimer_;
+  Timer* viewChangeTimer_;
+  Timer* stateTransferTimer_;
+  Timer* periodicSyncTimer_;
+  Timer* crashVectorRequestTimer_;
+  Timer* recoveryRequestTimer_;
+
+  /** Endpoints
+   *
+   * These endpoints are only used as senders, so they do not need the complex
+   * context struct as receivers
+   */
+  std::vector<Endpoint*> indexSender_;  // send indices (Sec 5.4)
   std::vector<Endpoint*> fastReplySender_;
   std::vector<Endpoint*> slowReplySender_;
-  Endpoint* reqRequester_;  // can be replaced by indexSyncContext_.endpoint
-  Endpoint* indexAcker_;  // can be replaced by missedIndexAckContext_.endpoint
+  Endpoint* indexRequester_; /** In the slow path, when indices are missing,
+                                Follower uses this endpoint to send requests
+                                asking for the missing indices */
+  Endpoint* reqRequester_;   /** Follower uses this endpoint to send requests
+                                asking for the missed requests */
+  Endpoint* indexAcker_; /** Leader uses this endpoint to reply the indices to
+                            the requested followers */
+
   /** Addresses */
-  std::vector<Address*> indexReceiver_;
-  std::vector<Address*> indexAskReceiver_;
-  std::vector<Address*> requestAskReceiver_;
-  std::vector<Address*> masterReceiver_;
+  std::vector<Address*>
+      indexReceiver_; /** Leader will send indices to these addresses (each
+                         follower has such an address to receive index) */
+  std::vector<Address*>
+      indexAskReceiver_; /** Follower sends ask-requests to these addresses
+                            when it is missing some indices */
+  std::vector<Address*>
+      requestAskReceiver_; /** Followers send ask-requests to these addresses
+                              when it is missing some requests */
+  std::vector<Address*>
+      masterReceiver_; /** Each replica maintains a master thread, which
+                          sends/receives/processes different types of control
+                          messages, therefore, each replica matains such an
+                          address vector (size of replicaNum) to know the
+                          address of others' master thread */
 
   /* Round robin indices are used to achieve load balance among threads of the
    * same functionality (e.g., multiple reply threads) */
@@ -160,7 +193,12 @@ class Replica {
    * garbage-collection */
   ConcurrentMap<uint32_t, CrashVectorStruct*> crashVector_;
   /** Each related thread (i.e. fast reply threads + index recv thread + index
-   * ack thread) will hold an atomic pointer */
+   * ack thread) will hold an atomic pointer, pointing to the crash vector they
+   * are currently using.
+   *
+   * The garbage collect thread will check crashVectorInUse_ to decide which
+   * CrashVectorStruct can be safely reclaimed.
+   *  */
   std::atomic<CrashVectorStruct*>* crashVectorInUse_;
   /** The number of threads using crash vectors (i.e., the length of
    * crashVectorInUse_) */
@@ -198,15 +236,25 @@ class Replica {
    * stateTransferTerminateTime_, execute the following callback and terminate
    * the state transfer */
   std::function<void(void)> stateTransferTerminateCallback_;
-  std::vector<uint32_t> filterUnSyncedLogIds_;
 
-  /** Used for log merge to build new logs. Key: <deadline, reqKey>; Value:
-   * <request, the number of remaining replicas containing this request>  */
-  std::map<std::pair<uint64_t, uint64_t>, std::pair<RequestBody*, uint32_t>>
+  /** Before transfer unsynced logs, the replica needs to first filter all the
+   * unsynced logs, because most of them overlap with synced logs, which has
+   * already been transferred, so we only need to transfer a small portion of
+   * unsynced logs after filtering out those overlapped ones  */
+  std::vector<LogEntry*> filterUnSyncedEntries_;
+
+  /** During leader election, the new leader use requestsToMerge_ to merge logs
+   * collected from the quorum of replicas.
+   *
+   * Key: <deadline, reqKey>; Value: <request, the number of remaining replicas
+   * containing this request>  */
+  std::map<std::pair<uint64_t, uint64_t>, std::pair<LogEntry*, uint32_t>>
       requestsToMerge_;
 
   // Recovery related variables
   std::string nonce_;
+  /** Key: replicaId. These structuers are used to check whether a quorum has
+   * been formed */
   std::map<uint32_t, CrashVectorReply> crashVectorReplySet_;
   std::map<uint32_t, RecoveryReply> recoveryReplySet_;
   std::map<uint32_t, ViewChange> viewChangeSet_;
@@ -215,18 +263,37 @@ class Replica {
   /** Inserted by ReceiveTd, and looked up by FastReplyTd/SlowReplyTd */
   ConcurrentMap<uint64_t, Address*> proxyAddressMap_;
 
-  /** Followers used lastHeartBeatTime_ to check whether it should issue view
-   * change */
+  /** Followers periodically check lastHeartBeatTime_ to decide whether it
+   * should issue view change
+   *
+   * lastHeartBeatTime_ is updated every time the follower receives a heartbeat
+   * message (i.e. IndexSync and CommitInstruction)
+   *  */
   std::atomic<uint64_t> lastHeartBeatTime_;
+
+  /** Tentative-- TODO: Add more explanation */
+  uint64_t lastAskMissedIndexTime_;
+  uint64_t lastAskMissedRequestTime_;
+  std::unordered_map<uint64_t, uint64_t> askTimebyReqKey_;
+  std::vector<uint64_t> fetchTime_;
+
   /** Replicas use it to check whether every worker thread has stopped */
   std::atomic<uint32_t> activeWorkerNum_;
+  /** The total number of worker threads. When terminating, replicas use this
+   * variable to detect whether every thread has been terminated and exited */
   uint32_t totalWorkerNum_;
   /** To implement blocking mechanism, see BlockWhenStatusIsNot function */
   std::condition_variable waitVar_;
   std::mutex waitMutext_;
 
+  ConcurrentQueue<uint64_t> tagQu_;  // For Debug, will be deleted
   /** To communicate between ReceiveTd and ProcessTd */
-  ConcurrentQueue<RequestBody*> processQu_;
+  ConcurrentQueue<LogEntry*> processQu_;
+  /** To communicate between ReceiveTd and RecordTd */
+  std::vector<ConcurrentQueue<RequestBody*>> recordQu_;
+  /** To communicate between IndexRecvTd and IndexProcessTd */
+  ConcurrentQueue<std::pair<MessageHeader*, char*>> indexQu_;
+
   /** To communinicate between ProcessTd and FastReplyTd */
   std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
   /** To communinicate between ProcessTd and SlowReplyTd */
@@ -262,32 +329,80 @@ class Replica {
    * to this point [included] */
   std::atomic<uint32_t>* safeToClearUnSyncedLogId_;
 
+  /** Create/Initialize all the necessary variables, it is only called once
+   * during the lifetime of the replica */
   void CreateContext();
+  /** Launch all the threads, only called once during the lifetime of the
+   * replica */
   void LaunchThreads();
+  /** After a view change or recovery is completed, the replica enters a new
+   * view*/
   void EnterNewView();
 
   /** View Change (recovery) related */
+  /** Reset the necessary variables. It is called every time when we initiate a
+   * view change, and this function is  much more lightweight than CreateContext
+   */
   void ResetContext();
   void InitiateViewChange(const uint32_t view);
+  /** Send ViewChangeRequest to every replica and send ViewChange to the
+   * leader. Used to instantiate viewChangeTimer_*/
   void BroadcastViewChange();
+  /** Send ViewChangeRequest to a specific replica */
   void SendViewChangeRequest(const int toReplicaId);
+  /** Send ViewChange to the leader(i.e., whose replicaId = view % replicaNum)
+   */
   void SendViewChange();
+  /** A crashed replica needs to first call InitiateRecovery in order to join
+   * the system */
   void InitiateRecovery();
+  /** The RECOVERING replica asks every healthy replica for crash vector */
   void BroadcastCrashVectorRequest();
+  /** The RECOVERING replica asks every healthy replica for necessary recovery
+   * information (e.g., the current view, the synced logs on that replica) */
   void BroadcastRecoveryRequest();
+  /** The new leader, after fully recovery, send StartView to others */
   void SendStartView(const int toReplicaId);
+  /** Replicas use state transfer to retrieve (large number of) log entries from
+   * others. Used to instantiate stateTransferTimer_ */
   void SendStateTransferRequest();
+  /** If the view change process takes too long and cannot be completed (this
+   * can happen when the leader in the new view also fails), the replica will
+   * terminate the current view change process and starts a new view change with
+   * higher viewId */
   void RollbackToViewChange();
+  /** If the recovery process takes too long and cannot be completed (this can
+   * happen when the RECOVERING replica happens to be the leader in the new
+   * view), this replica will terminate the in-progress recovery and starts a
+   * new round of recovery, after the healthy replicas have elected a new leader
+   among themseleves */
   void RollbackToRecovery();
+  /** During view change, replicas may have some uncommitted requests, which
+   * will not show in the new view, so replicas will rewind log list and
+   * eliminate those uncommitted onces, and appended with the committed entries
+   * from the leader
+   */
   void RewindSyncedLogTo(uint32_t rewindPoint);
 
   /** Periodic Sync related */
+  /** Followers periodically report their sync-point to the leader, so the
+   * leader can decide the commit-point.
+   * Used to instantiate periodicSyncTimer_ */
   void SendSyncStatusReport();
+  /** Leader send commit-point to followers, so followers can safely execute the
+  log entries up to commit-point. This is very useful to accelerate view change
+  after the leader fails (details in  para. ``Acceleration of Recovery'' of Sec
+  6 of our paper) */
   void SendCommit();
 
   /** Garbage-Collect related */
+  /** If the logs (on the followers) have not been added into synced log list
+   * and has been stayed on the replica for too long, then the garbage-collect
+   * (gc) thread will reclaim it and free its memory */
   void ReclaimStaleLogs();
   void PrepareNextReclaim();
+  /** If the crashVectorStruct is no longer used by any thread on this replica,
+   * the gc-thread collects it */
   void ReclaimStaleCrashVector();
 
   /** Message handler */
@@ -304,7 +419,7 @@ class Replica {
   void ProcessRecoveryReply(const RecoveryReply& reply);
   void ProcessSyncStatusReport(const SyncStatusReport& report);
   void ProcessCommitInstruction(const CommitInstruction& commit);
-  void ProcessRequest(const RequestBody* rb, const bool isSyncedReq = true,
+  void ProcessRequest(LogEntry* rb, const bool isSyncedReq = true,
                       const bool sendReply = true,
                       const bool canExecute = false);
 
@@ -312,50 +427,106 @@ class Replica {
   std::string ApplicationExecute(const RequestBody& request);
 
   /** Tools */
+  /** Print all the information in the replicaConfig_ */
+  void PrintConfig();
+  /** Check whether this replica is leader, return true if it is */
   bool AmLeader();
+  /** During view change, BlockWhenStatusIsNot uses the conditional variable
+   * (waitVar_) to block the worker threads. Finally only the master thread is
+   * alive, so that it can run the related procedure without risks of data race
+   */
   void BlockWhenStatusIsNot(char targetStatus);
-  MessageHeader* CheckMsgLength(const char* msgBuffer, const int msgLen);
-  /** Master thread can initiate view change, non-master threads only switch
-   * status to ViewChange  */
+
+  /**
+   * CheckView returns true if the message's view (Parameter-1) is consistent
+   * with the replica's current view
+   *
+   * Master thread (isMaster) can initiate view change, non-master threads only
+   * switch status to ViewChange  */
   bool CheckView(const uint32_t view, const bool isMaster = true);
+
+  /** CheckCV checks the crashVector to decide whether the incoming message is
+   * stray message. It returns true if the cv is valid (i.e., the message is not
+   * stray message) */
   bool CheckCV(const uint32_t senderId,
                const google::protobuf::RepeatedField<uint32_t>& cv);
+
+  /** Check whether the incoming message's crash vector (the passed-in cv) will
+   * lead to the update of replica's crashVector (i.e., crashVector_[0]).
+   * If it needs aggregation, this function will aggreate it and return true */
   bool Aggregated(const google::protobuf::RepeatedField<uint32_t>& cv);
+
+  /**
+   * During state transfer, the log transfer are divided into two parts, synced
+   * log transfer and unsynced log transfer. Which are undertaken by the
+   * following two functions
+   */
   void TransferSyncedLog();
   void TransferUnSyncedLog();
+
+  /**
+   * After enough unsynced logs have been collected by the leader, the leader
+   * merges the unsynced logs to deice which logs can be includec in the
+   * newly-built log list (details in Sec 6 and Appendix A.3 of our paper)
+   */
   void MergeUnSyncedLog();
-  void PrintConfig();
+
   /** Convert our self-defined message to proto message */
   void RequestBodyToMessage(const RequestBody& rb, RequestBodyMsg* rbMsg);
 
-  /** Threads */
+  /** Threads
+   *
+   * Functions whose names are ended with ``Td`` will be instianted with a
+   * thread. Some functions are heavy and needed to be parallelized, so the
+   * parallized threads with the same functionality are distinguished with the
+   * first parameter, id.
+   *
+   * Some functions will also use crash vector, to distinguish the crash vectors
+   * used by them, the functions also accept the second parameter, cvId.  */
   void ReceiveTd(int id = -1);
   void ProcessTd(int id = -1);
+  void RecordTd(int id = -1);
+  void TrackTd(int id = -1);
   void FastReplyTd(int id = -1, int cvId = -1);
   void SlowReplyTd(int id = -1);
   void IndexSendTd(int id = -1, int cvId = -1);
   void IndexRecvTd();
+  void IndexProcessTd();
   void MissedIndexAckTd();
   void MissedReqAckTd();
   void OWDCalcTd();
   void GarbageCollectTd();
 
- public:
-  Replica(const std::string& configFile =
-              std::string("../configs/nezha-replica-config.yaml"),
-          bool isRecovering = false);
-  ~Replica();
-
-  /** Registered event functions */
+  /** Message handler functions
+   * These message handler functions will be used to instantiate MessageHandlers
+   * and attached to their related endpoints.
+   */
   void ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer,
                             Address* sender);
   void ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer);
   void ReceiveAskMissedReq(MessageHeader* msgHdr, char* msgBuffer);
   void ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer);
   void ReceiveMasterMessage(MessageHeader* msgHdr, char* msgBuffer);
+
+  /** Used to instantiate indexAskTimer_ */
   void AskMissedIndex();
+  /** Used to instantiate requestAskTimer_*/
   void AskMissedRequest();
+  /** Used to instantiate heartbeatCheckTimer_ */
   void CheckHeartBeat();
+
+ public:
+  /** Replica accepts a config file, which contains all the necessary
+   * information to instantiate the object, then it can call Run method
+   *
+   * Specifically, if this replica has crashed before, it will recieve
+   * isRecovering=true, then it first completes the recovery procedure before it
+   * can join the system
+   *  */
+  Replica(const std::string& configFile =
+              std::string("../configs/nezha-replica-config.yaml"),
+          bool isRecovering = false);
+  ~Replica();
 
   void Run();
   void Terminate();

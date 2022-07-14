@@ -346,9 +346,13 @@ if __name__ == '__main__':
     
     # cfg_file_name = generate_ttcs_cfg_file("10.128.3.79", is_reference=True, use_ntp=False)
     
-    replica_ips = ["10.128.2."+str(i+10) for i in range(num_replicas)]
-    proxy_ips = ["10.128.2."+str(i+20) for i in range(num_replicas, num_proxies+num_replicas) ]
-    client_ips = ["10.128.2."+str(i+30) for i in range(num_replicas+num_proxies, num_clients+num_proxies+num_replicas) ]
+    replica_ips = ["10.128.2."+str(i+10) for i in range(3)]
+    proxy_ips = ["10.128.2."+str(i+20) for i in range(3, 5) ]
+    client_ips = ["10.128.2."+str(i+30) for i in range(5, 15) ]
+
+    replica_ips = replica_ips[0:num_replicas]
+    proxy_ips = proxy_ips[0:num_proxies]
+    client_ips = client_ips[0:num_clients]
 
     replica_name_list = [TAG+"-replica-"+str(i) for i in range(num_replicas) ]
     proxy_name_list = [ TAG+"-proxy-"+str(i) for i in range(num_proxies) ]
@@ -402,15 +406,16 @@ if __name__ == '__main__':
 
     #### del_instance_list(instance_list=vm_name_list)
 
-    # start_instance_list(instance_list = vm_name_list)
-    # time.sleep(60)
-    # launch_ttcs(vm_ips)
-    # exit(0)
 
     stop_instance_list(instance_list = vm_name_list)
     exit(0)
 
 
+    # start_instance_list(instance_list = vm_name_list)
+    # time.sleep(60)
+    # print(vm_ips)
+    # launch_ttcs(vm_ips)
+    # exit(0)
 
 
     # Generate configs
@@ -559,3 +564,16 @@ if __name__ == '__main__':
             file_name = file_name
         )
         scp_files([client_ips[i]], local_file_path, remote_path, to_remote=False)
+
+
+    for i in range(num_proxies):
+        file_name = "Proxy-Stats-"+str(i+1)+".csv"
+        local_file_path = "{stats_folder}/{file_name}".format(
+            stats_folder = stats_folder,
+            file_name = file_name
+        )
+        remote_path = "{stats_folder}/{file_name}".format(
+            stats_folder = LOGIN_PATH,
+            file_name = file_name
+        )
+        scp_files([proxy_ips[i]], local_file_path, remote_path, to_remote=False)

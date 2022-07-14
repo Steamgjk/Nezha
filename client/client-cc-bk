@@ -21,22 +21,21 @@ Client::Client(const std::string& configFile) {
   requestEP_ = CreateEndpoint(endPointType_, clientIP, requestPort, true);
   replyHandler_ = CreateMsgHandler(
       endPointType_,
-      [](MessageHeader* msgHdr, char* msgBuffer, Address* sender, void* ctx) {
+      [](MessageHeader* msgHdr, char* msgBuffer, Address* sender, void* ctx,
+         Endpoint* receiverEP) {
         ((Client*)ctx)->ReceiveReply(msgHdr, msgBuffer, sender);
       },
       this);
 
-  monitorTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  monitorTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         // LOG(INFO) << "Monitor running " << ((Client*)ctx)->running_;
         if (((Client*)ctx)->running_ == false) {
-          ((Endpoint*)receiverEP)->LoopBreak();
+          receiverEP->LoopBreak();
         }
       },
-      10 /*Checks the status every 10ms*/, this);
+      this, 10);
 
-  /** Fetch the addreses of all proxies and organize them as a two-dimensional
-   * vector */
   proxyAddrs_.resize(clientConfig_["proxy-info"]["proxy-ips"].size());
   for (uint32_t i = 0; i < proxyAddrs_.size(); i++) {
     proxyAddrs_[i].resize(
@@ -48,8 +47,6 @@ Client::Client(const std::string& configFile) {
     }
   }
 
-  /** If the client is a open-loop client, generate the poission trace for the
-   * client */
   if (clientConfig_["client-info"]["is-openloop"].as<bool>()) {
     poissonRate_ = clientConfig_["client-info"]["poisson-rate"].as<int>();
     LOG(INFO) << "OpenLoop Client rate=" << poissonRate_;
@@ -65,7 +62,6 @@ Client::Client(const std::string& configFile) {
       }
     }
   }
-  /** Generate zipfian workload */
   int keyNum = clientConfig_["client-info"]["key-num"].as<int>();
   float skewFactor = clientConfig_["client-info"]["skew-factor"].as<float>();
   LOG(INFO) << "keyNum=" << keyNum << "\tskewFactor=" << skewFactor;
@@ -80,8 +76,6 @@ Client::Client(const std::string& configFile) {
       zipfianKeys_[i] = zipfianDistribution(generator);
     }
   }
-
-  /** Initialize */
   committedReqId_ = 0;
   reclaimedReqId_ = 0;
   nextReqId_ = 1;
@@ -91,6 +85,7 @@ Client::Client(const std::string& configFile) {
 
 void Client::Run() {
   running_ = true;
+  suspending_ = false;
   LaunchThreads();
   for (auto& kv : threadPool_) {
     LOG(INFO) << "Join " << kv.first;
@@ -160,9 +155,6 @@ void Client::LaunchThreads() {
 }
 
 void Client::ProcessReplyTd() {
-  /** Register the message handler and timer. Then this thread will run in an
-   * event-driven mode, i.e, when message comes, it calls the registered message
-   * handler */
   requestEP_->RegisterMsgHandler(replyHandler_);
   requestEP_->RegisterTimer(monitorTimer_);
   LOG(INFO) << "Loop Run ";
@@ -181,24 +173,29 @@ void Client::ReceiveReply(MessageHeader* msgHdr, char* msgBuffer,
     committedNum_++;
     uint64_t sendTime = outstandingRequestSendTime_.get(reply.reqid());
     if (sendTime > 0) {
-      /** The corresponding request has not been committed, because it is still
-       * in outstandingRequestSendTime_, so we wan to mark it as committed,
-       * i.e., erase from outstandingRequestSendTime_
-       */
-
-      /**
-       * Generate log information and pass to logQu_, which will be handled by
-       * LogTd
-       * */
       uint64_t recvTime = GetMicrosecondTimestamp();
+      hop3s.push_back(reply.proxytime() - reply.replicatime());
+      hop4s.push_back(GetMicrosecondTimestamp() - reply.proxytime());
+      totals.push_back(recvTime - sendTime);
+      if (hop3s.size() == 500000) {
+        sort(hop3s.begin(), hop3s.end());
+        sort(hop4s.begin(), hop4s.end());
+        sort(totals.begin(), totals.end());
+        LOG(INFO) << "hop3 " << hop3s[hop3s.size() / 2] << "\t"
+                  << hop3s[hop3s.size() / 4 * 3] << "\t"
+                  << hop3s[hop3s.size() / 10 * 9];
+        LOG(INFO) << "hop4 " << hop4s[hop4s.size() / 2] << "\t"
+                  << hop4s[hop4s.size() / 4 * 3] << "\t"
+                  << hop4s[hop4s.size() / 10 * 9];
+        LOG(INFO) << "total " << totals[totals.size() / 2] << "\t"
+                  << totals[totals.size() / 4 * 3] << "\t"
+                  << totals[totals.size() / 10 * 9];
+      }
       // Still Outstanding
       LogInfo* log = new LogInfo();
       *log = {reply.reqid(), sendTime, recvTime, reply.replytype()};
       outstandingRequestSendTime_.erase(reply.reqid());
-      // logQu_.enqueue(log);
-      if (committedNum_ % 100000 == 0) {
-        LOG(INFO) << "Latency Sample =" << recvTime - sendTime;
-      }
+      logQu_.enqueue(log);
     }
   }
 }
@@ -218,6 +215,11 @@ void Client::OpenLoopSubmissionTd() {
        i++) {
     if (!running_) {
       return;
+    }
+    if (suspending_) {
+      while (suspending_) {
+        usleep(1000);
+      }
     }
     if (GetMicrosecondTimestamp() >= endTime) {
       // Client has executed long enough, should terminate
@@ -288,6 +290,12 @@ void Client::CloseLoopSubmissionTd() {
   endTime += 10 * 1000ul * 1000ul;
   LOG(INFO) << "Expected to end at " << endTime;
   while (running_) {
+    if (suspending_) {
+      // do something
+      while (suspending_) {
+        usleep(1000);
+      }
+    }
     if (GetMicrosecondTimestamp() >= endTime) {
       // Client has executed long enough, should terminate
       LOG(INFO) << "Terminating soon...";
@@ -336,7 +344,6 @@ void Client::CloseLoopSubmissionTd() {
 }
 
 void Client::LogTd() {
-  return;
   LogInfo* log = NULL;
   uint64_t startTime, endTime;
   uint32_t lastSubmitteddReqId = 0;

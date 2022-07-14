@@ -10,6 +10,9 @@ message Request {
     bytes command=5;
     uint64 proxyid = 6;
     uint32 key = 7;
+    uint64 clienttime = 8;
+    uint64 replicatime = 9;
+    uint64 tagid = 10;
 }
 
 message RequestBodyMsg {
@@ -20,11 +23,12 @@ message RequestBodyMsg {
     uint32 key = 5;
 }
 message TimeStats {
-    uint64 sendtime = 1;
-    uint64 proxytime1 =2;
-    uint64 replicatime1 = 3;
-    uint64 replicatime2= 4;
-    uint64 proxytime2 = 5;
+    uint64 clienttime = 1;
+    uint64 proxytime = 2;
+    uint64 recvtime =3;
+    uint64 fastreplytime = 4;
+    uint64 slowreplytime= 5;
+    uint64 deadline = 6;
 }
 message Reply {
     uint32 clientid = 1;
@@ -36,7 +40,8 @@ message Reply {
     uint32 replytype = 7;
     uint32 owd = 8;
     uint32 syncedlogid = 9; // use this value to piggyback slow-reply
-    // TimeStats t = 10; // This is for debug, should be deleted after release
+    TimeStats t = 10;
+
 }
 
 message IndexSync {

@@ -18,14 +18,6 @@ Replica::Replica(const std::string& configFile, bool isRecovering)
 
   lastAskMissedIndexTime_ = 0;
   lastAskMissedRequestTime_ = 0;
-  syncedLogEntryHead_ = new LogEntry();
-  syncedLogEntryHead_->logId = CONCURRENT_MAP_START_INDEX - 1;
-  syncedLogEntryHead_->body.deadline = 0;
-  syncedLogEntryHead_->body.reqKey = 0;
-  unSyncedLogEntryHead_ = new LogEntry();
-  unSyncedLogEntryHead_->logId = CONCURRENT_MAP_START_INDEX - 1;
-  unSyncedLogEntryHead_->body.deadline = 0;
-  unSyncedLogEntryHead_->body.reqKey = 0;
 
   // Load Config
   replicaConfig_ = YAML::LoadFile(configFile);
@@ -46,7 +38,7 @@ Replica::~Replica() {
   status_ = ReplicaStatus::TERMINATED;
   for (auto& kv : threadPool_) {
     delete kv.second;
-    VLOG(2) << "Deleted\t" << kv.first;
+    LOG(INFO) << "Deleted\t" << kv.first;
   }
 
   // TODO: A more elegant way is to reclaim or dump all logs before exit
@@ -90,7 +82,6 @@ void Replica::PrintConfig() {
     LOG(INFO) << "ReplicaID:" << replicaConfig_["replica-id"].as<int>();
     LOG(INFO) << "Request Receiver Shards:"
               << replicaConfig_["receiver-shards"].as<int>();
-    LOG(INFO) << "Record Shards: " << replicaConfig_["record-shards"].as<int>();
     LOG(INFO) << "Process Shards:"
               << replicaConfig_["process-shards"].as<int>();
     LOG(INFO) << "Reply Shards:" << replicaConfig_["reply-shards"].as<int>();
@@ -154,14 +145,13 @@ void Replica::CreateContext() {
   lastReleasedEntryByKeys_.assign(keyNum_, {0ul, 0ul});
   // Since ConcurrentMap reserves 0 and 1, log-id starts from from 2
   // So these variables are initialized as 2-1=1
-
-  maxSyncedLogEntry_ = syncedLogEntryHead_;
-  maxUnSyncedLogEntry_ = unSyncedLogEntryHead_;
-  minUnSyncedLogEntry_ = unSyncedLogEntryHead_;
-
-  maxSyncedLogEntryByKey_.assign(keyNum_, NULL);
-  maxUnSyncedLogEntryByKey_.assign(keyNum_, NULL);
-  minUnSyncedLogEntryByKey_.assign(keyNum_, NULL);
+  maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  maxLateBufferId_ = CONCURRENT_MAP_START_INDEX - 1;
+  maxSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  minUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  maxUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
 
   committedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   toCommitLogId_ = CONCURRENT_MAP_START_INDEX - 1;
@@ -173,21 +163,21 @@ void Replica::CreateContext() {
   int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
   Endpoint* masterEP = CreateEndpoint(endPointType_, ip, port, true);
   auto masterCallBack = [](MessageHeader* msgHeader, char* msgBuffer,
-                           Address* sender, void* ctx) {
+                           Address* sender, void* ctx, Endpoint* receiverEP) {
     ((Replica*)ctx)->ReceiveMasterMessage(msgHeader, msgBuffer);
   };
   // Register a timer to monitor replica status
-  Timer* masterMonitorTimer = new Timer(
-      [](void* ctx, void* receiverEP) {
+  EndpointTimer* masterMonitorTimer = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         if (((Replica*)ctx)->status_ == ReplicaStatus::TERMINATED) {
           // Master thread will only break its loop when status comes to
           // TERMINATED
-          ((Endpoint*)receiverEP)->LoopBreak();
+          receiverEP->LoopBreak();
         }
       },
-      monitorPeriodMs, this);
+      this, monitorPeriodMs);
   masterContext_ =
-      new ReceiverContext(masterEP, this, masterCallBack, masterMonitorTimer);
+      new Context(masterEP, this, masterCallBack, masterMonitorTimer);
 
   LOG(INFO) << "Master Created";
   // Create request-receiver endpoints and context
@@ -197,19 +187,20 @@ void Replica::CreateContext() {
     Endpoint* requestEP = CreateEndpoint(endPointType_, ip, port);
     // Register a request handler to this endpoint
     auto requestHandlerFunc = [](MessageHeader* msgHeader, char* msgBuffer,
-                                 Address* sender, void* ctx) {
+                                 Address* sender, void* ctx,
+                                 Endpoint* receiverEP) {
       ((Replica*)ctx)->ReceiveClientRequest(msgHeader, msgBuffer, sender);
     };
     // Register a timer to monitor replica status
-    Timer* requestEPMonitorTimer = new Timer(
-        [](void* ctx, void* receiverEP) {
+    EndpointTimer* requestEPMonitorTimer = new EndpointTimer(
+        [](void* ctx, Endpoint* receiverEP) {
           if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-            ((Endpoint*)receiverEP)->LoopBreak();
+            receiverEP->LoopBreak();
           }
         },
-        monitorPeriodMs, this);
-    requestContext_[i] = new ReceiverContext(
-        requestEP, this, requestHandlerFunc, requestEPMonitorTimer);
+        this, monitorPeriodMs);
+    requestContext_[i] =
+        new Context(requestEP, this, requestHandlerFunc, requestEPMonitorTimer);
   }
 
   LOG(INFO) << "requestContext_ Created";
@@ -236,21 +227,21 @@ void Replica::CreateContext() {
   Endpoint* idxSyncEP = CreateEndpoint(endPointType_, ip, port);
   // Register a msg handler to this endpoint to handle index sync messages
   auto idxHandleFunc = [](MessageHeader* msgHeader, char* msgBuffer,
-                          Address* sender, void* ctx) {
+                          Address* sender, void* ctx, Endpoint* receiverEP) {
     ((Replica*)ctx)->ReceiveIndexSyncMessage(msgHeader, msgBuffer);
   };
 
   // Register a timer to monitor replica status
-  Timer* idxSyncMonitorTimer = new Timer(
-      [](void* ctx, void* receiverEP) {
+  EndpointTimer* idxSyncMonitorTimer = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-          ((Endpoint*)receiverEP)->LoopBreak();
+          receiverEP->LoopBreak();
         }
       },
-      monitorPeriodMs, this);
+      this, monitorPeriodMs);
 
   indexSyncContext_ =
-      new ReceiverContext(idxSyncEP, this, idxHandleFunc, idxSyncMonitorTimer);
+      new Context(idxSyncEP, this, idxHandleFunc, idxSyncMonitorTimer);
 
   LOG(INFO) << "indexSyncContext_ Created";
 
@@ -259,21 +250,22 @@ void Replica::CreateContext() {
   Endpoint* missedIdxEP = CreateEndpoint(endPointType_, ip, port);
   // Register message handler
   auto missedIdxHandleFunc = [](MessageHeader* msgHeader, char* msgBuffer,
-                                Address* sender, void* ctx) {
+                                Address* sender, void* ctx,
+                                Endpoint* receiverEP) {
     ((Replica*)ctx)->ReceiveAskMissedIdx(msgHeader, msgBuffer);
   };
 
   // Register a timer to monitor replica status
-  Timer* missedIdxAckMonitorTimer = new Timer(
-      [](void* ctx, void* receiverEP) {
+  EndpointTimer* missedIdxAckMonitorTimer = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-          ((Endpoint*)receiverEP)->LoopBreak();
+          receiverEP->LoopBreak();
         }
       },
-      monitorPeriodMs, this);
+      this, monitorPeriodMs);
 
-  missedIndexAckContext_ = new ReceiverContext(
-      missedIdxEP, this, missedIdxHandleFunc, missedIdxAckMonitorTimer);
+  missedIndexAckContext_ = new Context(missedIdxEP, this, missedIdxHandleFunc,
+                                       missedIdxAckMonitorTimer);
 
   LOG(INFO) << "missedIndexAckContext_ Created";
 
@@ -282,30 +274,23 @@ void Replica::CreateContext() {
   Endpoint* missedReqAckEP = CreateEndpoint(endPointType_, ip, port);
   // Register message handler
   auto missedReqAckHandleFunc = [](MessageHeader* msgHeader, char* msgBuffer,
-                                   Address* sender, void* ctx) {
+                                   Address* sender, void* ctx,
+                                   Endpoint* receiverEP) {
     ((Replica*)ctx)->ReceiveAskMissedReq(msgHeader, msgBuffer);
   };
   // Register a timer to monitor replica status
-  Timer* missedReqAckMonitorTimer = new Timer(
-      [](void* ctx, void* receiverEP) {
+  EndpointTimer* missedReqAckMonitorTimer = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         if (((Replica*)ctx)->status_ != ReplicaStatus::NORMAL) {
-          ((Endpoint*)receiverEP)->LoopBreak();
+          receiverEP->LoopBreak();
         }
       },
-      monitorPeriodMs, this);
+      this, monitorPeriodMs);
 
-  missedReqAckContext_ = new ReceiverContext(
+  missedReqAckContext_ = new Context(
       missedReqAckEP, this, missedReqAckHandleFunc, missedReqAckMonitorTimer);
 
   LOG(INFO) << "missedReqAckContext_ Created";
-
-  // Create Record Qus and Maps
-  recordMap_.resize(replicaConfig_["record-shards"].as<int>());
-  recordQu_.resize(replicaConfig_["record-shards"].as<int>());
-
-  // Create track entry for trackTd
-  trackedEntry_.assign(replicaConfig_["track-shards"].as<int>(),
-                       maxSyncedLogEntry_);
 
   // Create reply endpoints
   int replyShardNum = replicaConfig_["reply-shards"].as<int>();
@@ -316,14 +301,14 @@ void Replica::CreateContext() {
   // Create reply queues (one queue per fast/slow reply thread)
   fastReplyQu_.resize(replyShardNum);
   slowReplyQu_.resize(replyShardNum);
+  slowRepliedLogId_.assign(replyShardNum, CONCURRENT_MAP_START_INDEX - 1);
 
   // Create CrashVector Context
   std::vector<uint32_t> cvVec(replicaNum_, 0);
   CrashVectorStruct* cv = new CrashVectorStruct(cvVec, 2);
   crashVector_.assign(cv->version_, cv);
-  /** Thw related threads using crash vectors are:
-   * (1) master (1 thread)
-   * (2) FastReplyTd(s) (replyShardNum threads) */
+  // Thw related threads using crash vectors are: master (1), FastReplyTd(s)
+  // (replyShardNum)
   crashVectorVecSize_ = 1 + replyShardNum;
   crashVectorInUse_ = new std::atomic<CrashVectorStruct*>[crashVectorVecSize_];
   for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
@@ -331,38 +316,42 @@ void Replica::CreateContext() {
   }
 
   // Create other useful timers
-  heartbeatCheckTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  heartbeatCheckTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         // Followers use this timer to check leader's heartbeat
         ((Replica*)ctx)->CheckHeartBeat();
       },
-      monitorPeriodMs, this);
+      this, monitorPeriodMs);
 
-  indexAskTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) { ((Replica*)ctx)->AskMissedIndex(); },
-      replicaConfig_["index-ask-period-ms"].as<int>(), this);
+  indexAskTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
+        ((Replica*)ctx)->AskMissedIndex();
+      },
+      this, replicaConfig_["index-ask-period-ms"].as<int>());
   roundRobinIndexAskIdx_ = 0;
   // Initially, no missed indices, so we make first > second
   missedIndices_ = {1, 0};
 
-  requestAskTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) { ((Replica*)ctx)->AskMissedRequest(); },
-      replicaConfig_["request-ask-period-ms"].as<int>(), this);
+  requestAskTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
+        ((Replica*)ctx)->AskMissedRequest();
+      },
+      this, replicaConfig_["request-ask-period-ms"].as<int>());
   roundRobinRequestAskIdx_ = 0;
   missedReqKeys_.clear();
 
-  viewChangeTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  viewChangeTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         ((Replica*)ctx)->BroadcastViewChange();
       },
-      replicaConfig_["view-change-period-ms"].as<int>(), this);
+      this, replicaConfig_["view-change-period-ms"].as<int>());
   roundRobinProcessIdx_ = 0;
 
-  periodicSyncTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  periodicSyncTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         ((Replica*)ctx)->SendSyncStatusReport();
       },
-      replicaConfig_["sync-report-period-ms"].as<int>(), this);
+      this, replicaConfig_["sync-report-period-ms"].as<int>());
 
   requestTrasnferBatch_ =
       replicaConfig_["request-transfer-batch"].as<uint32_t>();
@@ -370,26 +359,26 @@ void Replica::CreateContext() {
   requestKeyTransferBatch_ =
       replicaConfig_["request-key-transfer-batch"].as<uint32_t>();
 
-  stateTransferTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  stateTransferTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         ((Replica*)ctx)->SendStateTransferRequest();
       },
-      replicaConfig_["state-transfer-period-ms"].as<int>(), this);
+      this, replicaConfig_["state-transfer-period-ms"].as<int>());
 
   stateTransferTimeout_ =
       replicaConfig_["state-transfer-timeout-ms"].as<uint64_t>();
 
-  crashVectorRequestTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  crashVectorRequestTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         ((Replica*)ctx)->BroadcastCrashVectorRequest();
       },
-      replicaConfig_["crash-vector-request-period-ms"].as<int>(), this);
+      this, replicaConfig_["crash-vector-request-period-ms"].as<int>());
 
-  recoveryRequestTimer_ = new Timer(
-      [](void* ctx, void* receiverEP) {
+  recoveryRequestTimer_ = new EndpointTimer(
+      [](void* ctx, Endpoint* receiverEP) {
         ((Replica*)ctx)->BroadcastRecoveryRequest();
       },
-      replicaConfig_["recovery-request-period-ms"].as<int>(), this);
+      this, replicaConfig_["recovery-request-period-ms"].as<int>());
 
   slidingWindowLen_ = replicaConfig_["owd-estimation-window"].as<uint32_t>();
 
@@ -416,49 +405,69 @@ void Replica::ResetContext() {
     // pointers have already been cleaned or will be cleaned according to their
     // Conucurrent maps
   }
-  LogEntry* entry;
-  while (processQu_.try_dequeue(entry)) {
-    delete entry;
-  }
-  for (uint32_t i = 0; i < recordQu_.size(); i++) {
-    RequestBody* rb;
-    while (recordQu_[i].try_dequeue(rb)) {
-      delete rb;
-    }
+  RequestBody* rb;
+  while (processQu_.try_dequeue(rb)) {
+    delete rb;
   }
 
-  // TODO: Clear LateBuffer
+  // Clear LateBuffer
+  while (maxLateBufferId_ >= CONCURRENT_MAP_START_INDEX) {
+    RequestBody* rb = lateBuffer_.get(maxLateBufferId_);
+    if (rb) {
+      lateBufferReq2LogId_.erase(rb->reqKey);
+      lateBuffer_.erase(maxLateBufferId_);
+      maxLateBufferId_--;
+    } else {
+      break;
+    }
+  }
+  maxLateBufferId_ = CONCURRENT_MAP_START_INDEX - 1;
 
   // Clear Early Buffer
   while (earlyBuffer_.empty() == false) {
-    LogEntry* entry = earlyBuffer_.begin()->second;
-    delete entry;
+    RequestBody* rb = earlyBuffer_.begin()->second;
+    delete rb;
     earlyBuffer_.erase(earlyBuffer_.begin());
   }
 
-  // committedLogId_.store(maxSyncedLogEntry_.load()->logId);
-  // toCommitLogId_.store(maxSyncedLogEntry_.load()->logId);
+  committedLogId_.store(maxSyncedLogId_.load());
+  toCommitLogId_.store(maxSyncedLogId_.load());
+  for (uint32_t i = 0; i < slowRepliedLogId_.size(); i++) {
+    slowRepliedLogId_[i] = maxSyncedLogId_;
+  }
 
   // Reset lastReleasedEntryByKeys_, no need to care about UnSyncedLogs, because
   // they are all cleared
   for (uint32_t key = 0; key < keyNum_; key++) {
-    if (maxSyncedLogEntryByKey_[key]) {
-      lastReleasedEntryByKeys_[key] = {
-          maxSyncedLogEntryByKey_[key]->body.deadline,
-          maxSyncedLogEntryByKey_[key]->body.reqKey};
-
-    } else {
+    if (maxSyncedLogIdByKey_[key] < CONCURRENT_MAP_START_INDEX) {
       lastReleasedEntryByKeys_[key] = {0ul, 0ul};
+    } else {
+      LogEntry* entry = syncedEntries_.get(maxSyncedLogIdByKey_[key]);
+      ASSERT(entry != NULL);
+      lastReleasedEntryByKeys_[key] = {entry->body.deadline,
+                                       entry->body.reqKey};
     }
   }
 
   // Clear UnSyncedLogs
-  minUnSyncedLogEntry_ = unSyncedLogEntryHead_;
-  maxUnSyncedLogEntry_ = unSyncedLogEntryHead_;
-  minUnSyncedLogEntryByKey_.clear();
-  maxUnSyncedLogEntryByKey_.clear();
-  minUnSyncedLogEntryByKey_.assign(keyNum_, NULL);
-  maxUnSyncedLogEntryByKey_.assign(keyNum_, NULL);
+  minUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  maxUnSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  minUnSyncedLogIdByKey_.clear();
+  maxUnSyncedLogIdByKey_.clear();
+  minUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  maxUnSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
+  ConcurrentMap<uint32_t, LogEntry*>::Iterator iter(unsyncedEntries_);
+  std::vector<uint64_t> keysToRemove;
+  while (iter.isValid()) {
+    keysToRemove.push_back(iter.getKey());
+    LogEntry* entryToClear = iter.getValue();
+    unsyncedReq2LogId_.erase(entryToClear->body.reqKey);
+    delete entryToClear;
+    iter.next();
+  }
+  for (auto& k : keysToRemove) {
+    unsyncedEntries_.erase(k);
+  }
 
   // Reset Index-Sync related stuff
   roundRobinIndexAskIdx_ = 0;
@@ -474,9 +483,6 @@ void Replica::ResetContext() {
   crashVectorReplySet_.clear();
   recoveryReplySet_.clear();
   syncStatusSet_.clear();
-
-  // Reset trackedEntry
-  trackedEntry_.assign(trackedEntry_.size(), maxSyncedLogEntry_);
 
   // Reset OWD-Calc Related stuff
   slidingWindow_.clear();
@@ -516,15 +522,6 @@ void Replica::LaunchThreads() {
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
 
-  // RequestRecord
-  for (int i = 0; i < replicaConfig_["record-shards"].as<int>(); i++) {
-    totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::RecordTd, this, i);
-    std::string key("RecordTd-" + std::to_string(i));
-    threadPool_[key] = td;
-    LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
-  }
-
   // RequestProcess
   for (int i = 0; i < replicaConfig_["process-shards"].as<int>(); i++) {
     totalWorkerNum_++;
@@ -551,39 +548,31 @@ void Replica::LaunchThreads() {
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
 
-  // Track
-  for (int i = 0; i < replicaConfig_["track-shards"].as<int>(); i++) {
-    totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::TrackTd, this, i);
-    std::string key("TrackTd-" + std::to_string(i));
-    threadPool_[key] = td;
-    LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
-  }
+  // // IndexSync
+  // for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
+  //   totalWorkerNum_++;
+  //   std::thread* td =
+  //       new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum +
+  //       1);
+  //   std::string key("IndexSendTd-" + std::to_string(i));
+  //   threadPool_[key] = td;
+  //   LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
+  //   if (!AmLeader()) {
+  //     // follower only needs one sync thread
+  //     break;
+  //   }
+  // }
 
-  // IndexSync
-  for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
-    totalWorkerNum_++;
-    std::thread* td =
-        new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum + 1);
-    std::string key("IndexSendTd-" + std::to_string(i));
-    threadPool_[key] = td;
-    LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
-    if (!AmLeader()) {
-      // follower only needs one sync thread
-      break;
-    }
-  }
+  // totalWorkerNum_++;
+  // threadPool_["IndexRecvTd"] = new std::thread(&Replica::IndexRecvTd, this);
+  // LOG(INFO) << "Launched IndexRecvTd\t"
+  //           << threadPool_["IndexRecvTd"]->native_handle();
 
-  totalWorkerNum_++;
-  threadPool_["IndexRecvTd"] = new std::thread(&Replica::IndexRecvTd, this);
-  LOG(INFO) << "Launched IndexRecvTd\t"
-            << threadPool_["IndexRecvTd"]->native_handle();
-
-  totalWorkerNum_++;
-  threadPool_["IndexProcessTd"] =
-      new std::thread(&Replica::IndexProcessTd, this);
-  LOG(INFO) << "Launched IndexProcessTd\t"
-            << threadPool_["IndexProcessTd"]->native_handle();
+  // totalWorkerNum_++;
+  // threadPool_["IndexProcessTd"] =
+  //     new std::thread(&Replica::IndexProcessTd, this);
+  // LOG(INFO) << "Launched IndexProcessTd\t"
+  //           << threadPool_["IndexProcessTd"]->native_handle();
 
   totalWorkerNum_++;
   threadPool_["MissedIndexAckTd"] =
@@ -650,8 +639,7 @@ void Replica::ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer,
       // proxyTimes_.assign(reqKey, request.sendtime());
       // recvTimes_.assign(reqKey, recvTime);
       // deadlines_.assign(reqKey, deadline);
-      uint32_t quId = (reqKey) % recordQu_.size();
-      recordQu_[quId].enqueue(rb);
+      processQu_.enqueue(rb);
     } else {
       LOG(WARNING) << "Parse request fail";
     }
@@ -680,7 +668,7 @@ void Replica::BlockWhenStatusIsNot(char targetStatus) {
 void Replica::OWDCalcTd() {
   activeWorkerNum_.fetch_add(1);
   std::pair<uint64_t, uint32_t> owdSample;
-  // uint32_t logCnt = 0;
+  uint32_t logCnt = 0;
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
     if (owdQu_.try_dequeue(owdSample)) {
@@ -702,7 +690,7 @@ void Replica::OWDCalcTd() {
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
+  VLOG(2) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
 }
 
 void Replica::ReceiveTd(int id) {
@@ -713,78 +701,13 @@ void Replica::ReceiveTd(int id) {
     requestContext_[id]->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";
+  VLOG(2) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";
   ;
-}
-
-void Replica::RecordTd(int id) {
-  activeWorkerNum_.fetch_add(1);
-  RequestBody* rb;
-  while (status_ != ReplicaStatus::TERMINATED) {
-    BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-    if (recordQu_[id].try_dequeue(rb)) {
-      /** The map is sharded by reqKey */
-      LogEntry* duplicate = recordMap_[id].get(rb->reqKey);
-      if (duplicate == NULL) {
-        SHA_HASH dummy;
-        LogEntry* newEntry = new LogEntry(*rb, dummy, dummy);
-        recordMap_[id].assign(rb->reqKey, newEntry);
-        processQu_.enqueue(newEntry);
-      } else {
-        // Duplicate requests
-        processQu_.enqueue(duplicate);
-      }
-      delete rb;
-    }
-  }
-  uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "RecordTd-" << id << " Terminated: " << preVal - 1
-            << " worker remaining";
-}
-
-void Replica::TrackTd(int id) {
-  activeWorkerNum_.fetch_add(1);
-  while (status_ != ReplicaStatus::TERMINATED) {
-    BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-    if (trackedEntry_[id]->next) {
-      LogEntry* next = trackedEntry_[id]->next;
-      // LOG(INFO) << "next logId = " << next->logId;
-      if (next->logId % trackedEntry_.size() == (uint32_t)id) {
-        if (trackedEntry_[id]->logId >= CONCURRENT_MAP_START_INDEX) {
-          uint32_t a = trackedEntry_[id]->logId;
-          uint32_t b = next->logId;
-          if (a + trackedEntry_.size() != b) {
-            LOG(ERROR) << "myId = " << trackedEntry_[id]->logId << "\t"
-                       << "sz = " << trackedEntry_.size() << "\t"
-                       << "next=" << next->logId << "\t"
-                       << trackedEntry_[id]->logId + trackedEntry_.size()
-                       << "\t"
-                       << (trackedEntry_[id]->logId + trackedEntry_.size() !=
-                           next->logId)
-                       << "\t"
-                       << "a=" << a << "\t"
-                       << "b=" << b;
-          }
-          ASSERT(trackedEntry_[id]->logId + trackedEntry_.size() ==
-                 next->logId);
-        }
-        syncedLogEntryByLogId_.assign(next->logId, next);
-        syncedLogEntryByReqKey_.assign(next->body.reqKey, next);
-      }
-      trackedEntry_[id] = next;
-    }
-    if (status_ == ReplicaStatus::TERMINATED) {
-      LOG(INFO) << "Track Td terminate ";
-    }
-  }
-  uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "TrackTd-" << id << " Terminated: " << preVal - 1
-            << " worker remaining";
 }
 
 void Replica::ProcessTd(int id) {
   activeWorkerNum_.fetch_add(1);
-  LogEntry* entry;
+  RequestBody* rb;
   std::set<uint64_t> tags;
   uint64_t sta, ed, tId;
   while (status_ != ReplicaStatus::TERMINATED) {
@@ -799,8 +722,7 @@ void Replica::ProcessTd(int id) {
         ed = GetMicrosecondTimestamp();
         float rate = 100000 / ((ed - sta) * 1e-6);
         LOG(INFO) << "rate = " << rate << " req/sec \t"
-                  << "processQuLen " << processQu_.size_approx() << "\t"
-                  << "pendingSyncLen " << pendingIndexSync_.size();
+                  << "processQuLen " << processQu_.size_approx();
         sta = ed;
       }
       if (tags.size() == 2000000ul) {
@@ -816,35 +738,76 @@ void Replica::ProcessTd(int id) {
       }
     }
 
-    if (processQu_.try_dequeue(entry)) {
-      if (entry->status == EntryStatus::INITIAL) {
-        std::pair<uint64_t, uint64_t> rankKey(entry->body.deadline,
-                                              entry->body.reqKey);
-        if (rankKey > lastReleasedEntryByKeys_[entry->body.opKey]) {
-          earlyBuffer_[rankKey] = entry;
-          entry->status = EntryStatus::IN_PROCESS;
-        } else {
-          // This entry cannot enter early buffer
-          if (amLeader) {
-            // Leader modifies its deadline
-            entry->body.deadline =
-                lastReleasedEntryByKeys_[entry->body.opKey].first + 1;
-            rankKey.first = entry->body.deadline;
-            earlyBuffer_[rankKey] = entry;
-            entry->status = EntryStatus::IN_PROCESS;
+    if (processQu_.try_dequeue(rb)) {
+      if (amLeader) {
+        uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
+        if (duplicateLogIdx == 0) {
+          // Not duplicate
+          std::pair<uint64_t, uint64_t> myEntry(rb->deadline, rb->reqKey);
+          if (myEntry > lastReleasedEntryByKeys_[rb->opKey]) {
+            earlyBuffer_[myEntry] = rb;
           } else {
-            // Followers leave it in late buffer
-            entry->status = EntryStatus::IN_LATEBUFFER;
+            // rb cannot enter early buffer
+            // Leader modifies its deadline
+            uint64_t newDeadline =
+                lastReleasedEntryByKeys_[rb->opKey].first + 1;
+            std::pair<uint64_t, uint64_t> myEntry(newDeadline, rb->reqKey);
+            earlyBuffer_[myEntry] = rb;
+          }
+        } else {
+          // at-most-once: duplicate requests are not executed twice
+          // We simply send the previous reply messages
+          LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
+          // update proxy id in case the client has changed its proxy
+          entry->body.proxyId = rb->proxyId;
+          // VLOG(1) << "duplicate " << ((rb->reqKey) >> 32) << "\t"
+          //         << (uint32_t)(rb->reqKey);
+          duplicateNum_++;
+          fastReplyQu_[(roundRobinProcessIdx_++) % fastReplyQu_.size()].enqueue(
+              entry);
+          // free this RequestBody
+          delete rb;
+        }
+      } else {
+        uint32_t duplicateLogIdx = syncedReq2LogId_.get(rb->reqKey);
+        if (duplicateLogIdx > 0) {
+          // Duplicate: resend slow-reply for this request
+          LogEntry* entry = syncedEntries_.get(duplicateLogIdx);
+          entry->body.proxyId = rb->proxyId;
+          slowReplyQu_[(roundRobinProcessIdx_++) % slowReplyQu_.size()].enqueue(
+              entry);
+          duplicateNum1_++;
+        } else {
+          duplicateLogIdx = unsyncedReq2LogId_.get(rb->reqKey);
+          if (duplicateLogIdx == 0) {
+            // Not duplicate
+            std::pair<uint64_t, uint64_t> myEntry(rb->deadline, rb->reqKey);
+            if (myEntry > lastReleasedEntryByKeys_[rb->opKey]) {
+              earlyBuffer_[myEntry] = rb;
+            } else {
+              // ELse, followers leave it in late buffer
+              // Also check to avoid duplication (memory leak)
+              if (lateBufferReq2LogId_.get(rb->reqKey) >=
+                  CONCURRENT_MAP_START_INDEX) {
+                delete rb;
+              } else {
+                uint32_t logId = maxLateBufferId_ + 1;
+                lateBuffer_.assign(logId, rb);
+                lateBufferReq2LogId_.assign(rb->reqKey, logId);
+                maxLateBufferId_++;
+              }
+            }
+          } else {
+            duplicateNum2_++;
+            // As a very rare case, if the request is duplicate but also
+            // unsynced, follower does not handle it, for fear of data race
+            // with other threads (e.g. GarbageCollectTd) But this will not
+            // harm liveness, because eventually the request will become
+            // synced request, so the former if-branch will handle it and
+            // resend a slow reply
+            delete rb;
           }
         }
-      } else if (entry->status == EntryStatus::IN_PROCESS ||
-                 entry->status == EntryStatus::IN_LATEBUFFER) {
-        continue;
-      } else if (entry->status == EntryStatus::PROCESSED) {
-        uint32_t quId = (entry->body.reqKey) % fastReplyQu_.size();
-        fastReplyQu_[quId].enqueue(entry);
-      } else {
-        LOG(WARNING) << "Unexpected Entry Status " << (int)(entry->status);
       }
     }
 
@@ -853,74 +816,101 @@ void Replica::ProcessTd(int id) {
 
     while ((!earlyBuffer_.empty()) &&
            nowTime >= earlyBuffer_.begin()->first.first) {
-      entry = earlyBuffer_.begin()->second;
-      lastReleasedEntryByKeys_[entry->body.opKey] = earlyBuffer_.begin()->first;
-      ProcessRequest(entry, amLeader, true, amLeader);
+      rb = earlyBuffer_.begin()->second;
+      lastReleasedEntryByKeys_[rb->opKey] = earlyBuffer_.begin()->first;
+      ProcessRequest(rb, amLeader, true, amLeader);
       earlyBuffer_.erase(earlyBuffer_.begin());
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";
+  VLOG(2) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";
 }
 
-void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
+void Replica::ProcessRequest(const RequestBody* rb, const bool isSyncedReq,
                              const bool sendReply, const bool canExecute) {
-  RequestBody& rb = entry->body;
-  entry->myhash = CalculateHash(rb.deadline, rb.reqKey);
-  entry->hash = entry->myhash;
+  SHA_HASH myHash = CalculateHash(rb->deadline, rb->reqKey);
+  SHA_HASH hash = myHash;
+  LogEntry* prev = NULL;
+  LogEntry* entry = NULL;
   if (isSyncedReq) {
     // The log id of the previous non-commutative entry in the synced logs
-    entry->prevNonCommutative = maxSyncedLogEntryByKey_[rb.opKey];
-    entry->prev = maxSyncedLogEntry_;
+    uint32_t prevLogId = maxSyncedLogIdByKey_[rb->opKey];
+    // if (prevLogId >= CONCURRENT_MAP_START_INDEX) {
+    //   // There are previous (non-commutative) requests appended
+    //   prev = syncedEntries_.get(prevLogId);
+    //   ASSERT(prev != NULL);
+    //   if (prev == NULL) {
+    //     LOG(ERROR) << "prevLogId=" << prevLogId << " opKey=" << rb->opKey
+    //                << "  tentative logId=" << maxSyncedLogId_ + 1;
+    //   }
+    //   hash.XOR(prev->hash);
+    // }
 
-    std::string result = canExecute ? ApplicationExecute(rb) : "";
-    if (entry->prevNonCommutative) {
-      entry->hash.XOR(entry->prevNonCommutative->hash);
-    }
-    ASSERT(entry->prev != NULL);
-    entry->logId = entry->prev->logId + 1;
-    entry->status = EntryStatus::PROCESSED;
-    // Only after the entry has been completely prepared, can we link the pre's
-    // next to it
-    if (entry->prevNonCommutative) {
-      entry->prevNonCommutative->nextNonCommutative = entry;
-    }
-    entry->prev->next = entry;
-    maxSyncedLogEntry_ = entry;
+    std::string result = canExecute ? ApplicationExecute(*rb) : "";
+    entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, result);
+
+    uint32_t logId = maxSyncedLogId_ + 1;
+    vec1_.push_back(entry);
+    // tm1_[logId] = entry;
+    // tm2_[rb->reqKey] = logId;
+    // syncedEntries_.assign(logId, entry);
+    // syncedReq2LogId_.assign(rb->reqKey, logId);
+    // if (prev != NULL) {
+    //   prev->nextLogId =
+    //       logId;  // This is very important, to establish the connection
+    //       based
+    //   // on key, making them look like a skiplist
+    // }
+    maxSyncedLogIdByKey_[rb->opKey] = logId;
+    maxSyncedLogId_++;
+    delete rb;
   } else {
     // // The log id of the previous non-commutative entry in the unsynced logs
-    entry->prevNonCommutative = maxUnSyncedLogEntryByKey_[rb.opKey];
-    entry->prev = maxUnSyncedLogEntry_;
-    if (entry->prevNonCommutative) {
-      entry->hash.XOR(entry->prevNonCommutative->hash);
-    }
-    ASSERT(entry->prev != NULL);
-    entry->logId = entry->prev->logId + 1;
-    entry->status = EntryStatus::PROCESSED;
-    entry->prev->next = entry;
-    if (entry->prevNonCommutative) {
-      entry->prevNonCommutative->nextNonCommutative = entry;
-    }
-    if (minUnSyncedLogEntryByKey_[rb.opKey] == NULL) {
-      minUnSyncedLogEntryByKey_[rb.opKey] = entry;
-    }
-    maxUnSyncedLogEntry_ = entry;
-  }
+    uint32_t prevLogId = maxUnSyncedLogIdByKey_[rb->opKey];
+    // if (prevLogId >= CONCURRENT_MAP_START_INDEX) {
+    //   // There are previous (non-commutative) requests appended
+    //   LogEntry* prev = unsyncedEntries_.get(prevLogId);
+    //   ASSERT(prev != NULL);
+    //   hash.XOR(prev->hash);
+    // }
 
-  if (sendReply) {
-    uint32_t quId = (entry->body.reqKey) % fastReplyQu_.size();
-    fastReplyQu_[quId].enqueue(entry);
+    entry = new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
+    uint32_t logId = maxUnSyncedLogId_ + 1;
+    vec1_.push_back(entry);
+    // tm1_[logId] = entry;
+    // tm2_[rb->reqKey] = logId;
+    // unsyncedEntries_.assign(logId, entry);
+    // unsyncedReq2LogId_.assign(rb->reqKey, logId);
+    // if (prev != NULL) {
+    //   prev->nextLogId = logId;  // This is very important, see above
+    // }
+    // if (minUnSyncedLogIdByKey_[rb->opKey] < CONCURRENT_MAP_START_INDEX) {
+    //   // ProcessTd only make once assignement for minUnSyncedLogIdByKey_
+    //   // After switching it from the dummy value
+    //   // (CONCURRENT_MAP_START_INDEX-1) to a valid logId, the following
+    //   update
+    //   // will all be charged by IndexRecvTd
+    //   minUnSyncedLogIdByKey_[rb->opKey] = logId;
+    // }
+    maxUnSyncedLogIdByKey_[rb->opKey] = logId;
+    maxUnSyncedLogId_++;
+    delete rb;
   }
+  // if (sendReply) {
+  //   fastReplyQu_[(roundRobinProcessIdx_++) % fastReplyQu_.size()].enqueue(
+  //       entry);
+  // }
 }
 
 void Replica::FastReplyTd(int id, int cvId) {
   activeWorkerNum_.fetch_add(1);
+  LogEntry* entry = NULL;
   Reply reply;
   reply.set_replytype(MessageType::FAST_REPLY);
   reply.set_replicaid(replicaId_);
   CrashVectorStruct* cv = crashVectorInUse_[cvId];
-  // uint32_t replyNum = 0;
-  // uint64_t startTime, endTime;
+  uint32_t replyNum = 0;
+  uint64_t startTime, endTime;
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
     bool amLeader = AmLeader();
@@ -929,14 +919,13 @@ void Replica::FastReplyTd(int id, int cvId) {
     // (cv) is the freshest one
     CrashVectorStruct* masterCV = crashVectorInUse_[0].load();
     if (cv->version_ < masterCV->version_) {
-      // My crash vector is stale, update it
+      // My cv is stale, update it
       crashVectorInUse_[cvId] = masterCV;
       cv = masterCV;
     }
-    LogEntry* entry = NULL;
     if (fastReplyQu_[id].try_dequeue(entry)) {
       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
-      if (!addr) {
+      if (addr == NULL) {
         // The replica cannot find the address to send reply
         // This can happen in very trivial edge cases, e.g.,
         // Step 1: This replica misses the entry
@@ -964,23 +953,19 @@ void Replica::FastReplyTd(int id, int cvId) {
         // log entry hash together, it can directly reply
         reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
 
-        // uint64_t reqKey = entry->body.reqKey;
-        // uint64_t replyTime = GetMicrosecondTimestamp();
-        // fastReplyTimes_.assign(reqKey, replyTime);
-        // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-        // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-        // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-        // reply.mutable_t()->set_fastreplytime(replyTime);
-        // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
+        uint64_t reqKey = entry->body.reqKey;
+        uint64_t replyTime = GetMicrosecondTimestamp();
+        fastReplyTimes_.assign(reqKey, replyTime);
+        reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
+        reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
+        reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
+        reply.mutable_t()->set_fastreplytime(replyTime);
+        reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
 
         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
         // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
         //     << "opKey=" << entry->opKey << "\t"
         //     << "hash=" << hash.toString();
-        // if (syncedLogEntryByReqKey_.get(entry->body.reqKey) == NULL) {
-        //   syncedLogEntryByReqKey_.assign(entry->body.reqKey, entry);
-        //   syncedLogEntryByLogId_.assign(entry->logId, entry);
-        // }
       } else {
         // But follower's hash is a bit complicated, because it needs to
         // consider both synced entries and unsynced entries, i.e. We need to
@@ -995,12 +980,12 @@ void Replica::FastReplyTd(int id, int cvId) {
         // if we get the two variables in the reverse order, then we cannot be
         // sure which variable is fresher, that can lead to the missing of
         // some entries during hash calculation
+        uint32_t unsyncedLogId = minUnSyncedLogIdByKey_[entry->body.opKey];
+        uint32_t syncedLogId = maxSyncedLogIdByKey_[entry->body.opKey];
 
-        LogEntry* unsyncedEntry = minUnSyncedLogEntryByKey_[entry->body.opKey];
-        LogEntry* syncedEntry = maxSyncedLogEntryByKey_[entry->body.opKey];
-
-        if (syncedEntry == NULL || unsyncedEntry == NULL ||
-            unsyncedEntry->logId <= safeToClearUnSyncedLogId_[id]) {
+        if (syncedLogId < CONCURRENT_MAP_START_INDEX ||
+            unsyncedLogId < CONCURRENT_MAP_START_INDEX ||
+            unsyncedLogId <= safeToClearUnSyncedLogId_[id]) {
           // The index sync process may have not been started, or may have not
           // catch up; Or the unsynced logs have been reclaimed by
           // GarbageCollectionTd (we have advanced safeToClearUnSyncedLogId_)
@@ -1008,14 +993,14 @@ void Replica::FastReplyTd(int id, int cvId) {
           // XORed hash (similar to the leader)
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
 
-          // uint64_t reqKey = entry->body.reqKey;
-          // uint64_t replyTime = GetMicrosecondTimestamp();
-          // fastReplyTimes_.assign(reqKey, replyTime);
-          // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-          // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-          // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-          // reply.mutable_t()->set_fastreplytime(replyTime);
-          // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
+          uint64_t reqKey = entry->body.reqKey;
+          uint64_t replyTime = GetMicrosecondTimestamp();
+          fastReplyTimes_.assign(reqKey, replyTime);
+          reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
+          reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
+          reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
+          reply.mutable_t()->set_fastreplytime(replyTime);
+          reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
 
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
@@ -1023,30 +1008,28 @@ void Replica::FastReplyTd(int id, int cvId) {
         } else {
           // The follower already gets some synced non-commutative logs (via
           // index sync process)
+          LogEntry* syncedEntry = syncedEntries_.get(syncedLogId);
+          ASSERT(syncedEntry != NULL);
 
           // Log entries up to syncedEntry are all synced
           // syncedEntry->hash represents them
           if (entry->LessOrEqual(*syncedEntry)) {
             // No need to send fast replies, because this entry has already
-            // been covered by index sync process
-            entry = syncedLogEntryByReqKey_.get(entry->body.reqKey);
-            if (entry) {
-              // if it really exits in syncedLogEntryMap, handle it to slowReply
-              uint32_t quId = (entry->body.reqKey) % slowReplyQu_.size();
-              slowReplyQu_[quId].enqueue(entry);
-              continue;
-            }
+            // been covered by index sync process, a slow reply has already
+            // been sent
+            continue;
           }
           // Beyond syncedEntry, we need to find the boundary in the unsynced
-          // logs
-
-          // TODO: Check the following
+          // logs We are sure that  unsyncedLogId >=
+          // CONCURRENT_MAP_START_INDEX
+          LogEntry* unsyncedEntry = unsyncedEntries_.get(unsyncedLogId);
+          ASSERT(unsyncedEntry != NULL);
           // Since unsyncedLogId is no fresher (maybe older) than syncedLogId,
           // then unsyncedEntry may have already been surpasssed by
           // syncedEntry, we need to remove the (potential) overlap
           while (unsyncedEntry->LessOrEqual(*syncedEntry)) {
-            if (unsyncedEntry->nextNonCommutative != NULL) {
-              unsyncedEntry = unsyncedEntry->nextNonCommutative;
+            if (unsyncedEntry->nextLogId < UINT32_MAX) {
+              unsyncedEntry = unsyncedEntries_.get(unsyncedEntry->nextLogId);
             } else {
               break;
             }
@@ -1059,14 +1042,14 @@ void Replica::FastReplyTd(int id, int cvId) {
           hash.XOR(syncedEntry->hash);
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
 
-          // uint64_t reqKey = entry->body.reqKey;
-          // uint64_t replyTime = GetMicrosecondTimestamp();
-          // fastReplyTimes_.assign(reqKey, replyTime);
-          // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-          // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-          // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-          // reply.mutable_t()->set_fastreplytime(replyTime);
-          // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
+          uint64_t reqKey = entry->body.reqKey;
+          uint64_t replyTime = GetMicrosecondTimestamp();
+          fastReplyTimes_.assign(reqKey, replyTime);
+          reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
+          reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
+          reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
+          reply.mutable_t()->set_fastreplytime(replyTime);
+          reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
 
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
@@ -1089,11 +1072,13 @@ void Replica::FastReplyTd(int id, int cvId) {
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";
+  VLOG(2) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";
+  ;
 }
 
 void Replica::SlowReplyTd(int id) {
   activeWorkerNum_.fetch_add(1);
+  LogEntry* entry = NULL;
   Reply reply;
   reply.set_replicaid(replicaId_);
   reply.set_hash("");
@@ -1106,13 +1091,29 @@ void Replica::SlowReplyTd(int id) {
       usleep(1000);
       continue;
     }
-    LogEntry* entry = NULL;
-    if (slowReplyQu_[id].try_dequeue(entry)) {
-      // LogEntry* duplicate = syncedLogEntryByReqKey_.get(entry->body.reqKey);
-      // if (duplicate) {
-      //   entry = duplicate;
-      // }
-      uint32_t logId = entry->logId;
+    entry = NULL;
+    // SlowReplyTd get entries from two sources
+    // (1) (Mostly) IndexSync process will keep advancing maxSyncedLogId_, so
+    // that SlowReplyTd should send slow-replies for these entries prior to
+    // maxSyncedLogId_ (2) Some clients retry some requests, and the
+    // corresponding entries have already been synced with the leader, so
+    // SlowReplyTd also resend slow-replies for these entries
+
+    // TODO: SlowReplyTd can be merged with FastReplyTd, just needs to
+    // piggyback the most recent synced-log-id on fast-reply, and that is
+    // enough for proxies to do quorum check, even without slow-reply messages
+    if (slowRepliedLogId_[id] < maxSyncedLogId_) {
+      slowRepliedLogId_[id]++;
+      if (slowRepliedLogId_[id] % slowRepliedLogId_.size() == (uint32_t)id) {
+        entry = syncedEntries_.get(slowRepliedLogId_[id]);
+      }
+    }
+    if (!entry) {
+      slowReplyQu_[id].try_dequeue(entry);
+    }
+
+    if (entry) {
+      uint32_t logId = syncedReq2LogId_.get(entry->body.reqKey);
       reply.set_view(viewId_);
       reply.set_clientid((entry->body.reqKey) >> 32);
       reply.set_reqid((uint32_t)(entry->body.reqKey));
@@ -1126,94 +1127,87 @@ void Replica::SlowReplyTd(int id) {
       }
       reply.set_owd(owdMap_.get(entry->body.proxyId));
 
-      // uint64_t reqKey = entry->body.reqKey;
-      // uint64_t replyTime = GetMicrosecondTimestamp();
-      // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-      // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-      // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-      // reply.mutable_t()->set_fastreplytime(fastReplyTimes_.get(reqKey));
-      // reply.mutable_t()->set_slowreplytime(replyTime);
-      // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
+      uint64_t reqKey = entry->body.reqKey;
+      uint64_t replyTime = GetMicrosecondTimestamp();
+      reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
+      reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
+      reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
+      reply.mutable_t()->set_fastreplytime(fastReplyTimes_.get(reqKey));
+      reply.mutable_t()->set_slowreplytime(replyTime);
+      reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
 
       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
-      if (addr) {
+      if (addr != NULL) {
         slowReplySender_[id]->SendMsgTo(*addr, reply, MessageType::SLOW_REPLY);
       }
-      // if (!duplicate) {
-      //   // Register this entry to syncedLogEntryByReqKey_
-      //   syncedLogEntryByReqKey_.assign(entry->body.reqKey, entry);
-      //   syncedLogEntryByLogId_.assign(entry->logId, entry);
-      //   // LOG(INFO) << "id=" << id << "--logId=" << entry->logId;
-      // }
-
       replyNum++;
       if (replyNum == 1) {
         startTime = GetMicrosecondTimestamp();
       } else if (replyNum % 100000 == 0) {
         endTime = GetMicrosecondTimestamp();
         float rate = 100000 / ((endTime - startTime) * 1e-6);
-        LOG(INFO) << "id=" << id << "\t Slow Reply Rate=" << rate
-                  << "\t QuLen=" << slowReplyQu_[id].size_approx();
+        LOG(INFO) << "id=" << id << "\t Slow Reply Rate=" << rate;
         startTime = endTime;
       }
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining";
+  VLOG(2) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining";
+  ;
 }
 
 void Replica::IndexSendTd(int id, int cvId) {
   activeWorkerNum_.fetch_add(1);
-  LogEntry* lastSyncedEntry = syncedLogEntryHead_;
+  uint32_t lastSyncedLogId = maxSyncedLogId_;
   IndexSync indexSyncMsg;
   uint64_t syncPeriod = replicaConfig_["index-sync-period-us"].as<uint64_t>();
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
     if (!AmLeader()) {
-      // Although this replica is not leader currently,
-      // we still keep this thread. When it becomes the leader
+      // Although this replica is not leader currently
+      // We still keep this thread. When it becomes the leader
       // we can immediately use the thread instead of launching extra threads
       // (slowly)
       usleep(1000);
       continue;
     }
-    if (maxSyncedLogEntry_ == NULL) {
-      continue;
-    }
+    uint32_t logEnd = maxSyncedLogId_;
+    // if (lastSyncedLogId < logEnd ||
+    //     indexSyncMsg.sendtime() + syncPeriod < GetMicrosecondTimestamp())
 
-    // (1) Leader has some indices to sync
-    // (2) There is noting to send, but we still send an indexSync msg every
-    // 10ms (to serve as leader's heartbeat)
-    indexSyncMsg.set_view(viewId_);
-    indexSyncMsg.set_logidbegin(lastSyncedEntry->logId + 1);
-    uint32_t logEnd = maxSyncedLogEntry_.load()->logId;
-    logEnd = std::min(indexSyncMsg.logidbegin() + indexTransferBatch_, logEnd);
-    indexSyncMsg.set_logidend(logEnd);
-    indexSyncMsg.clear_deadlines();
-    indexSyncMsg.clear_reqkeys();
-    for (uint32_t i = indexSyncMsg.logidbegin(); i <= indexSyncMsg.logidend();
-         i++) {
-      LogEntry* entry = lastSyncedEntry->next;
-      ASSERT(entry != NULL);
-      ASSERT(entry->logId == i);
-      indexSyncMsg.add_deadlines(entry->body.deadline);
-      indexSyncMsg.add_reqkeys(entry->body.reqKey);
-      lastSyncedEntry = entry;
-    }
-
-    indexSyncMsg.set_sendtime(GetMicrosecondTimestamp());
-    // Send to all followers
-    for (uint32_t r = 0; r < replicaNum_; r++) {
-      if (r != replicaId_) {
-        indexSender_[id]->SendMsgTo(*(indexReceiver_[r]), indexSyncMsg,
-                                    MessageType::SYNC_INDEX);
+    {
+      // (1) Leader has some indices to sync
+      // (2) There is noting to send, but we still send an indexSync msg every
+      // 10ms (to serve as leader's heartbeat)
+      indexSyncMsg.set_view(viewId_);
+      indexSyncMsg.set_logidbegin(lastSyncedLogId + 1);
+      logEnd = std::min(lastSyncedLogId + indexTransferBatch_, logEnd);
+      indexSyncMsg.set_logidend(logEnd);
+      indexSyncMsg.clear_deadlines();
+      indexSyncMsg.clear_reqkeys();
+      for (uint32_t i = indexSyncMsg.logidbegin(); i <= indexSyncMsg.logidend();
+           i++) {
+        LogEntry* entry = syncedEntries_.get(i);
+        ASSERT(entry != NULL);
+        indexSyncMsg.add_deadlines(entry->body.deadline);
+        indexSyncMsg.add_reqkeys(entry->body.reqKey);
       }
-    }
 
+      indexSyncMsg.set_sendtime(GetMicrosecondTimestamp());
+      // Send to all followers
+      for (uint32_t r = 0; r < replicaNum_; r++) {
+        if (r != replicaId_) {
+          indexSender_[id]->SendMsgTo(*(indexReceiver_[r]), indexSyncMsg,
+                                      MessageType::SYNC_INDEX);
+        }
+      }
+      lastSyncedLogId = logEnd;
+    }
     usleep(syncPeriod);
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";
+  VLOG(2) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";
+  ;
 }
 
 void Replica::IndexRecvTd() {
@@ -1224,7 +1218,7 @@ void Replica::IndexRecvTd() {
     indexSyncContext_->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
+  VLOG(2) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
 }
 
 void Replica::ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer) {
@@ -1245,7 +1239,6 @@ void Replica::ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer) {
 }
 
 void Replica::IndexProcessTd() {
-  activeWorkerNum_.fetch_add(1);
   std::pair<MessageHeader*, char*> ele;
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -1260,36 +1253,42 @@ void Replica::IndexProcessTd() {
             delete[] msgBuffer;
             break;
           }
-
+          // uint64_t tmp = lastHeartBeatTime_;
           lastHeartBeatTime_ = GetMicrosecondTimestamp();
-          // if (pendingIndexSync_.size() > 0 &&
-          //     pendingIndexSync_.size() % 10000 == 0) {
-          //   LOG(INFO) << "pendingIndexSync_ " << pendingIndexSync_.size()
-          //             << "\t msgLen=" << msgHdr->msgLen;
-          //   LOG(INFO) << " missing Idx? " << missedIndices_.first << "-"
-          //             << missedIndices_.second;
-          //   LOG(INFO) << " missing req ? " << missedReqKeys_.size();
-          //   LOG(INFO) << "pending..."
-          //             << pendingIndexSync_.begin()->second.logidbegin() <<
-          //             "--"
-          //             << pendingIndexSync_.begin()->second.logidend();
-          //   LOG(INFO) << "Missed Fetch Size " << fetchTime_.size();
-          //   if (fetchTime_.size() > 0) {
-          //     sort(fetchTime_.begin(), fetchTime_.end());
-          //     LOG(INFO) << "Fetch " << fetchTime_[fetchTime_.size() / 2] <<
-          //     "\t"
-          //               << fetchTime_[fetchTime_.size() / 4 * 3] << "\t"
-          //               << fetchTime_[fetchTime_.size() / 10 * 9] << "\t";
-          //     fetchTime_.clear();
-          //   }
-          // }
+          // hbVec_.push_back(lastHeartBeatTime_ - tmp);
+          // if (hbVec_.size() % 100000 == 0) {
+          if (pendingIndexSync_.size() > 0 &&
+              pendingIndexSync_.size() % 10000 == 0) {
+            // sort(hbVec_.begin(), hbVec_.end());
+            // LOG(INFO) << "hb " << hbVec_[hbVec_.size() / 2] << "\t"
+            //           << hbVec_[hbVec_.size() / 4 * 3] << "\t"
+            //           << hbVec_[hbVec_.size() / 10 * 9] << "\t";
+            LOG(INFO) << "pendingIndexSync_ " << pendingIndexSync_.size()
+                      << "\t msgLen=" << msgHdr->msgLen;
+            LOG(INFO) << " missing Idx? " << missedIndices_.first << "-"
+                      << missedIndices_.second;
+            LOG(INFO) << " missing req ? " << missedReqKeys_.size();
+            LOG(INFO) << "pending..."
+                      << pendingIndexSync_.begin()->second.logidbegin() << "--"
+                      << pendingIndexSync_.begin()->second.logidend();
+            LOG(INFO) << "Missed Fetch Size " << fetchTime_.size();
+            if (fetchTime_.size() > 0) {
+              sort(fetchTime_.begin(), fetchTime_.end());
+              LOG(INFO) << "Fetch " << fetchTime_[fetchTime_.size() / 2] << "\t"
+                        << fetchTime_[fetchTime_.size() / 4 * 3] << "\t"
+                        << fetchTime_[fetchTime_.size() / 10 * 9] << "\t";
+              fetchTime_.clear();
+            }
+
+            // hbVec_.resize(0);
+          }
 
           if (idxSyncMsg.logidbegin() > idxSyncMsg.logidend()) {
             // Pure heart beat
             continue;
           }
 
-          if (idxSyncMsg.logidend() > maxSyncedLogEntry_.load()->logId) {
+          if (idxSyncMsg.logidend() > maxSyncedLogId_) {
             std::pair<uint32_t, uint32_t> key(idxSyncMsg.logidbegin(),
                                               idxSyncMsg.logidend());
             pendingIndexSync_[key] = idxSyncMsg;
@@ -1315,10 +1314,7 @@ void Replica::IndexProcessTd() {
               // We must handle it to ProcessTd instead of processing it here,
               // to avoid data race (and further memroy leakage), although it
               // is a trivial possibility
-
-              uint32_t quId = rbMsg.reqkey() % recordQu_.size();
-              recordQu_[quId].enqueue(rb);
-
+              processQu_.enqueue(rb);
               missedReqKeys_.erase(rbMsg.reqkey());
               fetchTime_.push_back(GetMicrosecondTimestamp() -
                                    askTimebyReqKey_[rbMsg.reqkey()]);
@@ -1337,82 +1333,110 @@ void Replica::IndexProcessTd() {
       delete[] msgBuffer;
     }
   }
-  uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "IndexProcessTd Terminated: " << preVal - 1
-            << " worker remaining";
 }
 
 bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
-  uint32_t maxSyncedLogId = maxSyncedLogEntry_.load()->logId;
-  if (idxSyncMsg.logidend() <= maxSyncedLogId) {
+  if (idxSyncMsg.logidend() <= maxSyncedLogId_) {
     // This idxSyncMsg is useless
     return true;
   }
-  if (idxSyncMsg.logidbegin() > maxSyncedLogId + 1) {
+  if (idxSyncMsg.logidbegin() > maxSyncedLogId_ + 1) {
     // Missing some indices
-    missedIndices_ = {maxSyncedLogId + 1, idxSyncMsg.logidbegin() - 1};
+    missedIndices_ = {maxSyncedLogId_ + 1, idxSyncMsg.logidbegin() - 1};
+    // if (indexRequester_->isRegistered(indexAskTimer_) == false) {
+    //   // We are missing some idxSyncMsgs
+    //   //  And We haven't launched the timer to ask indices
+    //   indexRequester_->RegisterTimer(indexAskTimer_);
+    // }
     AskMissedIndex();
     return false;
   }
 
-  for (uint32_t logId = maxSyncedLogId + 1; logId <= idxSyncMsg.logidend();
+  ASSERT(idxSyncMsg.logidbegin() <= maxSyncedLogId_ + 1);
+  // if (missedIndices_.second <= idxSyncMsg.logidend()) {
+  //   // Already fixed missing idices
+  //   missedIndices_ = {1, 0};
+  //   if (indexRequester_->isRegistered(indexAskTimer_)) {
+  //     indexRequester_->UnRegisterTimer(indexAskTimer_);
+  //   }
+  // } else {
+  //   missedIndices_.first = idxSyncMsg.logidend() + 1;
+  //   if (indexRequester_->isRegistered(indexAskTimer_) == false) {
+  //     indexRequester_->RegisterTimer(indexAskTimer_);
+  //   }
+  // }
+
+  for (uint32_t logId = maxSyncedLogId_ + 1; logId <= idxSyncMsg.logidend();
        logId++) {
-    // LOG(ERROR) << "logId=" << logId << "\t" <<
-    // maxSyncedLogEntry_.load()->logId;
     uint32_t offset = logId - idxSyncMsg.logidbegin();
     uint64_t reqKey = idxSyncMsg.reqkeys(offset);
     uint64_t deadline = idxSyncMsg.deadlines(offset);
-    uint32_t quId = reqKey % recordMap_.size();
-    LogEntry* entry = recordMap_[quId].get(reqKey);
-    if (entry && missedReqKeys_.empty()) {
-      SHA_HASH myHash = CalculateHash(deadline, reqKey);
-      SHA_HASH hash(myHash);
-      LogEntry* prevNonCommutativeEntry =
-          maxSyncedLogEntryByKey_[entry->body.opKey];
-      if (prevNonCommutativeEntry) {
-        // This request has some pre non-commutative ones
-        // In that way, XOR the previous accumulated hash
-        hash.XOR(prevNonCommutativeEntry->hash);
+    RequestBody* rb = NULL;
+    uint32_t reqLogId = unsyncedReq2LogId_.get(reqKey);
+
+    if (reqLogId >= CONCURRENT_MAP_START_INDEX &&
+        reqLogId > safeToClearUnSyncedLogId_[fastReplyQu_.size()]) {
+      // We must ensure this logid is no smaller than
+      // unSyncedLogIdInUse_[fastReplyQu_.size()], otherwisxe, it may have
+      // been reclaimed
+      LogEntry* entry = unsyncedEntries_.get(reqLogId);
+      ASSERT(entry != NULL);
+      rb = &(entry->body);
+    }
+
+    if (rb == NULL) {
+      // cannot find the request in unsynced requests (early-buffer), then try
+      // to look up it in the late buffer
+      uint32_t reqLogId = lateBufferReq2LogId_.get(reqKey);
+      if (reqLogId >= CONCURRENT_MAP_START_INDEX &&
+          reqLogId > safeToClearLateBufferLogId_) {
+        // We are sure that GarbageCollectTd has not reclaim it
+        rb = lateBuffer_.get(reqLogId);
+        ASSERT(rb != NULL);
       }
-      LogEntry* newEntry =
-          new LogEntry(entry->body, myHash, hash, prevNonCommutativeEntry, NULL,
-                       maxSyncedLogEntry_, NULL);
-      newEntry->logId = logId;
-      ASSERT(logId == maxSyncedLogEntry_.load()->logId + 1);
-      maxSyncedLogEntry_.load()->next = newEntry;
-      if (prevNonCommutativeEntry) {
-        prevNonCommutativeEntry->nextNonCommutative = newEntry;
-      }
+    }
 
-      uint32_t prevMaxLogId = maxSyncedLogEntry_.load()->logId;
-      maxSyncedLogEntry_ = newEntry;
-      ASSERT(maxSyncedLogEntry_.load()->logId == logId);
-      ASSERT(prevMaxLogId + 1 == logId);
-
-      maxSyncedLogEntryByKey_[newEntry->body.opKey] = newEntry;
-      // Enqueue for slow Reply
-      uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
-      slowReplyQu_[quId].enqueue(newEntry);
-
-      if (newEntry->prev->logId + 1 != newEntry->logId) {
-        LOG(ERROR) << "newEntry--" << newEntry->logId << "\t"
-                   << "prev--" << newEntry->prev->logId << "\t"
-                   << "prevMaxLogId=" << prevMaxLogId << "\t"
-                   << "logId=" << logId;
-      }
-      ASSERT(newEntry->prev->logId + 1 == newEntry->logId);
-      // TODO： Think about the order above
-
-      // Chunk UnSynced logs
-      if (minUnSyncedLogEntryByKey_[newEntry->body.opKey]) {
-        // Try to advance  minUnSyncedLogIdByKey_[opKey]
-        LogEntry* unSyncedEntry =
-            minUnSyncedLogEntryByKey_[newEntry->body.opKey];
-        while (unSyncedEntry->LessOrEqual(*entry) &&
-               unSyncedEntry->nextNonCommutative != NULL) {
-          unSyncedEntry = unSyncedEntry->nextNonCommutative;
+    if (rb) {
+      // Find the request locally
+      if (missedReqKeys_.empty()) {
+        // No missing entries, can continue to build the synced log lists
+        // Otherwise, only keep traversing to see how many requests are
+        // missing and put the missing reqKeys in missedReqKeys_
+        SHA_HASH myHash = CalculateHash(deadline, reqKey);
+        SHA_HASH hash(myHash);
+        uint32_t prevLogId = 0;
+        if (maxSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
+          // This request has some pre non-commutative ones
+          // In that way, XOR the previous accumulated hash
+          prevLogId = maxSyncedLogIdByKey_[rb->opKey];
+          ASSERT(syncedEntries_.get(prevLogId) != NULL);
+          const SHA_HASH& prev = syncedEntries_.get(prevLogId)->hash;
+          hash.XOR(prev);
         }
-        minUnSyncedLogEntryByKey_[newEntry->body.opKey] = unSyncedEntry;
+
+        LogEntry* entry =
+            new LogEntry(*rb, myHash, hash, prevLogId, UINT32_MAX, "");
+        ASSERT(entry != NULL);
+        syncedEntries_.assign(logId, entry);
+        syncedReq2LogId_.assign(reqKey, logId);
+        maxSyncedLogIdByKey_[rb->opKey] = logId;
+        maxSyncedLogId_++;
+
+        // Chunk UnSynced logs
+        uint32_t minUnSyncedLogId = minUnSyncedLogIdByKey_[rb->opKey];
+        if (minUnSyncedLogIdByKey_[rb->opKey] >= CONCURRENT_MAP_START_INDEX) {
+          // Try to advance  minUnSyncedLogIdByKey_[opKey]
+          LogEntry* unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
+          ASSERT(unSyncedEntry != NULL);
+          while (unSyncedEntry->LessOrEqual(*entry) &&
+                 unSyncedEntry->nextLogId < UINT32_MAX) {
+            minUnSyncedLogId = unSyncedEntry->nextLogId;
+            unSyncedEntry = unsyncedEntries_.get(minUnSyncedLogId);
+            ASSERT(unSyncedEntry != NULL);
+          }
+          // LOG(INFO) << "minUnSyncedLogId=" << minUnSyncedLogId;
+          minUnSyncedLogIdByKey_[rb->opKey] = minUnSyncedLogId;
+        }
       }
     } else {
       missedReqKeys_.insert(reqKey);
@@ -1424,6 +1448,18 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
     AskMissedRequest();
     return false;
   }
+  // if (missedReqKeys_.empty()) {
+  //   if (reqRequester_->isRegistered(requestAskTimer_)) {
+  //     reqRequester_->UnRegisterTimer(requestAskTimer_);
+  //   }
+  //   return true;
+  // } else {
+  //   // Start Timer ask for missing logs
+  //   if (!reqRequester_->isRegistered(requestAskTimer_)) {
+  //     reqRequester_->RegisterTimer(requestAskTimer_);
+  //   }
+  //   return false;
+  // }
 }
 
 void Replica::MissedIndexAckTd() {
@@ -1434,8 +1470,8 @@ void Replica::MissedIndexAckTd() {
     missedIndexAckContext_->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "MissedIndexAckTd Terminated " << preVal - 1
-            << " worker remaining";
+  VLOG(2) << "MissedIndexAckTd Terminated " << preVal - 1
+          << " worker remaining";
 }
 
 void Replica::ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer) {
@@ -1443,8 +1479,8 @@ void Replica::ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer) {
   if (msgHdr->msgType == MessageType::MISSED_INDEX_ASK &&
       askIndex.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
     uint32_t logBegin = askIndex.logidbegin();
-    uint32_t logEnd =
-        std::min(maxSyncedLogEntry_.load()->logId, askIndex.logidend());
+    uint32_t logEnd = std::min(maxSyncedLogId_.load(), askIndex.logidend());
+
     for (uint32_t i = logBegin; i <= logEnd; i += indexTransferBatch_) {
       IndexSync indexSyncMsg;
       indexSyncMsg.set_view(viewId_);
@@ -1452,20 +1488,16 @@ void Replica::ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer) {
       uint32_t end = std::min(i + indexTransferBatch_ - 1, logEnd);
       indexSyncMsg.set_logidend(end);
       uint32_t logid = i;
-      LogEntry* entryStart = syncedLogEntryByLogId_.get(logid);
-      if (!entryStart) {
-        // Since the update of syncedLogEntryByLogId_ may lag a bit behind
-        // maxSyncedLogEntry_. entryStart may be NULL. In that case, we
-        // terminate here
-        break;
+      while (logid <= end) {
+        LogEntry* entry = syncedEntries_.get(logid);
+        indexSyncMsg.add_deadlines(entry->body.deadline);
+        indexSyncMsg.add_reqkeys(entry->body.reqKey);
+        logid++;
       }
-
-      ASSERT(entryStart->logId == logid);
-      while (entryStart->logId <= end) {
-        indexSyncMsg.add_deadlines(entryStart->body.deadline);
-        indexSyncMsg.add_reqkeys(entryStart->body.reqKey);
-        entryStart = entryStart->next;
-      }
+      // LOG(INFO) << askIndex.replicaid() << " Ask " << askIndex.logidbegin()
+      //           << "-" << askIndex.logidend() << "\t\t Give "
+      //           << indexSyncMsg.logidbegin() << "-" <<
+      //           indexSyncMsg.logidend();
       indexAcker_->SendMsgTo(*(indexReceiver_[askIndex.replicaid()]),
                              indexSyncMsg, MessageType::SYNC_INDEX);
     }
@@ -1480,8 +1512,7 @@ void Replica::MissedReqAckTd() {
     missedReqAckContext_->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "MissedReqAckTd Terminated " << preVal - 1
-            << " worker remaining";
+  VLOG(2) << "MissedReqAckTd Terminated " << preVal - 1 << " worker remaining";
 }
 
 void Replica::ReceiveAskMissedReq(MessageHeader* msgHdr, char* msgBuffer) {
@@ -1492,11 +1523,14 @@ void Replica::ReceiveAskMissedReq(MessageHeader* msgHdr, char* msgBuffer) {
     missedReqMsg.set_replicaid(this->replicaId_);
     for (int i = 0; i < askReqMsg.missedreqkeys_size(); i++) {
       uint64_t reqKey = askReqMsg.missedreqkeys(i);
-      uint32_t quId = reqKey % recordMap_.size();
-      LogEntry* entry = recordMap_[quId].get(reqKey);
-      if (entry) {
+      uint32_t logId = syncedReq2LogId_.get(reqKey);
+      if (logId >= CONCURRENT_MAP_START_INDEX) {
+        // the req is found
+        LogEntry* entry = syncedEntries_.get(logId);
+        ASSERT(entry != NULL);
         RequestBodyToMessage(entry->body, missedReqMsg.add_reqs());
       }
+
       if ((uint32_t)(missedReqMsg.reqs_size()) >= requestTrasnferBatch_) {
         missedReqAckContext_->endPoint_->SendMsgTo(
             *(indexReceiver_[askReqMsg.replicaid()]), missedReqMsg,
@@ -1553,6 +1587,8 @@ void Replica::AskMissedIndex() {
 }
 
 void Replica::AskMissedRequest() {
+  // LOG(INFO) << "AskMissedRequest"
+  //           << "\t" << missedReqKeys_.size();
   if (missedReqKeys_.empty()) {
     // no need to start timer
     // reqRequester_->UnRegisterTimer(requestAskTimer_);
@@ -1580,6 +1616,14 @@ void Replica::AskMissedRequest() {
     askTimebyReqKey_[reqKey] = GetMicrosecondTimestamp();
   }
   if (askReqMsg.missedreqkeys_size() > 0) {
+    // uint64_t reqKey = askReqMsg.missedreqkeys(0);
+    // VLOG(1) << " targetReplica= " << roundRobinRequestAskIdx_ % replicaNum_
+    //         << "\t"
+    //         << "reqKey=" << (reqKey >> 32) << "\t" << (uint32_t)(reqKey);
+    // reqRequester_->SendMsgTo(
+    //     *(requestAskReceiver_[roundRobinRequestAskIdx_ % replicaNum_]),
+    //     askReqMsg, MessageType::MISSED_REQ_ASK);
+
     reqRequester_->SendMsgTo(*(requestAskReceiver_[viewId_ % replicaNum_]),
                              askReqMsg, MessageType::MISSED_REQ_ASK);
 
@@ -1604,8 +1648,8 @@ void Replica::GarbageCollectTd() {
     PrepareNextReclaim();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "GarbageCollectTd Terminated " << preVal - 1
-            << " worker remaining";
+  VLOG(2) << "GarbageCollectTd Terminated " << preVal - 1
+          << " worker remaining";
 }
 
 void Replica::ReclaimStaleCrashVector() {
@@ -1635,15 +1679,84 @@ void Replica::ReclaimStaleLogs() {
   for (uint32_t shardIdx = 0; shardIdx < fastReplyQu_.size() + 1; shardIdx++) {
     safePoint = std::min(safePoint, safeToClearUnSyncedLogId_[shardIdx].load());
   }
-  // Reclaim UnSynced Entries
+  // Reclaim entries
+  while (safePoint >= CONCURRENT_MAP_START_INDEX) {
+    LogEntry* entryToClear = unsyncedEntries_.get(safePoint);
+    if (entryToClear == NULL) {
+      // This key has been cleared in previous round, we can stop here
+      break;
+    }
+    unsyncedReq2LogId_.erase(entryToClear->body.reqKey);
+    unsyncedEntries_.erase(safePoint);
+    delete entryToClear;
+    safePoint--;
+  }
 
-  // Reclaim Entries in late-buffer
+  // Reclaim requests in late-buffer
   safePoint = safeToClearLateBufferLogId_;
+  while (safePoint >= CONCURRENT_MAP_START_INDEX) {
+    RequestBody* rb = lateBuffer_.get(safePoint);
+    if (rb == NULL) {
+      // We have cleared enough, stop and jump out
+      break;
+    }
+    lateBufferReq2LogId_.erase(rb->reqKey);
+    lateBuffer_.erase(safePoint);
+    safePoint--;
+    delete rb;
+  }
 }
 
-void Replica::PrepareNextReclaim() {}
+void Replica::PrepareNextReclaim() {
+  uint32_t lastPrepare = prepareToClearLateBufferLogId_;
+  while (lastPrepare <= maxLateBufferId_ &&
+         lastPrepare >= CONCURRENT_MAP_START_INDEX) {
+    RequestBody* rb = lateBuffer_.get(lastPrepare);
+    ASSERT(rb != NULL);
+    if (rb->deadline + reclaimTimeout_ * 1000 < GetMicrosecondTimestamp()) {
+      // this request is too old, no need to keep it any longer
+      lastPrepare++;
+    } else {
+      break;
+    }
+  }
+  prepareToClearLateBufferLogId_ = lastPrepare;
+
+  lastPrepare = prepareToClearUnSyncedLogId_;
+  while (lastPrepare <= maxUnSyncedLogId_ &&
+         lastPrepare >= CONCURRENT_MAP_START_INDEX) {
+    LogEntry* entry = unsyncedEntries_.get(lastPrepare);
+    ASSERT(entry != NULL);
+    bool shouldReclaim = false;
+    uint32_t syncPoint = maxSyncedLogIdByKey_[entry->body.opKey];
+    if (syncPoint >= CONCURRENT_MAP_START_INDEX) {
+      LogEntry* syncedEntry = syncedEntries_.get(syncPoint);
+      if (entry->LessOrEqual(*syncedEntry)) {
+        // synced entry has surpassed it, no need to keep it
+        shouldReclaim = true;
+      }
+    }
+    if ((!shouldReclaim) && entry->body.deadline + reclaimTimeout_ * 1000 <
+                                GetMicrosecondTimestamp()) {
+      // Even if synced entry has not surpassed it, it has been kept on the
+      // follwoers for too long We assume reclaimTimeout_ is a sufficient
+      // time: If leader has such an entry, it should have synced it with the
+      // follower after such a long time Otherwise, it only proves that the
+      // leader does not have such entry, so it is also unnecessary for the
+      // follower to keep it
+      shouldReclaim = true;
+    }
+    if (shouldReclaim) {
+      lastPrepare++;
+    } else {
+      break;
+    }
+  }
+  prepareToClearUnSyncedLogId_ = lastPrepare;
+}
 
 void Replica::CheckHeartBeat() {
+  return;
   if (status_ == ReplicaStatus::TERMINATED) {
     masterContext_->endPoint_->LoopBreak();
     return;
@@ -1680,7 +1793,7 @@ void Replica::ReceiveMasterMessage(MessageHeader* msgHdr, char* msgBuffer) {
       ProcessViewChangeReq(viewChangeReq);
     }
 
-  } else if (msgHdr->msgType == MessageType::VIEWCHANGE_MSG) {
+  } else if (msgHdr->msgType == MessageType::VIEWCHANGE) {
     ViewChange viewChangeMsg;
     if (viewChangeMsg.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
       ProcessViewChange(viewChangeMsg);
@@ -1773,10 +1886,10 @@ void Replica::SendViewChange() {
   viewChangeMsg.set_replicaid(replicaId_);
   CrashVectorStruct* cv = crashVectorInUse_[0].load();
   viewChangeMsg.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
-  viewChangeMsg.set_syncpoint(maxSyncedLogEntry_.load()->logId);
-  if (filterUnSyncedEntries_.size() > 1) {
+  viewChangeMsg.set_syncpoint(maxSyncedLogId_);
+  if (filterUnSyncedLogIds_.size() > 1) {
     viewChangeMsg.set_unsynclogbegin(1);
-    viewChangeMsg.set_unsynclogend(filterUnSyncedEntries_.size() - 1);
+    viewChangeMsg.set_unsynclogend(filterUnSyncedLogIds_.size() - 1);
   } else {
     viewChangeMsg.set_unsynclogbegin(0);
     viewChangeMsg.set_unsynclogend(0);
@@ -1785,7 +1898,7 @@ void Replica::SendViewChange() {
   viewChangeMsg.set_lastnormalview(lastNormalView_);
   masterContext_->endPoint_->SendMsgTo(
       *(masterReceiver_[viewId_ % replicaNum_]), viewChangeMsg,
-      MessageType::VIEWCHANGE_MSG);
+      MessageType::VIEWCHANGE);
 }
 
 void Replica::InitiateViewChange(const uint32_t view) {
@@ -1801,49 +1914,34 @@ void Replica::InitiateViewChange(const uint32_t view) {
   }
 
   status_ = ReplicaStatus::VIEWCHANGE;
-  LOG(INFO) << "status =" << (int)status_ << "\t"
-            << " view=" << viewId_ << "\t"
-            << " targeting view=" << view;
+  VLOG(2) << "status =" << status_ << "\t"
+          << " view=" << viewId_ << "\t"
+          << " targeting view=" << view;
 
   // Wait until every worker stop
   while (activeWorkerNum_ > 0) {
+    VLOG(3) << "activeWorker Check=" << activeWorkerNum_;
     usleep(1000);
   }
 
-  /** Since the update of syncedLogEntryByReqKey_ and syncedLogEntryByLogId_ may
-   * have not been completed when they encounter view change, let's first
-   * complete (flush) them */
-  LogEntry* minTrackedEntry = trackedEntry_[0];
-  for (uint32_t i = 0; i < trackedEntry_.size(); i++) {
-    if (minTrackedEntry->logId > trackedEntry_[i]->logId) {
-      minTrackedEntry = trackedEntry_[i];
+  // Update minUnSyncedLogId_, used for state transfer
+  minUnSyncedLogId_ = UINT32_MAX;
+  for (uint32_t i = 0; i <= fastReplyQu_.size(); i++) {
+    LOG(INFO) << "i=" << i << "\t"
+              << "safeToClearUnSyncedLogId_=" << safeToClearUnSyncedLogId_[i];
+    if (minUnSyncedLogId_ > safeToClearUnSyncedLogId_[i] + 1) {
+      minUnSyncedLogId_ = safeToClearUnSyncedLogId_[i] + 1;
     }
   }
-  while (minTrackedEntry->next) {
-    LogEntry* next = minTrackedEntry->next;
-    if (syncedLogEntryByLogId_.get(next->logId) == NULL) {
-      syncedLogEntryByLogId_.assign(next->logId, next);
-      syncedLogEntryByReqKey_.assign(next->body.reqKey, next);
+  // Reshape UnsyncedLogs (exclude those entries which have synced)
+  filterUnSyncedLogIds_.clear();
+  filterUnSyncedLogIds_.resize(1);  // Reserve 1 slot as dummy value
+  while (minUnSyncedLogId_ <= maxUnSyncedLogId_) {
+    LogEntry* entry = unsyncedEntries_.get(minUnSyncedLogId_);
+    if (syncedReq2LogId_.get(entry->body.reqKey) < CONCURRENT_MAP_START_INDEX) {
+      filterUnSyncedLogIds_.push_back(minUnSyncedLogId_);
     }
-    minTrackedEntry = next;
-  }
-  trackedEntry_.assign(trackedEntry_.size(), minTrackedEntry);
-
-  LogEntry* entryStart = minUnSyncedLogEntry_;
-  if (entryStart->logId < CONCURRENT_MAP_START_INDEX) {
-    // This is dummy, move to its next;
-    entryStart = entryStart->next;
-  }
-  filterUnSyncedEntries_.clear();
-  filterUnSyncedEntries_.resize(
-      1);  // Reserve 1 slot as dummy value [because 0 has special use]
-  while (entryStart) {
-    LogEntry* entry = syncedLogEntryByReqKey_.get(entryStart->body.reqKey);
-    if (!entry) {
-      // Has not been synced
-      filterUnSyncedEntries_.push_back(entryStart);
-    }
-    entryStart = entryStart->next;
+    minUnSyncedLogId_++;
   }
 
   viewId_ = view;
@@ -1853,9 +1951,9 @@ void Replica::InitiateViewChange(const uint32_t view) {
   masterContext_->endPoint_->RegisterTimer(masterContext_->monitorTimer_);
   LOG(INFO) << "Monitor Timer Registered "
             << "viewId=" << viewId_ << "\t"
-            << "maxSyncedLogId=" << maxSyncedLogEntry_.load()->logId << "\t"
+            << "maxSyncedLogId=" << maxSyncedLogId_ << "\t"
             << "committedLogId=" << committedLogId_ << "\t"
-            << "filterUnSyncedEntries_.size()=" << filterUnSyncedEntries_.size()
+            << "filterUnSyncedLogIds_.size()=" << filterUnSyncedLogIds_.size()
             << "\t"
             << "currentTime=" << GetMicrosecondTimestamp() << "\t";
   // Launch viewChange timer
@@ -1880,12 +1978,12 @@ void Replica::SendStartView(const int toReplicaId) {
   startView.set_view(viewId_);
   CrashVectorStruct* cv = crashVectorInUse_[0];
   startView.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
-  // startView.set_syncedlogid(maxSyncedLogId_);
-  startView.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+  startView.set_syncedlogid(maxSyncedLogId_);
   if (toReplicaId >= 0) {
     // send to one
     masterContext_->endPoint_->SendMsgTo(*(masterReceiver_[toReplicaId]),
-                                         startView, MessageType::START_VIEW);
+                                         startView,
+                                         MessageType::STATE_TRANSFER_REQUEST);
   } else {
     // send to all
     for (uint32_t i = 0; i < replicaNum_; i++) {
@@ -1896,8 +1994,8 @@ void Replica::SendStartView(const int toReplicaId) {
       masterContext_->endPoint_->SendMsgTo(*(masterReceiver_[i]), startView,
                                            MessageType::START_VIEW);
       VLOG(2) << "Send StartView to " << i << "\t"
-              << masterReceiver_[i]->GetIPAsString() << ":"
-              << masterReceiver_[i]->GetPortAsInt();
+              << masterReceiver_[i]->DecodeIP() << ":"
+              << masterReceiver_[i]->DecodePort();
     }
   }
 }
@@ -1908,8 +2006,7 @@ void Replica::SendSyncStatusReport() {
   report.set_replicaid(replicaId_);
   CrashVectorStruct* cv = crashVectorInUse_[0].load();
   report.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
-  // report.set_syncedlogid(maxSyncedLogId_);
-  report.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+  report.set_syncedlogid(maxSyncedLogId_);
   if (AmLeader()) {
     // leader directly process its own report
     ProcessSyncStatusReport(report);
@@ -2022,18 +2119,9 @@ void Replica::ProcessViewChange(const ViewChange& viewChange) {
         myvc.mutable_cv()->Add(masterCV->cv_.begin(), masterCV->cv_.end());
         myvc.set_view(viewId_);
         myvc.set_replicaid(replicaId_);
-        // myvc.set_syncpoint(maxSyncedLogId_);
-        // myvc.set_unsynclogbegin(minUnSyncedLogId_);
-        // myvc.set_unsynclogend(maxUnSyncedLogId_);
-        myvc.set_syncpoint(maxSyncedLogEntry_.load()->logId);
-        if (filterUnSyncedEntries_.size() > 1) {
-          myvc.set_unsynclogbegin(1);
-          myvc.set_unsynclogend(filterUnSyncedEntries_.size() - 1);
-        } else {
-          myvc.set_unsynclogbegin(0);
-          myvc.set_unsynclogend(0);
-        }
-
+        myvc.set_syncpoint(maxSyncedLogId_);
+        myvc.set_unsynclogbegin(minUnSyncedLogId_);
+        myvc.set_unsynclogend(maxUnSyncedLogId_);
         myvc.set_lastnormalview(lastNormalView_);
         viewChangeSet_[replicaId_] = myvc;
         // Has got enough viewChange messages, stop viewChangeTimer
@@ -2048,8 +2136,7 @@ void Replica::ProcessViewChange(const ViewChange& viewChange) {
 
 void Replica::TransferSyncedLog() {
   uint32_t largestNormalView = lastNormalView_;
-  uint32_t maxSyncedLogId = maxSyncedLogEntry_.load()->logId;
-  uint32_t largestSyncPoint = maxSyncedLogId;
+  uint32_t largestSyncPoint = maxSyncedLogId_;
   uint32_t targetReplicaId = replicaId_;
   transferSyncedEntry_ = true;
   for (auto& kv : viewChangeSet_) {
@@ -2066,14 +2153,14 @@ void Replica::TransferSyncedLog() {
   }
 
   stateTransferIndices_.clear();
-  VLOG(3) << "maxSyncedLogId_=" << maxSyncedLogId << "\t"
+  VLOG(3) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
           << "largestSyncPoint=" << largestSyncPoint << "\t"
           << "largestNormalView = " << largestNormalView << "\t"
           << "lastNormalView_=" << lastNormalView_;
   // Directly copy the synced entries
   if (largestNormalView == lastNormalView_) {
-    if (maxSyncedLogId < largestSyncPoint) {
-      stateTransferIndices_[targetReplicaId] = {maxSyncedLogId + 1,
+    if (maxSyncedLogId_ < largestSyncPoint) {
+      stateTransferIndices_[targetReplicaId] = {maxSyncedLogId_ + 1,
                                                 largestSyncPoint};
     }
     // Else: no need to do state transfer, because this replica has all synced
@@ -2108,6 +2195,7 @@ void Replica::TransferSyncedLog() {
 void Replica::TransferUnSyncedLog() {
   // Get the unsynced logs from the f+1 remaining replicas
   // If this process cannot be completed, rollback to view change
+
   uint32_t largestNormalView = lastNormalView_;
   transferSyncedEntry_ = false;
   for (auto& kv : viewChangeSet_) {
@@ -2155,20 +2243,17 @@ void Replica::TransferUnSyncedLog() {
 void Replica::MergeUnSyncedLog() {
   int f = replicaNum_ / 2;
   int quorum = (f % 2 == 0) ? (f / 2 + 1) : (f / 2 + 2);
-  SHA_HASH dummy;
   for (auto& kv : requestsToMerge_) {
     uint64_t reqKey = kv.first.second;
-    LogEntry* entry = kv.second.first;
+    RequestBody* rb = kv.second.first;
     int count = kv.second.second;
     if (count >= quorum) {
-      if (syncedLogEntryByReqKey_.get(reqKey)) {
+      if (syncedEntries_.get(reqKey) != NULL) {
         // at-most once
-        delete entry;
+        delete rb;
         continue;
       }
-      ProcessRequest(entry, true, false, true);
-      syncedLogEntryByReqKey_.assign(reqKey, entry);
-      syncedLogEntryByLogId_.assign(entry->logId, entry);
+      ProcessRequest(rb, true, false, true);
     }
   }
   requestsToMerge_.clear();
@@ -2177,8 +2262,9 @@ void Replica::MergeUnSyncedLog() {
 
 void Replica::EnterNewView() {
   LOG(INFO) << "Enter New View " << viewId_
-            << " maxSyncedLog =" << maxSyncedLogEntry_.load()->logId << "\t"
+            << " maxSyncedLog =" << maxSyncedLogId_ << "\t"
             << GetMicrosecondTimestamp();
+  ;
   // Leader sends StartView to all the others
   if (AmLeader()) {
     SendStartView(-1);
@@ -2201,8 +2287,7 @@ void Replica::EnterNewView() {
     usleep(1000);
   }
 
-  LOG(INFO) << "View=" << viewId_
-            << " Recovered worker number:" << activeWorkerNum_;
+  VLOG(2) << "View=" << viewId_ << " Recovered " << activeWorkerNum_;
 }
 
 void Replica::SendStateTransferRequest() {
@@ -2218,39 +2303,42 @@ void Replica::SendStateTransferRequest() {
 
   StateTransferRequest request;
   request.set_view(viewId_);
-  request.set_issynced(transferSyncedEntry_);
   request.set_replicaid(replicaId_);
+  request.set_issynced(transferSyncedEntry_);
   for (auto& stateTransferInfo : stateTransferIndices_) {
     // Do not request too many entries at one time, otherwise, UDP packet
     // cannot handle that
-    uint32_t targetReplica = stateTransferInfo.first;
-    uint32_t logBegin = stateTransferInfo.second.first;
-    uint32_t logEnd = stateTransferInfo.second.second;
-
-    request.set_logbegin(logBegin);
-    if (logBegin + requestTrasnferBatch_ <= logEnd) {
-      request.set_logend(logBegin + requestTrasnferBatch_);
+    request.set_logbegin(stateTransferInfo.second.first);
+    if (stateTransferInfo.second.first + requestTrasnferBatch_ <=
+        stateTransferInfo.second.second) {
+      request.set_logend(stateTransferInfo.second.first +
+                         requestTrasnferBatch_);
     } else {
-      request.set_logend(logEnd);
+      request.set_logend(stateTransferInfo.second.second);
     }
 
-    VLOG(3) << "I am asking stateTransferRequest from " << targetReplica << "\t"
+    VLOG(3) << "stateTransferRequest = " << request.replicaid() << "\t"
             << request.logbegin() << "\t" << request.logend() << "\t"
+            << "info=" << stateTransferInfo.first << ":"
+            << stateTransferInfo.second.first << "\t"
+            << stateTransferInfo.second.second
             << "\tisSynced=" << request.issynced();
-    masterContext_->endPoint_->SendMsgTo(*(masterReceiver_[targetReplica]),
-                                         request,
-                                         MessageType::STATE_TRANSFER_REQUEST);
+    VLOG(4) << "stateTransferRequest = " << request.DebugString();
+    masterContext_->endPoint_->SendMsgTo(
+        *(masterReceiver_[stateTransferInfo.first]), request,
+        MessageType::STATE_TRANSFER_REQUEST);
   }
 }
 
 void Replica::ProcessStateTransferRequest(
     const StateTransferRequest& stateTransferRequest) {
-  VLOG(3) << "stateTransferRequest from Replica-"
-          << stateTransferRequest.replicaid() << "\t||"
-          << stateTransferRequest.logbegin() << "\t"
-          << stateTransferRequest.logend() << "\tisSynced "
-          << stateTransferRequest.issynced()
-          << " view=" << stateTransferRequest.view();
+  VLOG(3) << "stateTransferRequest=" << stateTransferRequest.logbegin() << "\t"
+          << stateTransferRequest.logend()
+          << "\trequestReplicaid=" << stateTransferRequest.replicaid()
+          << "\tsyncedMax:" << maxSyncedLogId_ << "\t"
+          << "\tunsyncedMin:" << minUnSyncedLogId_
+          << "\tunsyncedMax:" << maxUnSyncedLogId_ << "\t"
+          << (uint32_t)stateTransferRequest.issynced();
 
   if (stateTransferRequest.view() != viewId_) {
     if (stateTransferRequest.view() > viewId_) {
@@ -2267,46 +2355,31 @@ void Replica::ProcessStateTransferRequest(
   reply.set_view(viewId_);
   reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
   reply.set_issynced(stateTransferRequest.issynced());
+  reply.set_logbegin(stateTransferRequest.logbegin());
+  reply.set_logend(stateTransferRequest.logend());
 
   if (reply.issynced()) {
-    reply.set_logbegin(stateTransferRequest.logbegin());
-    ASSERT(maxSyncedLogEntry_.load()->logId >= stateTransferRequest.logend());
-    for (uint32_t j = stateTransferRequest.logbegin();
-         j <= stateTransferRequest.logend(); j++) {
-      LogEntry* entry = syncedLogEntryByLogId_.get(j);
-      if (entry) {
-        RequestBodyToMessage(entry->body, reply.add_reqs());
-        reply.set_logend(j);
-      } else {
-        LOG(WARNING) << "Maybe just due to lag "
-                     << stateTransferRequest.logend() << ">" << reply.logend();
-        break;
-      }
-    }
-    VLOG(3) << "State Reply " << reply.logbegin() << "--" << reply.logend();
-  } else {
-    reply.set_logbegin(stateTransferRequest.logbegin());
-    reply.set_logend(stateTransferRequest.logend());
-    ASSERT(filterUnSyncedEntries_.size() > reply.logend());
+    ASSERT(maxSyncedLogId_ >= reply.logend());
     for (uint32_t j = reply.logbegin(); j <= reply.logend(); j++) {
-      LogEntry* entry = filterUnSyncedEntries_[j];
+      LogEntry* entry = syncedEntries_.get(j);
       ASSERT(entry != NULL);
       RequestBodyToMessage(entry->body, reply.add_reqs());
     }
-    VLOG(3) << "Give " << reply.logbegin() << "-" << reply.logend();
+  } else {
+    ASSERT(filterUnSyncedLogIds_.size() > reply.logend());
+    for (uint32_t j = reply.logbegin(); j <= reply.logend(); j++) {
+      uint32_t entryIdx = filterUnSyncedLogIds_[j];
+      LogEntry* entry = unsyncedEntries_.get(entryIdx);
+      ASSERT(entry != NULL);
+      RequestBodyToMessage(entry->body, reply.add_reqs());
+    }
   }
-  if (reply.reqs_size() > 0) {
-    masterContext_->endPoint_->SendMsgTo(*requesterAddr, reply,
-                                         MessageType::STATE_TRANSFER_REPLY);
-  }
+  masterContext_->endPoint_->SendMsgTo(*requesterAddr, reply,
+                                       MessageType::STATE_TRANSFER_REPLY);
 }
 
 void Replica::ProcessStateTransferReply(
     const StateTransferReply& stateTransferReply) {
-  VLOG(3) << "Receive some state " << stateTransferReply.logbegin() << "--"
-          << stateTransferReply.logend()
-          << " view=" << stateTransferReply.view() << "--- "
-          << transferSyncedEntry_ << "==" << stateTransferReply.issynced();
   if (status_ == ReplicaStatus::NORMAL) {
     // Normal replicas do not need state transfer
     return;
@@ -2317,7 +2390,7 @@ void Replica::ProcessStateTransferReply(
     Aggregated(stateTransferReply.cv());
   }
 
-  if (!(masterContext_->endPoint_->isTimerRegistered(stateTransferTimer_))) {
+  if (!(masterContext_->endPoint_->isRegistered(stateTransferTimer_))) {
     // We are not doing state transfer, so ignore this message
     return;
   }
@@ -2358,28 +2431,28 @@ void Replica::ProcessStateTransferReply(
   // function
   stateTransferTerminateTime_ =
       GetMicrosecondTimestamp() + +stateTransferTimeout_ * 1000;
-  SHA_HASH dummy;
+
   if (stateTransferReply.issynced()) {
     // This is the state-transfer for synced requests
     for (uint32_t i = iter->second.first; i <= stateTransferReply.logend();
          i++) {
+      if (syncedEntries_.get(i) != NULL) {
+        LOG(INFO) << "logid=" << i << "\t"
+                  << "stateMissingBegin=" << iter->second.first
+                  << "\tstateMissingEnd=" << iter->second.second
+                  << "\t maxSyncedLogId=" << maxSyncedLogId_ << "\t"
+                  << "stateTransferReply.logbegin="
+                  << stateTransferReply.logbegin() << "\t"
+                  << "stateTransferReply.logend="
+                  << stateTransferReply.logend();
+      }
+      ASSERT(syncedEntries_.get(i) == NULL);
       const RequestBodyMsg& rbMsg =
           stateTransferReply.reqs(i - iter->second.first);
-      LogEntry* entry =
-          new LogEntry(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
-                       rbMsg.proxyid(), rbMsg.command(), dummy, dummy);
-      ProcessRequest(entry, true, false, false);
-      // LOG(INFO) << "Processed " << entry->logId << "\t"
-      //           << maxSyncedLogEntry_.load()->logId;
-      // Register
-      if (syncedLogEntryByReqKey_.get(entry->body.reqKey) == NULL) {
-        syncedLogEntryByReqKey_.assign(entry->body.reqKey, entry);
-        syncedLogEntryByLogId_.assign(entry->logId, entry);
-        if (entry->logId > CONCURRENT_MAP_START_INDEX) {
-          ASSERT(syncedLogEntryByLogId_.get(entry->logId - 1) != NULL);
-          ASSERT(syncedLogEntryByLogId_.get(entry->logId - 1) == entry->prev);
-        }
-      }
+      RequestBody* rb =
+          new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
+                          rbMsg.proxyid(), rbMsg.command());
+      ProcessRequest(rb, true, false, false);
     }
   } else {
     // This is the state-transfer for unsynced request (log merge)
@@ -2387,11 +2460,10 @@ void Replica::ProcessStateTransferReply(
       const RequestBodyMsg& rbMsg = stateTransferReply.reqs(i);
       std::pair<uint64_t, uint64_t> key(rbMsg.deadline(), rbMsg.reqkey());
       if (requestsToMerge_.find(key) != requestsToMerge_.end()) {
-        LogEntry* entry =
-            new LogEntry(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
-                         rbMsg.proxyid(), rbMsg.command(), dummy, dummy);
-
-        requestsToMerge_[key] = {entry, 1};
+        RequestBody* rb =
+            new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
+                            rbMsg.proxyid(), rbMsg.command());
+        requestsToMerge_[key] = {rb, 1};
       } else {
         requestsToMerge_[key].second++;
       }
@@ -2413,9 +2485,7 @@ void Replica::ProcessStateTransferReply(
       LOG(INFO) << "State Tranfer from Replica "
                 << stateTransferReply.replicaid() << "\t" << remainingPercent
                 << "\% of progress (i.e., " << remainingGap
-                << " logs) remaining\t"
-                << "Current committedLogId_=" << committedLogId_
-                << "\tmaxSyncedLogId=" << maxSyncedLogEntry_.load()->logId;
+                << " logs) remaining";
       ;
       stateTransferIndicesRef_[stateTransferReply.replicaid()].second -= 10;
     }
@@ -2439,27 +2509,36 @@ void Replica::ProcessStateTransferReply(
 }
 
 void Replica::RewindSyncedLogTo(uint32_t rewindPoint) {
-  LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogEntry_.load()->logId << "\t"
+  std::set<uint32_t> keysToClear;
+  LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_ << "\t"
             << "rewindPoint=" << rewindPoint;
-  LogEntry* entryStart = maxSyncedLogEntry_;
-  while (entryStart->logId > rewindPoint) {
-    LogEntry* entryToDel = entryStart;
-    if (entryToDel->prevNonCommutative) {
-      entryToDel->prevNonCommutative->nextNonCommutative = NULL;
-    }
-    if (entryToDel->prev) {
-      entryToDel->prev->next = NULL;
-    }
-    ASSERT(entryStart->prev != NULL);
-    syncedLogEntryByReqKey_.erase(entryToDel->body.reqKey);
-    syncedLogEntryByLogId_.erase(entryToDel->logId);
-    entryStart = entryStart->prev;
-    delete entryToDel;
+
+  // Rewind syncedEntries_ and maxSyncedLogId_
+  while (maxSyncedLogId_ > rewindPoint) {
+    LogEntry* entry = syncedEntries_.get(maxSyncedLogId_);
+    keysToClear.insert(entry->body.opKey);
+    syncedReq2LogId_.erase(entry->body.reqKey);
+    maxSyncedLogId_--;
   }
-  entryStart->next = NULL;
-  entryStart->nextNonCommutative = NULL;
-  maxSyncedLogEntry_ = entryStart;
-  trackedEntry_.assign(trackedEntry_.size(), maxSyncedLogEntry_);
+
+  for (const uint32_t& opKey : keysToClear) {
+    // Rewind
+    while (maxSyncedLogIdByKey_[opKey] > maxSyncedLogId_ &&
+           maxSyncedLogIdByKey_[opKey] >= CONCURRENT_MAP_START_INDEX) {
+      LogEntry* entry = syncedEntries_.get(maxSyncedLogIdByKey_[opKey]);
+      ASSERT(entry != NULL);
+      syncedEntries_.erase(maxSyncedLogIdByKey_[opKey]);
+      if (entry->prevLogId >= CONCURRENT_MAP_START_INDEX) {
+        maxSyncedLogIdByKey_[opKey] = entry->prevLogId;
+        delete entry;
+      } else {
+        maxSyncedLogIdByKey_[opKey] = CONCURRENT_MAP_START_INDEX - 1;
+        delete entry;
+        break;
+      }
+    }
+  }
+  LOG(INFO) << "maxSyncedLogId_=" << maxSyncedLogId_;
 }
 
 void Replica::ProcessStartView(const StartView& startView) {
@@ -2476,29 +2555,19 @@ void Replica::ProcessStartView(const StartView& startView) {
       VLOG(2) << "InitiateViewChange-7";
       InitiateViewChange(startView.view());
     } else if (startView.view() == viewId_) {
+      VLOG(3) << "committedLogId_=" << committedLogId_ << "\t"
+              << "syncedlogid=" << startView.syncedlogid();
       if (committedLogId_ < startView.syncedlogid()) {
         // Start StateTransfer
-        if (masterContext_->endPoint_->isTimerRegistered(stateTransferTimer_)) {
-          // LOG(INFO) << "StateTransfer In Progress:"
-          //           << stateTransferIndices_[startView.replicaid()].first
-          //           << "--"
-          //           << stateTransferIndices_[startView.replicaid()].second;
-          return;
-        }
         RewindSyncedLogTo(committedLogId_);
         stateTransferIndices_.clear();
-        stateTransferIndicesRef_[startView.replicaid()] = {committedLogId_ + 1,
-                                                           100};
         stateTransferIndices_[startView.replicaid()] = {
             committedLogId_ + 1, startView.syncedlogid()};
-        stateTransferIndicesRef_[startView.replicaid()] = {committedLogId_ + 1,
-                                                           100};
         stateTransferCallback_ = std::bind(&Replica::EnterNewView, this);
         stateTransferTerminateTime_ =
             GetMicrosecondTimestamp() + stateTransferTimeout_ * 1000;
         stateTransferTerminateCallback_ =
             std::bind(&Replica::RollbackToViewChange, this);
-
         transferSyncedEntry_ = true;
         masterContext_->endPoint_->RegisterTimer(stateTransferTimer_);
       } else {
@@ -2578,7 +2647,7 @@ void Replica::ProcessCrashVectorReply(const CrashVectorReply& reply) {
     return;
   }
 
-  if (masterContext_->endPoint_->isTimerRegistered(crashVectorRequestTimer_) ==
+  if (masterContext_->endPoint_->isRegistered(crashVectorRequestTimer_) ==
       false) {
     // We no longer request crash vectors
     LOG(INFO) << "no longer register crashVectorRequest "
@@ -2630,7 +2699,7 @@ void Replica::ProcessRecoveryRequest(const RecoveryRequest& request) {
   reply.set_replicaid(replicaId_);
   reply.set_view(viewId_);
   reply.mutable_cv()->Add(cv->cv_.begin(), cv->cv_.end());
-  reply.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+  reply.set_syncedlogid(maxSyncedLogId_);
   masterContext_->endPoint_->SendMsgTo(*(masterReceiver_[request.replicaid()]),
                                        reply, MessageType::RECOVERY_REPLY);
 }
@@ -2652,8 +2721,7 @@ void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
     }
   }
 
-  if (masterContext_->endPoint_->isTimerRegistered(recoveryRequestTimer_) ==
-      false) {
+  if (masterContext_->endPoint_->isRegistered(recoveryRequestTimer_) == false) {
     // We no longer request recovery reply
     return;
   }
@@ -2673,7 +2741,7 @@ void Replica::ProcessRecoveryReply(const RecoveryReply& reply) {
     viewId_ = maxView;
     recoveryReplySet_.clear();
     LOG(INFO) << "Replica intends to enter View " << viewId_
-              << " after recovery; the number of logs to recover is:"
+              << "\t after recovery; the number of logs to recover is:"
               << syncedLogId;
     if (AmLeader()) {
       LOG(INFO) << "The recovered replica will become the leader in this view, "
@@ -2772,7 +2840,7 @@ void Replica::ProcessCommitInstruction(const CommitInstruction& commit) {
     // LOG(INFO) << "committedLogId_=" << committedLogId_;
   }
 
-  uint32_t nextCommitId = maxSyncedLogEntry_.load()->logId;
+  uint32_t nextCommitId = maxSyncedLogId_;
   if (toCommitLogId_ < nextCommitId) {
     nextCommitId = toCommitLogId_;
   }
@@ -2781,38 +2849,14 @@ void Replica::ProcessCommitInstruction(const CommitInstruction& commit) {
       committedLogId_++;
       continue;
     }
-    uint32_t preFetchTrackedLogId = trackedEntry_[0]->logId;
-    LogEntry* entry = syncedLogEntryByLogId_.get(committedLogId_);
+    LogEntry* entry = syncedEntries_.get(committedLogId_);
     if (entry == NULL) {
-      if (committedLogId_ <= preFetchTrackedLogId) {
-        LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
-                  << "maxSyncedLogId_=" << maxSyncedLogEntry_.load()->logId
-                  << "\ttrackedLogId =" << preFetchTrackedLogId;
-        for (uint32_t i = CONCURRENT_MAP_START_INDEX;
-             i <= trackedEntry_[0]->logId; i++) {
-          if (syncedLogEntryByLogId_.get(i) == NULL) {
-            LOG(INFO) << "log " << i << " not recorded";
-          }
-        }
-        LOG(ERROR) << "abnormal exit";
-        exit(0);
-      }
-      if (viewId_ == 1) {
-        LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
-                  << "maxSyncedLogId_=" << maxSyncedLogEntry_.load()->logId
-                  << "\t"
-                  << "\ttrackedLogId =" << trackedEntry_[0]->logId;
-      }
-
-      break;
+      LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
+                << "maxSyncedLogId_=" << maxSyncedLogId_;
     }
     ASSERT(entry != NULL);
     entry->result = ApplicationExecute(entry->body);
     committedLogId_++;
-    // if (committedLogId_ % 1000 == 0) {
-    //   LOG(INFO) << "committedLogId_=" << committedLogId_ << "\t"
-    //             << "maxSyncedLogId_=" << maxSyncedLogEntry_.load()->logId;
-    // }
   }
 }
 
@@ -2888,7 +2932,7 @@ void Replica::RollbackToViewChange() {
   LOG(INFO) << "Rollback to restart view change";
   status_ = ReplicaStatus::VIEWCHANGE;
   viewChangeSet_.clear();
-  if (false == masterContext_->endPoint_->isTimerRegistered(viewChangeTimer_)) {
+  if (false == masterContext_->endPoint_->isRegistered(viewChangeTimer_)) {
     masterContext_->endPoint_->RegisterTimer(viewChangeTimer_);
   }
 }
@@ -2900,17 +2944,18 @@ void Replica::RollbackToRecovery() {
   // Since we start a new round of recovery, the logs obtained from the
   // previous round (if any) will not count. Delete them (=clean state) and
   // restart
-  LogEntry* entryStart = syncedLogEntryHead_->next;
-  while (entryStart) {
-    LogEntry* entryToDel = entryStart;
-    entryStart = entryStart->next;
-    delete entryToDel;
+  for (uint32_t i = CONCURRENT_MAP_START_INDEX; i <= maxSyncedLogId_; i++) {
+    LogEntry* entry = syncedEntries_.get(i);
+    if (entry) {
+      syncedReq2LogId_.erase(entry->body.reqKey);
+      delete entry;
+      syncedEntries_.erase(i);
+    }
   }
-  maxSyncedLogEntry_ = syncedLogEntryHead_;
-  maxSyncedLogEntryByKey_.assign(keyNum_, NULL);
+  maxSyncedLogId_ = CONCURRENT_MAP_START_INDEX - 1;
+  maxSyncedLogIdByKey_.assign(keyNum_, CONCURRENT_MAP_START_INDEX - 1);
 
-  if (false ==
-      masterContext_->endPoint_->isTimerRegistered(recoveryRequestTimer_)) {
+  if (false == masterContext_->endPoint_->isRegistered(recoveryRequestTimer_)) {
     masterContext_->endPoint_->RegisterTimer(recoveryRequestTimer_);
   }
 }
@@ -2920,5 +2965,25 @@ std::string Replica::ApplicationExecute(const RequestBody& request) {
 }
 
 bool Replica::AmLeader() { return (viewId_ % replicaNum_ == replicaId_); }
+MessageHeader* Replica::CheckMsgLength(const char* msgBuffer,
+                                       const int msgLen) {
+  if (msgLen < 0) {
+    LOG(WARNING) << "\tmsgLen=" << msgLen;
+    return NULL;
+  }
+  if ((uint32_t)msgLen < sizeof(MessageHeader)) {
+    LOG(WARNING) << "\tmsgLen=" << msgLen;
+    return NULL;
+  }
+  MessageHeader* msgHdr = (MessageHeader*)(void*)msgBuffer;
 
+  if (msgHdr->msgLen == msgLen - sizeof(MessageHeader)) {
+    return msgHdr;
+  } else {
+    LOG(WARNING) << "Incomplete message: expected length "
+                 << msgHdr->msgLen + sizeof(MessageHeader) << "\tbut got "
+                 << msgLen;
+    return NULL;
+  }
+}
 }  // namespace nezha

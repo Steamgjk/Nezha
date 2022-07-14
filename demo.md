@@ -9,7 +9,19 @@ We have prepared the configuration files in ```configs``` folder, these configur
 - nezha-client-config.yaml
 
 ### View Change Test
-**Step 1**: Launch 3 replicas (i.e. replica-0, replica-1, replica-2)
+**Step 1**: Launch 3 replicas (i.e. replica-0, replica-1, replica-2). Open 3 terminals and launch one replica in each terminal.
+```
+# In the first terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml
+
+# In the second terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-1.yaml
+
+# In the third terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-2.yaml
+
+```
+
 ![Step-1](figs/nezha-vr-test-figs/step-1.png)
 
 **Step 2**: After the three replicas are launched, we can see the important information displayed from the console logs, e.g. the current view, the replica id of this replica, the number of replicas, the number of keys the maintained by each replica's state machine (for commutativity optimization)
@@ -23,6 +35,11 @@ We have prepared the configuration files in ```configs``` folder, these configur
 ![Step-4](figs/nezha-vr-test-figs/step-4.png)
 
 **Step 5**: We want the failed replica to rejoin the system. Therefore, we launch replica-0. This time, we set the flag ```isRecovering``` as true, so that it goes through the recovery procedure and retrieves the state from the other healthy replicas.
+```
+# In the first terminal 
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+```
+
 ![Step-5](figs/nezha-vr-test-figs/step-5.png)
 
 **Step 6**: We can see that replica-0 rejoins the system as a follower, and the current view is 1.
@@ -38,6 +55,26 @@ The test process can be repeated. So long as there are always a majority of repl
 is-openloop: true
 poisson-rate: 10
 ```
+
+```
+# In the first terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml
+
+# In the second terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-1.yaml
+
+# In the third terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-2.yaml
+
+# In the fourth terminal
+$HOME/nezhav2/bazel-bin/proxy/nezha_proxy --config $HOME/nezhav2/configs/local/nezha-proxy-config.yaml
+
+# In the fifth terminal
+$HOME/nezhav2/bazel-bin/client/nezha_client  --config $HOME/nezhav2/configs/nezha-client-config.yaml
+
+```
+
+
 ![Step-1](figs/nezha-test-with-client/step-1.png)
 
 
@@ -50,6 +87,12 @@ poisson-rate: 10
 
 
 **Step 4**: We want the crashed replica (i.e. replica-0) to rejoin the system. So we set ```isRecovering``` flag as true. 
+
+```
+# In the first terminal
+$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+```
+
 ![Step-4](figs/nezha-test-with-client/step-4.png)
 
 

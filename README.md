@@ -22,6 +22,11 @@ chmod -R 777 libev
 cd libev && sudo ./autogen.sh 
 ./configure && make && sudo make install
 
+# install concurrent queue, it is a single-file library, we only need concurrentqueue.h
+git clone https://github.com/cameron314/concurrentqueue.git
+sudo cp concurrentqueue/concurrentqueue.h /usr/local/include/
+
+
 # install junction and the turf
 git clone https://github.com/preshing/junction.git
 git clone https://github.com/preshing/turf.git
@@ -36,6 +41,18 @@ sudo make install
 # install glog (I recommend install from source, the apt install have some problems) https://github.com/google/glog
 # install gflag 
 sudo apt-get install libgflags-dev -y
+
+# install bazel 5.2.0, please follow the instructions at https://bazel.build/install/ubuntu#install-on-ubuntu
+
+sudo apt install apt-transport-https curl gnupg -y
+curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
+sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+
+sudo apt update
+sudo apt install bazel-5.2.0
+sudo mv /usr/bin/bazel-5.2.0 /usr/bin/bazel
+
 ```
 
 ## Clone Project
@@ -64,6 +81,7 @@ Stale files and experiemental files are put into archive folder, and will be del
 ## Build Nezha with Bazel
 
 Since Bazel is becoming popular, we have migrated nezha from Makefile-based building system to the bazel building system. The bazel version in use is 5.2.0
+
 
 ```
     cd nezhav2 && bazel build //...

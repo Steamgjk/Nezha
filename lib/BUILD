@@ -9,12 +9,22 @@ cc_library(
 
 
 cc_library(
-    name = "message_type",
-    srcs = ["message_type.cc"],
-    hdrs = ["message_type.h"],
+    name = "common_type",
+    srcs = ["common_type.h"],
+    hdrs = ["common_type.h"],
     visibility = ["//visibility:public"],
 )
 
+
+cc_library(
+    name = "common_struct",
+    srcs = ["common_struct.h"],
+    hdrs = ["common_struct.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":common_type"
+    ],
+)
 
 
 cc_library(
@@ -24,6 +34,27 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "message_handler",
+    srcs = ["message_handler.h"],
+    hdrs = ["message_handler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":address",
+        ":common_type"
+    ],
+)
+
+cc_library(
+    name = "timer",
+    srcs = ["timer.h"],
+    hdrs = ["timer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":address",
+        ":common_type"
+    ],
+)
 
 cc_library(
     name = "endpoint",
@@ -32,7 +63,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":message_type"
+        ":common_struct",
+        ":message_handler",
+        ":timer"
     ],
 )
 

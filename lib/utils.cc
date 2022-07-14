@@ -1,17 +1,5 @@
 #include "lib/utils.h"
 
-namespace EndpointType {
-char UDP_ENDPOINT = 1;
-char GRPC_ENDPOINT = 2;
-}  // namespace EndpointType
-
-namespace ReplicaStatus {
-char NORMAL = 1;
-char VIEWCHANGE = 2;
-char RECOVERING = 3;
-char TERMINATED = 4;
-};  // namespace ReplicaStatus
-
 SHA_HASH CalculateHash(uint64_t deadline, uint64_t reqKey) {
   SHA_HASH hash;
   const uint32_t contentLen =
@@ -19,26 +7,6 @@ SHA_HASH CalculateHash(uint64_t deadline, uint64_t reqKey) {
   unsigned char content[contentLen];
   memcpy(content, &deadline, sizeof(uint64_t));
   memcpy(content + sizeof(uint64_t), &reqKey, sizeof(uint64_t));
-  SHA1(content, contentLen, hash.hash);
-  return hash;
-}
-
-SHA_HASH CalculateHash(uint64_t deadline, uint32_t clientId, uint64_t reqId) {
-  SHA_HASH hash;
-  const uint32_t contentLen =
-      sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint32_t);
-  unsigned char content[contentLen];
-  memcpy(content, &deadline, sizeof(uint64_t));
-  memcpy(content + sizeof(uint64_t), &clientId, sizeof(uint32_t));
-  memcpy(content + sizeof(uint64_t) + sizeof(uint32_t), &reqId,
-         sizeof(uint32_t));
-  SHA1(content, contentLen, hash.hash);
-  return hash;
-}
-
-SHA_HASH CalculateHash(const unsigned char* content,
-                       const uint32_t contentLen) {
-  SHA_HASH hash;
   SHA1(content, contentLen, hash.hash);
   return hash;
 }
@@ -62,11 +30,8 @@ Endpoint* CreateEndpoint(const char endpointType, const std::string& sip,
   }
 }
 
-EndpointMsgHandler* CreateMsgHandler(
-    const char endpointType,
-    std::function<void(MessageHeader*, char*, Address*, void*, Endpoint*)>
-        msghdl,
-    void* ctx) {
+MessageHandler* CreateMsgHandler(const char endpointType,
+                                 MessageHandlerFunc msghdl, void* ctx) {
   if (endpointType == EndpointType::UDP_ENDPOINT) {
     return new UDPMsgHandler(msghdl, ctx);
   } else if (endpointType == EndpointType::GRPC_ENDPOINT) {

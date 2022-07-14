@@ -2,6 +2,7 @@
 
 namespace nezha {
 Proxy::Proxy(const std::string& configFile) {
+  tagId_ = 1;
   proxyConfig_ = YAML::LoadFile(configFile);
   PrintConfig();
   CreateContext();
@@ -127,19 +128,22 @@ void Proxy::LaunchThreads() {
   int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
 
   threadPool_["CalcLatencyBound"] =
-      new std::thread(&Proxy::CalcLatencyBound, this);
+      new std::thread(&Proxy::CalculateLatencyBoundTd, this);
   for (int i = 0; i < shardNum; i++) {
     std::string key = "CheckQuorum-" + std::to_string(i);
-    threadPool_[key] = new std::thread(&Proxy::CheckQuorum, this, i);
+    threadPool_[key] = new std::thread(&Proxy::CheckQuorumTd, this, i);
   }
 
   for (int i = 0; i < shardNum; i++) {
     std::string key = "ForwardRequests-" + std::to_string(i);
-    threadPool_[key] = new std::thread(&Proxy::ForwardRequests, this, i);
+    threadPool_[key] = new std::thread(&Proxy::ForwardRequestsTd, this, i);
   }
+
+  std::string key = "LogTd";
+  threadPool_[key] = new std::thread(&Proxy::LogTd, this);
 }
 
-void Proxy::CalcLatencyBound() {
+void Proxy::CalculateLatencyBoundTd() {
   std::pair<uint32_t, uint32_t> owdSample;
   std::vector<uint32_t> replicaOWDs;
   replicaOWDs.resize(
@@ -168,7 +172,27 @@ void Proxy::CalcLatencyBound() {
   }
 }
 
-void Proxy::CheckQuorum(const int id) {
+void Proxy::LogTd() {
+  Log litem;
+  int proxyId = proxyConfig_["proxy-info"]["proxy-id"].as<int>();
+  std::ofstream ofs("Proxy-Stats-" + std::to_string(proxyId) + ".csv");
+  ofs << "ReplicaId,ClientTime,ProxyTime,RecvTime,Deadline,FastReplyTime,"
+         "SlowReplyTime,"
+         "ProxyRecvTime"
+      << std::endl;
+  uint32_t logCnt = 0;
+  while (running_) {
+    if (logQu_.try_dequeue(litem)) {
+      ofs << litem.ToString() << std::endl;
+      logCnt++;
+      if (logCnt % 10000 == 0) {
+        ofs.flush();
+      }
+    }
+  }
+}
+
+void Proxy::CheckQuorumTd(const int id) {
   std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
   int sz = 0;
   char buffer[UDP_BUFFER_SIZE];
@@ -179,6 +203,7 @@ void Proxy::CheckQuorum(const int id) {
   Reply* committedAck = NULL;
   uint32_t replyNum = 0;
   uint64_t startTime, endTime;
+
   while (running_) {
     if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
@@ -186,12 +211,14 @@ void Proxy::CheckQuorum(const int id) {
           (uint32_t)sz < msgHdr->msgLen + sizeof(MessageHeader)) {
         continue;
       }
-      if (msgHdr->msgType == MessageType::SUSPEND_REPLY) {
-        stopForwarding_ = true;
-        continue;
-      }
       if (reply.ParseFromArray(buffer + sizeof(MessageHeader),
                                msgHdr->msgLen)) {
+        Log litem(reply.replicaid(), reply.t().clienttime(),
+                  reply.t().proxytime(), reply.t().recvtime(),
+                  reply.t().deadline(), reply.t().fastreplytime(),
+                  reply.t().slowreplytime(), GetMicrosecondTimestamp());
+        logQu_.enqueue(litem);
+
         uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
         if (reply.owd() > 0) {
           owdQu_.enqueue(
@@ -203,19 +230,18 @@ void Proxy::CheckQuorum(const int id) {
           // already committed;  ignore
           continue;
         }
-
         if (reply.replytype() == (uint32_t)MessageType::COMMIT_REPLY) {
           committedAck = new Reply(reply);
           committedReply_.assign(reqKey, committedAck);
         } else if (replyQuorum[reqKey].find(reply.replicaid()) ==
                    replyQuorum[reqKey].end()) {
           replyQuorum[reqKey][reply.replicaid()] = reply;
-          committedAck = QuorumReady(replyQuorum[reqKey]);
+          committedAck = isQuorumReady(replyQuorum[reqKey]);
         } else if (reply.view() > replyQuorum[reqKey].begin()->second.view()) {
           // New view has come, clear existing replies for this request
           replyQuorum[reqKey].clear();
           replyQuorum[reqKey][reply.replicaid()] = reply;
-          committedAck = QuorumReady(replyQuorum[reqKey]);
+          committedAck = isQuorumReady(replyQuorum[reqKey]);
         } else if (reply.view() == replyQuorum[reqKey].begin()->second.view()) {
           const Reply& existedReply = replyQuorum[reqKey][reply.replicaid()];
           if (existedReply.view() < reply.view()) {
@@ -225,7 +251,7 @@ void Proxy::CheckQuorum(const int id) {
             // FAST_REPLY < SLOW_REPLY < COMMIT_REPLY
             replyQuorum[reqKey][reply.replicaid()] = reply;
           }
-          committedAck = QuorumReady(replyQuorum[reqKey]);
+          committedAck = isQuorumReady(replyQuorum[reqKey]);
         }  // else: reply.view()< replyQuorum[reqKey].begin()->second.view(),
            // ignore it
 
@@ -243,24 +269,24 @@ void Proxy::CheckQuorum(const int id) {
           // Add to cache
           committedReply_.assign(reqKey, committedAck);
           replyQuorum.erase(reqKey);
-          replyNum++;
-          if (replyNum == 1) {
-            startTime = GetMicrosecondTimestamp();
-          } else if (replyNum % 10000 == 0) {
-            endTime = GetMicrosecondTimestamp();
-            float rate = 10000 / ((endTime - startTime) * 1e-6);
-            LOG(INFO) << "id=" << id << "\t"
-                      << "replyNum=" << replyNum << "\t"
-                      << "rate = " << rate;
-            startTime = endTime;
-          }
+          // replyNum++;
+          // if (replyNum == 1) {
+          //   startTime = GetMicrosecondTimestamp();
+          // } else if (replyNum % 100 == 0) {
+          //   endTime = GetMicrosecondTimestamp();
+          //   float rate = 100 / ((endTime - startTime) * 1e-6);
+          //   LOG(INFO) << "id=" << id << "\t"
+          //             << "replyNum=" << replyNum << "\t"
+          //             << "rate = " << rate;
+          //   startTime = endTime;
+          // }
         }
       }
     }
   }
 }
 
-Reply* Proxy::QuorumReady(std::map<uint32_t, Reply>& quorum) {
+Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
   // These replies are of the same view for sure (we have previously forbidden
   // inconsistency)
   uint32_t view = quorum.begin()->second.view();
@@ -290,7 +316,7 @@ Reply* Proxy::QuorumReady(std::map<uint32_t, Reply>& quorum) {
   return NULL;
 }
 
-void Proxy::ForwardRequests(const int id) {
+void Proxy::ForwardRequestsTd(const int id) {
   char buffer[UDP_BUFFER_SIZE];
   MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
   int sz = -1;
@@ -300,11 +326,6 @@ void Proxy::ForwardRequests(const int id) {
   uint32_t forwardCnt = 0;
   uint64_t startTime, endTime;
   while (running_) {
-    if (stopForwarding_) {
-      // TODO: Ack some signal back to clients
-      usleep(1000);
-      continue;
-    }
     if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)&receiverAddr, &len)) > 0) {
       if ((uint32_t)sz < sizeof(MessageHeader) ||
@@ -331,6 +352,10 @@ void Proxy::ForwardRequests(const int id) {
         request.set_bound(latencyBound_);
         request.set_proxyid(proxyIds_[id]);
         request.set_sendtime(GetMicrosecondTimestamp());
+
+        uint64_t tid = tagId_.fetch_add(1);
+        request.set_tagid(tid);
+
         std::string msg = request.SerializeAsString();
         msgHdr->msgType = MessageType::CLIENT_REQUEST;
         msgHdr->msgLen = msg.length();
@@ -348,27 +373,26 @@ void Proxy::ForwardRequests(const int id) {
                  (struct sockaddr*)replicaAddr, sizeof(sockaddr_in));
         }
 
-        forwardCnt++;
-        if (forwardCnt == 1) {
-          startTime = GetMicrosecondTimestamp();
-        } else if (forwardCnt % 10000 == 0) {
-          endTime = GetMicrosecondTimestamp();
-          float rate = 10000 / ((endTime - startTime) * 1e-6);
-          LOG(INFO) << "ForwardId=" << id << "\t"
-                    << "count =" << forwardCnt << "\t"
-                    << "rate=" << rate << " req/sec"
-                    << "\t"
-                    << "req is <" << request.clientid() << ","
-                    << request.reqid() << ">";
-          startTime = endTime;
-        }
+        // forwardCnt++;
+        // if (forwardCnt == 1) {
+        //   startTime = GetMicrosecondTimestamp();
+        // } else if (forwardCnt % 100 == 0) {
+        //   endTime = GetMicrosecondTimestamp();
+        //   float rate = 100 / ((endTime - startTime) * 1e-6);
+        //   LOG(INFO) << "Forward-Id=" << id << "\t"
+        //             << "count =" << forwardCnt << "\t"
+        //             << "rate=" << rate << " req/sec"
+        //             << "\t"
+        //             << "req is <" << request.clientid() << ","
+        //             << request.reqid() << ">";
+        //   startTime = endTime;
+        // }
       }
     }
   }
 }
 
 void Proxy::CreateContext() {
-  stopForwarding_ = false;
   running_ = true;
   int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
   std::string sip = proxyConfig_["proxy-info"]["proxy-ip"].as<std::string>();

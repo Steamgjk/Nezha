@@ -1,8 +1,8 @@
 #include "lib/udp_socket_endpoint.h"
 
-UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport,
+UDPSocketEndpoint::UDPSocketEndpoint(const std::string& ip, const int port,
                                      const bool isMasterReceiver)
-    : Endpoint(sip, sport, isMasterReceiver) {
+    : Endpoint(ip, port, isMasterReceiver), msgHandler_(NULL) {
   fd_ = socket(PF_INET, SOCK_DGRAM, 0);
   if (fd_ < 0) {
     LOG(ERROR) << "Receiver Fd fail ";
@@ -13,18 +13,18 @@ UDPSocketEndpoint::UDPSocketEndpoint(const std::string& sip, const int sport,
   if (status < 0) {
     LOG(ERROR) << " Set NonBlocking Fail";
   }
-  if (sip == "" || sport < 0) {
+  if (ip == "" || port < 0) {
     return;
   }
   struct sockaddr_in addr;
   bzero(&addr, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_port = htons(sport);
-  addr.sin_addr.s_addr = inet_addr(sip.c_str());
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = inet_addr(ip.c_str());
   // Bind socket to Address
   int bindRet = bind(fd_, (struct sockaddr*)&addr, sizeof(addr));
   if (bindRet != 0) {
-    LOG(ERROR) << "bind error\t" << bindRet << "\t port=" << sport;
+    LOG(ERROR) << "bind error\t" << bindRet << "\t port=" << port;
     return;
   }
 }
@@ -39,13 +39,14 @@ int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr,
   msgHdr->msgType = msgType;
   std::string serializedString = msg.SerializeAsString();
   msgHdr->msgLen = serializedString.length();
-  if (serializedString.length() + sizeof(MessageHeader) >= UDP_BUFFER_SIZE) {
+  if (serializedString.length() + sizeof(MessageHeader) > UDP_BUFFER_SIZE) {
     LOG(ERROR) << "Msg too large " << (uint32_t)msgType
                << "\t length=" << serializedString.length();
     return -1;
   }
   if (msgHdr->msgLen > 0) {
-    // serialization succeed
+    // Serialization succeed
+    // Prepend MesageHeader to the serialized string
     memcpy(buffer + sizeof(MessageHeader), serializedString.c_str(),
            msgHdr->msgLen);
     int ret = sendto(fd_, buffer, msgHdr->msgLen + sizeof(MessageHeader), 0,
@@ -58,51 +59,44 @@ int UDPSocketEndpoint::SendMsgTo(const Address& dstAddr,
   return -1;
 }
 
-bool UDPSocketEndpoint::RegisterMsgHandler(EndpointMsgHandler* msgHdl) {
+bool UDPSocketEndpoint::RegisterMsgHandler(MessageHandler* msgHdl) {
   UDPMsgHandler* udpMsgHdl = (UDPMsgHandler*)msgHdl;
   if (evLoop_ == NULL) {
     LOG(ERROR) << "No evLoop!";
     return false;
   }
-  if (isRegistered(udpMsgHdl)) {
+  if (isMsgHandlerRegistered(msgHdl)) {
     LOG(ERROR) << "This msgHdl has already been registered";
     return false;
   }
 
-  udpMsgHdl->attachedEP_ = this;
-  msgHandlers_.insert(udpMsgHdl);
-  ev_io_set(udpMsgHdl->evWatcher_, this->fd_, EV_READ);
+  msgHandler_ = udpMsgHdl;
+  ev_io_set(udpMsgHdl->evWatcher_, fd_, EV_READ);
   ev_io_start(evLoop_, udpMsgHdl->evWatcher_);
 
   return true;
 }
 
-bool UDPSocketEndpoint::UnregisterMsgHandler(EndpointMsgHandler* msgHdl) {
+bool UDPSocketEndpoint::UnRegisterMsgHandler(MessageHandler* msgHdl) {
   UDPMsgHandler* udpMsgHdl = (UDPMsgHandler*)msgHdl;
   if (evLoop_ == NULL) {
     LOG(ERROR) << "No evLoop!";
     return false;
   }
-  if (!isRegistered(udpMsgHdl)) {
+  if (!isMsgHandlerRegistered(udpMsgHdl)) {
     LOG(ERROR) << "The handler has not been registered ";
     return false;
   }
   ev_io_stop(evLoop_, udpMsgHdl->evWatcher_);
-  msgHandlers_.erase(udpMsgHdl);
+  msgHandler_ = NULL;
   return true;
 }
 
-bool UDPSocketEndpoint::isRegistered(UDPMsgHandler* msgHdl) {
-  return (msgHandlers_.find(msgHdl) != msgHandlers_.end());
+bool UDPSocketEndpoint::isMsgHandlerRegistered(MessageHandler* msgHdl) {
+  return (UDPMsgHandler*)msgHdl == msgHandler_;
 }
 
-void UDPSocketEndpoint::LoopRun() { ev_run(evLoop_, 0); }
-
-void UDPSocketEndpoint::LoopBreak() {
-  for (UDPMsgHandler* msgHdl : msgHandlers_) {
-    ev_io_stop(evLoop_, msgHdl->evWatcher_);
-  }
-  ev_break(evLoop_, EVBREAK_ALL);
-  msgHandlers_.clear();
-  eventTimers_.clear();
+void UDPSocketEndpoint::UnRegisterAllMsgHandlers() {
+  ev_io_stop(evLoop_, msgHandler_->evWatcher_);
+  msgHandler_ = NULL;
 }
