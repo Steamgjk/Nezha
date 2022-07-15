@@ -532,24 +532,17 @@ class Replica {
    * isRecovering=true, then it first completes the recovery procedure before it
    * can join the system
    *  */
-  Replica(const std::string& configFile =
-              std::string("../configs/nezha-replica-config.yaml"),
-          bool isRecovering = false);
+  Replica(
+      const std::string& configFile = "../configs/nezha-replica-config.yaml",
+      bool isRecovering = false);
   ~Replica();
 
   void Run();
   void Terminate();
 
-  /** For debug */
-  std::vector<uint64_t> proxySendTimes_;
-  std::vector<uint64_t> replicaRecvTimes_;
-  std::vector<uint64_t> toprocessTimes_;
-  std::vector<uint64_t> processedTimes_;
-  std::vector<uint64_t> tofastreplyTimes_;
-  std::vector<uint64_t> fastReplyTimes_;
-  std::vector<uint64_t> slowReplyTimes;
-  std::vector<uint64_t> stats;
-  const uint32_t maxLen = 200000;
+  /** Tentative */
+  std::atomic<uint32_t>* repliedSyncPoint_;
+  uint32_t maxProxyNum_ = 16;
 };
 
 }  // namespace nezha

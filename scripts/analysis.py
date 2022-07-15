@@ -80,6 +80,7 @@ if __name__ == '__main__':
         file_name = "Proxy-Stats-"+str(i+1)+".csv"
         proxy_df = pd.read_csv(stats_folder+"/"+file_name)
         proxy_df_list.append(proxy_df)
+        print("Proxy ", len(proxy_df))
     proxy_df = pd.concat(proxy_df_list)
 
     proxy_df = proxy_df.sort_values(by=['ClientTime'])

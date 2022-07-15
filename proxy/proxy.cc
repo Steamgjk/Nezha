@@ -2,7 +2,6 @@
 
 namespace nezha {
 Proxy::Proxy(const std::string& configFile) {
-  tagId_ = 1;
   proxyConfig_ = YAML::LoadFile(configFile);
   PrintConfig();
   CreateContext();
@@ -230,6 +229,11 @@ void Proxy::CheckQuorumTd(const int id) {
           // already committed;  ignore
           continue;
         }
+        uint64_t syncPoint = CONCAT_UINT32(reply.view(), reply.syncedlogid());
+        if (replicaSyncedPoints_[reply.replicaid()] < syncPoint) {
+          replicaSyncedPoints_[reply.replicaid()] = syncPoint;
+        }
+
         // LOG(INFO) << reply.DebugString();
         if (reply.replytype() == (uint32_t)MessageType::COMMIT_REPLY) {
           committedAck = new Reply(reply);
@@ -267,8 +271,6 @@ void Proxy::CheckQuorumTd(const int id) {
           sendto(replyFds_[id], buffer,
                  replyMsg.length() + sizeof(MessageHeader), 0,
                  (struct sockaddr*)clientAddr, sizeof(sockaddr));
-
-          uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
 
           Log* litem = logs.get(reqKey);
           if (litem) {
@@ -308,24 +310,41 @@ Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
     return NULL;
   }
 
-  if (quorum.size() >= (uint32_t)fastQuorum_) {
-    Reply* committedReply = new Reply(quorum[leaderId]);
+  Reply& leaderReply = quorum[leaderId];
+
+  uint32_t fastOrSlowReplyNum = 0;  // slowReply can be used as fastReply
+  uint32_t slowReplyNum = 0;        // But fastReply cannot be used as slowReply
+  for (const auto& kv : quorum) {
+    if (kv.second.replytype() == MessageType::FAST_REPLY &&
+            kv.second.hash() == leaderReply.hash() ||
+        kv.second.replytype() == MessageType::SLOW_REPLY) {
+      fastOrSlowReplyNum++;
+    }
+    if (kv.second.replytype() == MessageType::SLOW_REPLY) {
+      slowReplyNum++;
+    }
+  }
+
+  if (fastOrSlowReplyNum >= (uint32_t)fastQuorum_) {
+    // Fast Commit
+    Reply* committedReply = new Reply(leaderReply);
     committedReply->set_replytype(MessageType::FAST_REPLY);
     return committedReply;
   }
 
-  int slowReplyNum = 1;  // Leader's fast-reply is counted
-  for (const auto& kv : quorum) {
-    if (kv.first != leaderId &&
-        kv.second.replytype() == (uint32_t)MessageType::SLOW_REPLY) {
-      slowReplyNum++;
-    }
+  if (slowReplyNum >= (uint32_t)f_) {
+    // together with leader's fast reply, it forms the quorum of f+1
+    Reply* committedReply = new Reply(leaderReply);
+    committedReply->set_replytype(MessageType::FAST_REPLY);
+    return committedReply;
   }
-  if (slowReplyNum >= f_ + 1) {
+
+  if (quorum.size() >= (uint32_t)fastQuorum_) {
     Reply* committedReply = new Reply(quorum[leaderId]);
     committedReply->set_replytype(MessageType::SLOW_REPLY);
     return committedReply;
   }
+
   return NULL;
 }
 
@@ -368,9 +387,6 @@ void Proxy::ForwardRequestsTd(const int id) {
         request.set_bound(latencyBound_);
         request.set_proxyid(proxyIds_[id]);
         request.set_sendtime(GetMicrosecondTimestamp());
-
-        uint64_t tid = tagId_.fetch_add(1);
-        request.set_tagid(tid);
 
         std::string msg = request.SerializeAsString();
         msgHdr->msgType = MessageType::CLIENT_REQUEST;
@@ -423,7 +439,7 @@ void Proxy::ForwardRequestsTd(const int id) {
 void Proxy::CreateContext() {
   running_ = true;
   int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
-  std::string sip = proxyConfig_["proxy-info"]["proxy-ip"].as<std::string>();
+  std::string ip = proxyConfig_["proxy-info"]["proxy-ip"].as<std::string>();
   int requestPortBase =
       proxyConfig_["proxy-info"]["request-port-base"].as<int>();
   int replyPortBase = proxyConfig_["proxy-info"]["reply-port-base"].as<int>();
@@ -439,8 +455,8 @@ void Proxy::CreateContext() {
   latencyBound_ = proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>();
   maxOWD_ = proxyConfig_["proxy-info"]["max-owd"].as<uint32_t>();
   for (int i = 0; i < shardNum; i++) {
-    forwardFds_[i] = CreateSocketFd(sip, replyPortBase + i);
-    requestReceiveFds_[i] = CreateSocketFd(sip, requestPortBase + i);
+    forwardFds_[i] = CreateSocketFd(ip, replyPortBase + i);
+    requestReceiveFds_[i] = CreateSocketFd(ip, requestPortBase + i);
     replyFds_[i] = CreateSocketFd("", -1);
     proxyIds_[i] = ((proxyIds_[i] << 32) | (uint32_t)i);
   }
@@ -450,6 +466,8 @@ void Proxy::CreateContext() {
   replicaNum_ = proxyConfig_["replica-info"]["replica-ips"].size();
   assert(replicaNum_ % 2 == 1);
   f_ = replicaNum_ / 2;
+  replicaSyncedPoints_.assign(replicaNum_, CONCURRENT_MAP_START_INDEX);
+
   fastQuorum_ = (f_ % 2 == 1) ? (f_ + (f_ + 1) / 2 + 1) : (f_ + f_ / 2 + 1);
   replicaAddrs_.resize(replicaNum_);
   for (int i = 0; i < replicaNum_; i++) {

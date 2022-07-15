@@ -165,7 +165,6 @@ class Proxy {
   std::vector<ConcurrentMap<uint64_t, Log*>> logMap_;
 
  public:
-  std::atomic<uint32_t> tagId_;  // for debug, will be deleted later
   /** Proxy accept a config file, which contains all the necessary information
    * to instantiate the object, then it can call Run method
    *  */
@@ -173,6 +172,9 @@ class Proxy {
   ~Proxy();
   void Run();
   void Terminate();
+
+  /** Tentative */
+  std::vector<uint64_t> replicaSyncedPoints_;
 };
 
 }  // namespace nezha

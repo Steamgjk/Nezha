@@ -11,16 +11,11 @@ namespace nezha {
 
 Replica::Replica(const std::string& configFile, bool isRecovering)
     : viewId_(0), lastNormalView_(0) {
-  // debug
-  // proxySendTimes_.resize(maxLen, 0);
-  // tofastreplyTimes_.resize(maxLen, 0);
-  // fastReplyTimes_.resize(maxLen, 0);
-  // slowReplyTimes.resize(maxLen, 0);
-  // replicaRecvTimes_.resize(maxLen, 0);
-  // toprocessTimes_.resize(maxLen, 0);
-  // processedTimes_.resize(maxLen, 0);
-  // stats.reserve(maxLen);
-  //////
+  repliedSyncPoint_ = new std::atomic<uint32_t>[maxProxyNum_];
+  for (uint32_t i = 0; i < maxProxyNum_; i++) {
+    repliedSyncPoint_[i] = CONCURRENT_MAP_START_INDEX - 1;
+  }
+  LOG(INFO) << maxProxyNum_ << " proxy replied sync point has been initialized";
 
   lastAskMissedIndexTime_ = 0;
   lastAskMissedRequestTime_ = 0;
@@ -442,9 +437,6 @@ void Replica::ResetContext() {
     earlyBuffer_.erase(earlyBuffer_.begin());
   }
 
-  // committedLogId_.store(maxSyncedLogEntry_.load()->logId);
-  // toCommitLogId_.store(maxSyncedLogEntry_.load()->logId);
-
   // Reset lastReleasedEntryByKeys_, no need to care about UnSyncedLogs, because
   // they are all cleared
   for (uint32_t key = 0; key < keyNum_; key++) {
@@ -651,16 +643,6 @@ void Replica::ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer,
       uint64_t deadline = request.sendtime() + request.bound();
       RequestBody* rb = new RequestBody(deadline, reqKey, request.key(),
                                         request.proxyid(), request.command());
-      // The map kills the throughput
-      // clientTimes_.assign(reqKey, request.clienttime());
-      // proxyTimes_.assign(reqKey, request.sendtime());
-      // recvTimes_.assign(reqKey, recvTime);
-      // deadlines_.assign(reqKey, deadline);
-
-      // if (request.clientid() == 1 && request.reqid() < maxLen) {
-      //   // proxySendTimes_[request.reqid()] = request.sendtime();
-      //   replicaRecvTimes_[request.reqid()] = recvTime;
-      // }
       uint32_t quId = (reqKey) % recordQu_.size();
       recordQu_[quId].enqueue(rb);
 
@@ -695,7 +677,7 @@ void Replica::OWDCalcTd() {
   // uint32_t logCnt = 0;
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-    if (owdQu_.try_dequeue(owdSample)) {
+    while (owdQu_.try_dequeue(owdSample)) {
       uint64_t proxyId = owdSample.first;
       uint32_t owd = owdSample.second;
       owdSampleNum_[proxyId]++;
@@ -712,6 +694,8 @@ void Replica::OWDCalcTd() {
         owdMap_.assign(proxyId, movingMedian);
       }
     }
+    // reduce CPU cost
+    nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
   LOG(INFO) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
@@ -822,41 +806,6 @@ void Replica::ProcessTd(int id) {
     bool amLeader = AmLeader();
 
     if (processQu_.try_dequeue(entry)) {
-      // uint32_t clientId = (entry->body.reqKey >> 32);
-      // uint32_t reqId = (uint32_t)(entry->body.reqKey);
-      // if (clientId == 1) {
-      //   if (reqId < maxLen) {
-      //     toprocessTimes_[reqId] = GetMicrosecondTimestamp();
-      //   }
-
-      //   // else {
-      //   //   for (uint32_t j = 0; j < maxLen; j++) {
-      //   //     if (toprocessTimes_[j] > 0 && replicaRecvTimes_[j] > 0) {
-      //   //       stats.push_back(toprocessTimes_[j] - replicaRecvTimes_[j]);
-      //   //     }
-      //   //   }
-      //   //   sort(stats.begin(), stats.end());
-      //   //   LOG(INFO) << "stats size " << stats.size();
-      //   //   if (stats.size() > 0) {
-      //   //     LOG(INFO) << stats[stats.size() / 2] << "\t"
-      //   //               << stats[stats.size() / 4 * 3] << "\t"
-      //   //               << stats[stats.size() / 10 * 9];
-      //   //   }
-      //   //   exit(0);
-      //   // }
-      // }
-
-      // cnt++;
-      // if (cnt == 1) {
-      //   sta = GetMicrosecondTimestamp();
-      // }
-      // if (cnt % 100000 == 0) {
-      //   ed = GetMicrosecondTimestamp();
-      //   float rate = 100000 / ((ed - sta) * 1e-6);
-      //   LOG(ERROR) << "rate=" << rate;
-      //   sta = ed;
-      // }
-
       if (entry->status == EntryStatus::INITIAL) {
         std::pair<uint64_t, uint64_t> rankKey(entry->body.deadline,
                                               entry->body.reqKey);
@@ -897,28 +846,6 @@ void Replica::ProcessTd(int id) {
       lastReleasedEntryByKeys_[entry->body.opKey] = earlyBuffer_.begin()->first;
       ProcessRequest(entry, amLeader, true, amLeader);
       earlyBuffer_.erase(earlyBuffer_.begin());
-
-      // uint32_t clientId = (entry->body.reqKey >> 32);
-      // uint32_t reqId = (uint32_t)(entry->body.reqKey);
-      // if (clientId == 1) {
-      //   if (reqId < maxLen) {
-      //     processedTimes_[reqId] = GetMicrosecondTimestamp();
-      //   } else {
-      //     for (uint32_t j = 0; j < maxLen; j++) {
-      //       if (toprocessTimes_[j] > 0 && processedTimes_[j] > 0) {
-      //         stats.push_back(processedTimes_[j] - toprocessTimes_[j]);
-      //       }
-      //     }
-      //     sort(stats.begin(), stats.end());
-      //     LOG(INFO) << "stats size " << stats.size();
-      //     if (stats.size() > 0) {
-      //       LOG(INFO) << stats[stats.size() / 2] << "\t"
-      //                 << stats[stats.size() / 4 * 3] << "\t"
-      //                 << stats[stats.size() / 10 * 9];
-      //     }
-      //     exit(0);
-      //   }
-      // }
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
@@ -948,6 +875,7 @@ void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
       entry->prevNonCommutative->nextNonCommutative = entry;
     }
     entry->prev->next = entry;
+    maxSyncedLogEntryByKey_[rb.opKey] = entry;
     maxSyncedLogEntry_ = entry;
   } else {
     // // The log id of the previous non-commutative entry in the unsynced logs
@@ -966,16 +894,11 @@ void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
     if (minUnSyncedLogEntryByKey_[rb.opKey] == NULL) {
       minUnSyncedLogEntryByKey_[rb.opKey] = entry;
     }
+    maxUnSyncedLogEntryByKey_[rb.opKey] = entry;
     maxUnSyncedLogEntry_ = entry;
   }
 
   if (sendReply) {
-    // uint32_t clientId = (entry->body.reqKey >> 32);
-    // uint32_t reqId = (uint32_t)(entry->body.reqKey);
-    // if (clientId == 1 && reqId < maxLen) {
-    //   processedTimes_[reqId] = GetMicrosecondTimestamp();
-    // }
-
     uint32_t quId = (entry->body.reqKey) % fastReplyQu_.size();
     fastReplyQu_[quId].enqueue(entry);
   }
@@ -1003,28 +926,6 @@ void Replica::FastReplyTd(int id, int cvId) {
     }
     LogEntry* entry = NULL;
     if (fastReplyQu_[id].try_dequeue(entry)) {
-      // uint32_t clientId = (entry->body.reqKey >> 32);
-      // uint32_t reqId = (uint32_t)(entry->body.reqKey);
-      // if (clientId == 1) {
-      //   if (reqId < maxLen) {
-      //     tofastreplyTimes_[reqId] = GetMicrosecondTimestamp();
-      //   } else {
-      //     for (uint32_t j = 0; j < maxLen; j++) {
-      //       if (processedTimes_[j] > 0 && tofastreplyTimes_[j] > 0) {
-      //         stats.push_back(tofastreplyTimes_[j] - processedTimes_[j]);
-      //       }
-      //     }
-      //     sort(stats.begin(), stats.end());
-      //     LOG(INFO) << "stats size " << stats.size();
-      //     if (stats.size() > 0) {
-      //       LOG(INFO) << stats[stats.size() / 2] << "\t"
-      //                 << stats[stats.size() / 4 * 3] << "\t"
-      //                 << stats[stats.size() / 10 * 9];
-      //     }
-      //     exit(0);
-      //   }
-      // }
-
       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
       if (!addr) {
         // The replica cannot find the address to send reply
@@ -1035,12 +936,13 @@ void Replica::FastReplyTd(int id, int cvId) {
         // so it does not have any addr info Step 4: This replica wants to
         // send reply for this entry
         LOG(ERROR) << "Cannot find the address of the proxy "
-                   << entry->body.proxyId;
+                   << HIGH_32BIT(entry->body.proxyId) << "-"
+                   << LOW_32BIT(entry->body.proxyId);
         continue;
       }
       reply.set_view(viewId_);
-      reply.set_clientid((entry->body.reqKey) >> 32);
-      reply.set_reqid((uint32_t)(entry->body.reqKey));
+      reply.set_clientid(HIGH_32BIT(entry->body.reqKey));
+      reply.set_reqid(LOW_32BIT(entry->body.reqKey));
       reply.set_result(entry->result);
       // If the owdMap_ does not have the proxyId (i.e. the owd for this
       // proxyId has not been estimated), it will return 0 (0 happens to be
@@ -1053,16 +955,6 @@ void Replica::FastReplyTd(int id, int cvId) {
         // Leader's logic is very easy: after XORing the crashVector and the
         // log entry hash together, it can directly reply
         reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-
-        // uint64_t reqKey = entry->body.reqKey;
-        // uint64_t replyTime = GetMicrosecondTimestamp();
-        // fastReplyTimes_.assign(reqKey, replyTime);
-        // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-        // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-        // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-        // reply.mutable_t()->set_fastreplytime(replyTime);
-        // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
-
         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
         // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
         //     << "opKey=" << entry->opKey << "\t"
@@ -1097,16 +989,6 @@ void Replica::FastReplyTd(int id, int cvId) {
           // safeToClearUnSyncedLogId_) We cannot decide the sync-point, so
           // we directly reply with the XORed hash (similar to the leader)
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-
-          // uint64_t reqKey = entry->body.reqKey;
-          // uint64_t replyTime = GetMicrosecondTimestamp();
-          // fastReplyTimes_.assign(reqKey, replyTime);
-          // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-          // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-          // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-          // reply.mutable_t()->set_fastreplytime(replyTime);
-          // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
-
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
 
@@ -1119,12 +1001,14 @@ void Replica::FastReplyTd(int id, int cvId) {
           if (entry->LessOrEqual(*syncedEntry)) {
             // No need to send fast replies, because this entry has already
             // been covered by index sync process
-            entry = syncedLogEntryByReqKey_.get(entry->body.reqKey);
-            if (entry) {
+            LogEntry* alreadySyncedEntry =
+                syncedLogEntryByReqKey_.get(entry->body.reqKey);
+            if (alreadySyncedEntry) {
               // if it really exits in syncedLogEntryMap, handle it to
               // slowReply
-              uint32_t quId = (entry->body.reqKey) % slowReplyQu_.size();
-              slowReplyQu_[quId].enqueue(entry);
+              uint32_t quId =
+                  (alreadySyncedEntry->body.reqKey) % slowReplyQu_.size();
+              slowReplyQu_[quId].enqueue(alreadySyncedEntry);
               continue;
             }
           }
@@ -1144,63 +1028,23 @@ void Replica::FastReplyTd(int id, int cvId) {
           }
           // hash encodes all the (unsynced) entries up to entry
           hash.XOR(unsyncedEntry->hash);
-          hash.XOR(unsyncedEntry->myhash);
+          hash.XOR(unsyncedEntry->myhash);  // add itself back
           // Now hash only encodes [unsyncedEntry, entry]
           // Let's add the synced part
           hash.XOR(syncedEntry->hash);
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-
-          // uint64_t reqKey = entry->body.reqKey;
-          // uint64_t replyTime = GetMicrosecondTimestamp();
-          // fastReplyTimes_.assign(reqKey, replyTime);
-          // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-          // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-          // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-          // reply.mutable_t()->set_fastreplytime(replyTime);
-          // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
-
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
         }
       }
-
-      // if (reply.clientid() == 1) {
-      //   if (reply.reqid() < maxLen) {
-      //     fastReplyTimes_[reply.reqid()] = GetMicrosecondTimestamp();
-      //   } else {
-      //     if (id == 0) {
-      //       LOG(INFO) << "Dump..maxLen=" << maxLen;
-      //       for (uint32_t j = 0; j < maxLen; j++) {
-      //         if (tofastreplyTimes_[j] > 0 && fastReplyTimes_[j] > 0) {
-      //           stats.push_back(fastReplyTimes_[j] - tofastreplyTimes_[j]);
-      //         }
-      //       }
-      //       sort(stats.begin(), stats.end());
-      //       LOG(INFO) << "stats size [tofastreply-fastreply] " <<
-      //       stats.size(); if (stats.size() > 0) {
-      //         LOG(INFO) << stats[stats.size() / 2] << "\t"
-      //                   << stats[stats.size() / 4 * 3] << "\t"
-      //                   << stats[stats.size() / 10 * 9];
-      //       }
-      //       exit(0);
-      //       // stats.clear();
-      //       // for (uint32_t j = 0; j < maxLen; j++) {
-      //       //   if (processedTimes_[j] > 0 && fastReplyTimes_[j] > 0) {
-      //       //     stats.push_back(fastReplyTimes_[j] -
-      //         processedTimes_[j]);
-      //         //   }
-      //         // }
-
-      //         // sort(stats.begin(), stats.end());
-      //         // LOG(INFO) << "stats size [processed->fastreply] " <<
-      //         // stats.size(); if (stats.size() > 0) {
-      //         //   LOG(INFO) << stats[stats.size() / 2] << "\t"
-      //         //             << stats[stats.size() / 4 * 3] << "\t"
-      //         //             << stats[stats.size() / 10 * 9];
-      //         // }
-      //         // exit(0);
-      //     }
-      //   }
+      // if ((entry->body.opKey >= 1 && entry->body.opKey <= 100)) {
+      //   assert(entry != NULL);
+      //   LOG(INFO) << "clientId=" << reply.clientid()
+      //             << "\treqid=" << reply.reqid() << "\tlogId=" <<
+      //             entry->logId
+      //             << "\tkey=" << entry->body.opKey
+      //             << "\tfhash=" << hash.toString()
+      //             << "\tmyhash=" << entry->myhash.toString();
       // }
       //   // replyNum++;
       //   // if (replyNum % 100000 == 0) {
@@ -1234,15 +1078,11 @@ void Replica::SlowReplyTd(int id) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
     if (AmLeader()) {
       // Leader does not send slow replies
-      usleep(1000);
+      nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
       continue;
     }
     LogEntry* entry = NULL;
     if (slowReplyQu_[id].try_dequeue(entry)) {
-      // LogEntry* duplicate =
-      // syncedLogEntryByReqKey_.get(entry->body.reqKey); if (duplicate) {
-      //   entry = duplicate;
-      // }
       uint32_t logId = entry->logId;
       reply.set_view(viewId_);
       reply.set_clientid((entry->body.reqKey) >> 32);
@@ -1257,26 +1097,10 @@ void Replica::SlowReplyTd(int id) {
       }
       reply.set_owd(owdMap_.get(entry->body.proxyId));
 
-      // uint64_t reqKey = entry->body.reqKey;
-      // uint64_t replyTime = GetMicrosecondTimestamp();
-      // reply.mutable_t()->set_clienttime(clientTimes_.get(reqKey));
-      // reply.mutable_t()->set_proxytime(proxyTimes_.get(reqKey));
-      // reply.mutable_t()->set_recvtime(recvTimes_.get(reqKey));
-      // reply.mutable_t()->set_fastreplytime(fastReplyTimes_.get(reqKey));
-      // reply.mutable_t()->set_slowreplytime(replyTime);
-      // reply.mutable_t()->set_deadline(deadlines_.get(reqKey));
-
       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
       if (addr) {
         slowReplySender_[id]->SendMsgTo(*addr, reply, MessageType::SLOW_REPLY);
       }
-      // if (!duplicate) {
-      //   // Register this entry to syncedLogEntryByReqKey_
-      //   syncedLogEntryByReqKey_.assign(entry->body.reqKey, entry);
-      //   syncedLogEntryByLogId_.assign(entry->logId, entry);
-      //   // LOG(INFO) << "id=" << id << "--logId=" << entry->logId;
-      // }
-
       // replyNum++;
       // if (replyNum == 1) {
       //   startTime = GetMicrosecondTimestamp();
@@ -1299,6 +1123,7 @@ void Replica::IndexSendTd(int id, int cvId) {
   LogEntry* lastSyncedEntry = syncedLogEntryHead_;
   IndexSync indexSyncMsg;
   uint64_t syncPeriod = replicaConfig_["index-sync-period-us"].as<uint64_t>();
+  struct timespec sleepIntval({0, syncPeriod * 1000});
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
     if (!AmLeader()) {
@@ -1306,7 +1131,7 @@ void Replica::IndexSendTd(int id, int cvId) {
       // we still keep this thread. When it becomes the leader
       // we can immediately use the thread instead of launching extra threads
       // (slowly)
-      usleep(1000);
+      nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
       continue;
     }
     if (maxSyncedLogEntry_ == NULL) {
@@ -1342,7 +1167,7 @@ void Replica::IndexSendTd(int id, int cvId) {
       }
     }
 
-    usleep(syncPeriod);
+    nanosleep(&sleepIntval, NULL);
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
   LOG(INFO) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";
@@ -1521,9 +1346,9 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
       ASSERT(prevMaxLogId + 1 == logId);
 
       maxSyncedLogEntryByKey_[newEntry->body.opKey] = newEntry;
-      // Enqueue for slow Reply
-      uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
-      slowReplyQu_[quId].enqueue(newEntry);
+      // // Enqueue for slow Reply (Try remove it)
+      // uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
+      // slowReplyQu_[quId].enqueue(newEntry);
 
       if (newEntry->prev->logId + 1 != newEntry->logId) {
         LOG(ERROR) << "newEntry--" << newEntry->logId << "\t"

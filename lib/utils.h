@@ -26,6 +26,9 @@ using ConcurrentMap = junction::ConcurrentMap_Leapfrog<T1, T2>;
  * so the start value should be 2 */
 #define CONCURRENT_MAP_START_INDEX (2u)
 #define CONCAT_UINT32(a, b) ((((uint64_t)a) << 32u) | (uint32_t)b)
+/** Get the high/low 32bits of a uint64 */
+#define HIGH_32BIT(a) ((uint32_t)(a >> 32))
+#define LOW_32BIT(a) ((uint32_t)a)
 
 // Since <deadline, reqKey> is sufficient to uniquely identify one request, we
 // calculate hash based on them to represent the corresponding request/log

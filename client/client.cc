@@ -256,6 +256,7 @@ void Client::OpenLoopSubmissionTd() {
         request->set_reqid(nextReqId_);
         request->set_command("");
         request->set_key(zipfianKeys_[nextReqId_ % zipfianKeys_.size()]);
+        // request->set_key(nextReqId_ % 100000 + 100000 * (clientId_ - 1));
         request->set_clienttime(GetMicrosecondTimestamp());  // To Delete
         Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()]
                                              [mapIdx / proxyAddrs_.size()];
