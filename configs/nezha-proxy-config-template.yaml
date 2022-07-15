@@ -14,7 +14,7 @@ proxy-info:
   endpoint-type: 1 # 1 for UDP Endpoint, 2 for GRPC Endpoint [to be supported soon]
   proxy-id: 1
   proxy-ip: "127.0.0.4"
-  shard-num: 24
+  shard-num: 12
   max-owd: 200
   request-port-base: 32000
   reply-port-base: 33000

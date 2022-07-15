@@ -89,11 +89,37 @@ class Replica {
    * on one key */
   uint32_t keyNum_;
 
+  /**
+   * Log entries are organized as a list.
+   * On the leader, it only needs to maintain one list, i.e., synced log list;
+   * But on the follower, it maintains two lists, i.e., unsynced log list and
+   * synced log list.
+   *
+   * syncedLogEntryHead_/unSyncedLogEntryHead_ are the starting point of the two
+   * lists, which we crearte a dummy node for each list to serve as the head
+   *
+   * maxSyncedLogEntry_ and maxUnSyncedLogEntry_ are the tails of the two lists
+   * respectively
+   */
   LogEntry* syncedLogEntryHead_;
   LogEntry* unSyncedLogEntryHead_;
   std::atomic<LogEntry*> maxSyncedLogEntry_;
   std::atomic<LogEntry*> maxUnSyncedLogEntry_;
+  /**
+   * minUnSyncedLogEntry_ is initialized as unSyncedLogEntryHead_, but our
+   * garbage-collection thread can advance it (TODO). In this way, it can
+   * accelerate the generation of filteredUnSyncedEntries_
+   */
   LogEntry* minUnSyncedLogEntry_;
+
+  /**
+   * These three vecs can be cosnidered as finer-grained version of
+   * maxSyncedLogEntry_,maxUnSyncedLogEntry_ and minUnSyncedLogEntry_.
+   * They are mainly used to support commutativity optimization.
+   *
+   * maxSyncedLogEntryByKey_ and minUnSyncedLogEntryByKey_ combine to work as
+   * the sync-point, as illustrated in Figure 5 of our paper.
+   */
   std::vector<LogEntry*> maxSyncedLogEntryByKey_;
   std::vector<LogEntry*> maxUnSyncedLogEntryByKey_;
   std::vector<LogEntry*> minUnSyncedLogEntryByKey_;
@@ -109,23 +135,6 @@ class Replica {
    * (to accelerate failure recovery) */
   std::atomic<uint32_t> committedLogId_;
   std::atomic<uint32_t> toCommitLogId_;
-
-  /**  For debug, will be deleted */
-  uint32_t duplicateNum_;
-  uint32_t duplicateNum1_;
-  uint32_t duplicateNum2_;
-  std::vector<uint64_t> hbVec_;
-  std::vector<uint64_t> hvCheckVec_;
-  ConcurrentMap<uint64_t, uint64_t> clientTimes_;
-  ConcurrentMap<uint64_t, uint64_t> proxyTimes_;
-  ConcurrentMap<uint64_t, uint64_t> recvTimes_;
-  ConcurrentMap<uint64_t, uint64_t> fastReplyTimes_;
-  ConcurrentMap<uint64_t, uint64_t> slowReplyTimes_;
-  ConcurrentMap<uint64_t, uint64_t> deadlines_;
-  std::unordered_map<uint64_t, LogEntry*> tm1_;
-  std::unordered_map<uint64_t, uint64_t> tm2_;
-  ConcurrentMap<uint64_t, uint64_t> hashMa_[4];
-  std::vector<LogEntry*> vec1_;
 
   /** Context (including a message handler and a monitor timer) */
   ReceiverContext* masterContext_;
@@ -241,7 +250,7 @@ class Replica {
    * unsynced logs, because most of them overlap with synced logs, which has
    * already been transferred, so we only need to transfer a small portion of
    * unsynced logs after filtering out those overlapped ones  */
-  std::vector<LogEntry*> filterUnSyncedEntries_;
+  std::vector<LogEntry*> filteredUnSyncedEntries_;
 
   /** During leader election, the new leader use requestsToMerge_ to merge logs
    * collected from the quorum of replicas.

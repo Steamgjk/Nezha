@@ -366,8 +366,12 @@ void Proxy::ForwardRequestsTd(const int id) {
         }
         // Send to every replica
         for (int i = 0; i < replicaNum_; i++) {
+          uint32_t generateProxyId = (uint32_t)(proxyIds_[id] >> 32u);
           struct sockaddr_in* replicaAddr =
-              replicaAddrs_[i][proxyIds_[id] % replicaAddrs_[i].size()];
+              replicaAddrs_[i][generateProxyId % replicaAddrs_[i].size()];
+          // struct sockaddr_in* replicaAddr =
+          //     replicaAddrs_[i][proxyIds_[id] % replicaAddrs_[i].size()];
+
           sendto(forwardFds_[id], buffer,
                  msgHdr->msgLen + sizeof(MessageHeader), 0,
                  (struct sockaddr*)replicaAddr, sizeof(sockaddr_in));
