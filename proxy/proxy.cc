@@ -85,13 +85,16 @@ Proxy::~Proxy() {
     clientIter.next();
   }
 
-  ConcurrentMap<uint64_t, Reply*>::Iterator iter(committedReply_);
-  while (iter.isValid()) {
-    Reply* reply = iter.getValue();
-    if (reply) {
-      delete reply;
+  for (uint32_t i = 0; i < committedReplyMap_.size(); i++) {
+    ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[i];
+    ConcurrentMap<uint64_t, Reply*>::Iterator iter(committedReply);
+    while (iter.isValid()) {
+      Reply* reply = iter.getValue();
+      if (reply) {
+        delete reply;
+      }
+      iter.next();
     }
-    iter.next();
   }
 }
 
@@ -130,12 +133,12 @@ void Proxy::LaunchThreads() {
   threadPool_["CalcLatencyBound"] =
       new std::thread(&Proxy::CalculateLatencyBoundTd, this);
   for (int i = 0; i < shardNum; i++) {
-    std::string key = "CheckQuorum-" + std::to_string(i);
+    std::string key = "CheckQuorumTd-" + std::to_string(i);
     threadPool_[key] = new std::thread(&Proxy::CheckQuorumTd, this, i);
   }
 
   for (int i = 0; i < shardNum; i++) {
-    std::string key = "ForwardRequests-" + std::to_string(i);
+    std::string key = "ForwardRequestsTd-" + std::to_string(i);
     threadPool_[key] = new std::thread(&Proxy::ForwardRequestsTd, this, i);
   }
 
@@ -178,7 +181,7 @@ void Proxy::LogTd() {
   std::ofstream ofs("Proxy-Stats-" + std::to_string(proxyId) + ".csv");
   ofs << "ReplicaId,ClientTime,ProxyTime,RecvTime,Deadline,FastReplyTime,"
          "SlowReplyTime,"
-         "ProxyRecvTime"
+         "ProxyRecvTime,CommitType"
       << std::endl;
   uint32_t logCnt = 0;
   while (running_) {
@@ -193,6 +196,8 @@ void Proxy::LogTd() {
 }
 
 void Proxy::CheckQuorumTd(const int id) {
+  ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
+  ConcurrentMap<uint64_t, Log*>& logs = logMap_[id];
   std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
   int sz = 0;
   char buffer[UDP_BUFFER_SIZE];
@@ -203,7 +208,7 @@ void Proxy::CheckQuorumTd(const int id) {
   Reply* committedAck = NULL;
   uint32_t replyNum = 0;
   uint64_t startTime, endTime;
-
+  LOG(INFO) << "log " << id;
   while (running_) {
     if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
@@ -211,28 +216,24 @@ void Proxy::CheckQuorumTd(const int id) {
           (uint32_t)sz < msgHdr->msgLen + sizeof(MessageHeader)) {
         continue;
       }
+
       if (reply.ParseFromArray(buffer + sizeof(MessageHeader),
                                msgHdr->msgLen)) {
-        Log litem(reply.replicaid(), reply.t().clienttime(),
-                  reply.t().proxytime(), reply.t().recvtime(),
-                  reply.t().deadline(), reply.t().fastreplytime(),
-                  reply.t().slowreplytime(), GetMicrosecondTimestamp());
-        logQu_.enqueue(litem);
-
         uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
         if (reply.owd() > 0) {
           owdQu_.enqueue(
               std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
         }
 
-        committedAck = committedReply_.get(reqKey);
+        committedAck = committedReply.get(reqKey);
         if (committedAck != NULL) {
           // already committed;  ignore
           continue;
         }
+        // LOG(INFO) << reply.DebugString();
         if (reply.replytype() == (uint32_t)MessageType::COMMIT_REPLY) {
           committedAck = new Reply(reply);
-          committedReply_.assign(reqKey, committedAck);
+          committedReply.assign(reqKey, committedAck);
         } else if (replyQuorum[reqKey].find(reply.replicaid()) ==
                    replyQuorum[reqKey].end()) {
           replyQuorum[reqKey][reply.replicaid()] = reply;
@@ -266,9 +267,21 @@ void Proxy::CheckQuorumTd(const int id) {
           sendto(replyFds_[id], buffer,
                  replyMsg.length() + sizeof(MessageHeader), 0,
                  (struct sockaddr*)clientAddr, sizeof(sockaddr));
+
+          uint64_t reqKey = CONCAT_UINT32(reply.clientid(), reply.reqid());
+
+          Log* litem = logs.get(reqKey);
+          if (litem) {
+            litem->proxyRecvTime_ = GetMicrosecondTimestamp();
+            litem->commitType_ = committedAck->replytype();
+            logQu_.enqueue(*litem);
+          }
+
           // Add to cache
-          committedReply_.assign(reqKey, committedAck);
+          committedReply.assign(reqKey, committedAck);
           replyQuorum.erase(reqKey);
+          // LOG(INFO) << "reqId=" << committedAck->reqid()
+          //           << "\t type=" << committedAck->replytype();
           // replyNum++;
           // if (replyNum == 1) {
           //   startTime = GetMicrosecondTimestamp();
@@ -317,6 +330,8 @@ Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
 }
 
 void Proxy::ForwardRequestsTd(const int id) {
+  ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
+  ConcurrentMap<uint64_t, Log*>& logs = logMap_[id];
   char buffer[UDP_BUFFER_SIZE];
   MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
   int sz = -1;
@@ -325,6 +340,7 @@ void Proxy::ForwardRequestsTd(const int id) {
   Request request;
   uint32_t forwardCnt = 0;
   uint64_t startTime, endTime;
+
   while (running_) {
     if ((sz = recvfrom(requestReceiveFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)&receiverAddr, &len)) > 0) {
@@ -336,7 +352,7 @@ void Proxy::ForwardRequestsTd(const int id) {
           request.ParseFromArray(buffer + sizeof(MessageHeader),
                                  msgHdr->msgLen)) {
         uint64_t reqKey = CONCAT_UINT32(request.clientid(), request.reqid());
-        Reply* commitAck = committedReply_.get(reqKey);
+        Reply* commitAck = committedReply.get(reqKey);
         if (commitAck != NULL) {
           std::string replyStr = commitAck->SerializeAsString();
           msgHdr->msgType = MessageType::COMMIT_REPLY;
@@ -364,18 +380,26 @@ void Proxy::ForwardRequestsTd(const int id) {
           struct sockaddr_in* addr = new sockaddr_in(receiverAddr);
           clientAddrs_.assign(request.clientid(), addr);
         }
+
         // Send to every replica
         for (int i = 0; i < replicaNum_; i++) {
-          uint32_t generateProxyId = (uint32_t)(proxyIds_[id] >> 32u);
-          struct sockaddr_in* replicaAddr =
-              replicaAddrs_[i][generateProxyId % replicaAddrs_[i].size()];
+          // uint32_t generateProxyId = (uint32_t)(proxyIds_[id] >> 32u);
           // struct sockaddr_in* replicaAddr =
-          //     replicaAddrs_[i][proxyIds_[id] % replicaAddrs_[i].size()];
+          //     replicaAddrs_[i][generateProxyId % replicaAddrs_[i].size()];
+          struct sockaddr_in* replicaAddr =
+              replicaAddrs_[i][proxyIds_[id] % replicaAddrs_[i].size()];
 
           sendto(forwardFds_[id], buffer,
                  msgHdr->msgLen + sizeof(MessageHeader), 0,
                  (struct sockaddr*)replicaAddr, sizeof(sockaddr_in));
         }
+
+        Log* litem = new Log();
+        litem->proxyTime_ = request.sendtime();
+        litem->deadline_ = request.sendtime() + request.bound();
+        logs.assign(reqKey, litem);
+        // LOG(INFO) << "id=" << id << "\t"
+        //           << "cid=" << request.clientid() << "\t" << request.reqid();
 
         // forwardCnt++;
         // if (forwardCnt == 1) {
@@ -420,6 +444,9 @@ void Proxy::CreateContext() {
     replyFds_[i] = CreateSocketFd("", -1);
     proxyIds_[i] = ((proxyIds_[i] << 32) | (uint32_t)i);
   }
+  committedReplyMap_.resize(shardNum);
+  logMap_.resize(shardNum);
+
   replicaNum_ = proxyConfig_["replica-info"]["replica-ips"].size();
   assert(replicaNum_ % 2 == 1);
   f_ = replicaNum_ / 2;

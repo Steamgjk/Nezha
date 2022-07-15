@@ -539,6 +539,17 @@ class Replica {
 
   void Run();
   void Terminate();
+
+  /** For debug */
+  std::vector<uint64_t> proxySendTimes_;
+  std::vector<uint64_t> replicaRecvTimes_;
+  std::vector<uint64_t> toprocessTimes_;
+  std::vector<uint64_t> processedTimes_;
+  std::vector<uint64_t> tofastreplyTimes_;
+  std::vector<uint64_t> fastReplyTimes_;
+  std::vector<uint64_t> slowReplyTimes;
+  std::vector<uint64_t> stats;
+  const uint32_t maxLen = 200000;
 };
 
 }  // namespace nezha

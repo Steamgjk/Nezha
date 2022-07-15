@@ -191,14 +191,11 @@ void Client::ReceiveReply(MessageHeader* msgHdr, char* msgBuffer,
        * LogTd
        * */
       uint64_t recvTime = GetMicrosecondTimestamp();
-      // Still Outstanding
       LogInfo* log = new LogInfo();
+      lastCommittedReqId_ = reply.reqid();
       *log = {reply.reqid(), sendTime, recvTime, reply.replytype()};
       outstandingRequestSendTime_.erase(reply.reqid());
-      // logQu_.enqueue(log);
-      if (committedNum_ % 100000 == 0) {
-        LOG(INFO) << "Latency Sample =" << recvTime - sendTime;
-      }
+      logQu_.enqueue(log);
     }
   }
 }
@@ -244,6 +241,9 @@ void Client::OpenLoopSubmissionTd() {
         // Retry this request
         Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()]
                                              [mapIdx / proxyAddrs_.size()];
+        // LOG(INFO) << "Resend " << request->reqid() << "to "
+        //           << mapIdx % proxyAddrs_.size() << "\t"
+        //           << mapIdx / proxyAddrs_.size();
         requestEP_->SendMsgTo(*roundRobinAddr, *request,
                               MessageType::CLIENT_REQUEST);
         outstandingRequestSendTime_.assign(request->reqid(),
@@ -259,6 +259,9 @@ void Client::OpenLoopSubmissionTd() {
         request->set_clienttime(GetMicrosecondTimestamp());  // To Delete
         Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()]
                                              [mapIdx / proxyAddrs_.size()];
+        // LOG(INFO) << "Sed " << request->reqid() << "to "
+        //           << mapIdx % proxyAddrs_.size() << "\t"
+        //           << mapIdx / proxyAddrs_.size();
         requestEP_->SendMsgTo(*roundRobinAddr, *request,
                               MessageType::CLIENT_REQUEST);
         outstandingRequests_.assign(request->reqid(), request);
@@ -336,7 +339,6 @@ void Client::CloseLoopSubmissionTd() {
 }
 
 void Client::LogTd() {
-  return;
   LogInfo* log = NULL;
   uint64_t startTime, endTime;
   uint32_t lastSubmitteddReqId = 0;
@@ -349,7 +351,7 @@ void Client::LogTd() {
   startTime = GetMicrosecondTimestamp();
   while (running_) {
     endTime = GetMicrosecondTimestamp();
-    if (endTime - startTime >= 5000000) {
+    if (endTime - startTime >= 2000000) {
       float duration = (endTime - startTime) * 1e-6;
       uint32_t submittedReqNum = nextReqId_ - 1 - lastSubmitteddReqId;
       uint32_t committedReqNum = committedNum_ - lastCountCommitedReq;
@@ -363,6 +365,7 @@ void Client::LogTd() {
                 << "logQuLen =" << logQu_.size_approx() << "\t"
                 << "committedReqId_=" << committedReqId_ << "\t"
                 << "nextReqId_=" << nextReqId_ << "\t"
+                << "lastCommittedReqId_=" << lastCommittedReqId_ << "\t"
                 << "submissionRate=" << submissionRate << " req/sec\t"
                 << "commitRate=" << commitRate << " req/sec"
                 << "\t"
@@ -388,7 +391,7 @@ void Client::LogTd() {
       latencySample = log->commitTime - log->sendTime;
 
       // log stats
-      // ofs << log->toString() << std::endl;
+      ofs << log->toString() << std::endl;
       delete log;
     }
 
@@ -397,7 +400,7 @@ void Client::LogTd() {
       uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
       if (sendTime > 0) {
         // Find it
-        if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
+        if (false && GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
           // timeout, should retry
           Request* request = outstandingRequests_.get(reqId);
           VLOG(1) << "Timeout Retry " << request->reqid();

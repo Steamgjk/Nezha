@@ -155,11 +155,13 @@ class Client {
   /** Client accepts a config file, which contains all the necessary information
    * to instantiate the object, then it can call Run method
    *  */
-  Client(const std::string& configFile =
-             std::string("../configs/nezha-client-config.yaml"));
+  Client(const std::string& configFile = "../configs/nezha-client-config.yaml");
   void Run();
   void Terminate();
   ~Client();
+
+  /** For debug */
+  uint64_t lastCommittedReqId_;
 };
 
 }  // namespace nezha

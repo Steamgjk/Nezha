@@ -108,10 +108,12 @@ class Proxy {
     uint64_t deadline_;
     uint64_t fastReplyTime_;
     uint64_t slowReplyTime_;
-    uint64_t commitTime_;
+    uint64_t proxyRecvTime_;
+    uint32_t commitType_;
+
     Log(uint32_t rid = 0, uint64_t ctime = 0, uint64_t ptime = 0,
         uint64_t rtime = 0, uint64_t ddl = 0, uint64_t fttime = 0,
-        uint64_t swtime = 0, uint64_t cmtime = 0)
+        uint64_t swtime = 0, uint64_t prcvt = 0, uint32_t cmtt = 0)
         : replicaId_(rid),
           clientTime_(ctime),
           proxyTime_(ptime),
@@ -119,13 +121,15 @@ class Proxy {
           deadline_(ddl),
           fastReplyTime_(fttime),
           slowReplyTime_(swtime),
-          commitTime_(cmtime) {}
+          proxyRecvTime_(prcvt),
+          commitType_(cmtt) {}
     std::string ToString() {
       return std::to_string(replicaId_) + "," + std::to_string(clientTime_) +
              "," + std::to_string(proxyTime_) + "," +
              std::to_string(recvTime_) + "," + std::to_string(deadline_) + "," +
              std::to_string(fastReplyTime_) + "," +
-             std::to_string(slowReplyTime_) + std::to_string(commitTime_);
+             std::to_string(slowReplyTime_) + "," +
+             std::to_string(proxyRecvTime_) + "," + std::to_string(commitType_);
     }
   };
   ConcurrentQueue<Log> logQu_;
@@ -153,7 +157,12 @@ class Proxy {
    * retry the request which has already been committed, the proxy can direct
    * resend the reply, instead of adding additional burden to the replicas
    */
-  ConcurrentMap<uint64_t, Reply*> committedReply_;
+
+  std::vector<ConcurrentMap<uint64_t, Reply*>> committedReplyMap_;
+
+  std::vector<ConcurrentMap<uint64_t, uint64_t>> sendTimeMap_;
+
+  std::vector<ConcurrentMap<uint64_t, Log*>> logMap_;
 
  public:
   std::atomic<uint32_t> tagId_;  // for debug, will be deleted later
