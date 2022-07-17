@@ -316,7 +316,7 @@ void Replica::CreateContext() {
   }
   // Create reply queues (one queue per fast/slow reply thread)
   fastReplyQu_.resize(replyShardNum);
-  slowReplyQu_.resize(replyShardNum);
+  // slowReplyQu_.resize(replyShardNum);
 
   // Create CrashVector Context
   std::vector<uint32_t> cvVec(replicaNum_, 0);
@@ -411,8 +411,8 @@ void Replica::ResetContext() {
     LogEntry* entry;
     while (fastReplyQu_[i].try_dequeue(entry)) {
     }
-    while (slowReplyQu_[i].try_dequeue(entry)) {
-    }
+    // while (slowReplyQu_[i].try_dequeue(entry)) {
+    // }
     // Don't worry about memory leakage, the memory pointed by these in-queue
     // pointers have already been cleaned or will be cleaned according to their
     // Conucurrent maps
@@ -542,13 +542,13 @@ void Replica::LaunchThreads() {
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
 
-  for (int i = 0; i < replyShardNum; i++) {
-    totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
-    std::string key("SlowReplyTd-" + std::to_string(i));
-    threadPool_[key] = td;
-    LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
-  }
+  // for (int i = 0; i < replyShardNum; i++) {
+  //   totalWorkerNum_++;
+  //   std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
+  //   std::string key("SlowReplyTd-" + std::to_string(i));
+  //   threadPool_[key] = td;
+  //   LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
+  // }
 
   // Track
   for (int i = 0; i < replicaConfig_["track-shards"].as<int>(); i++) {
@@ -956,15 +956,14 @@ void Replica::FastReplyTd(int id, int cvId) {
         // Leader's logic is very easy: after XORing the crashVector and the
         // log entry hash together, it can directly reply
         reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-        reply.set_syncedlogid(entry->logId);
+        reply.set_logid(entry->logId);
+        reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
+        uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
+        repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
         // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
         //     << "opKey=" << entry->opKey << "\t"
         //     << "hash=" << hash.toString();
-        // if (syncedLogEntryByReqKey_.get(entry->body.reqKey) == NULL) {
-        //   syncedLogEntryByReqKey_.assign(entry->body.reqKey, entry);
-        //   syncedLogEntryByLogId_.assign(entry->logId, entry);
-        // }
       } else {
         // But follower's hash is a bit complicated, because it needs to
         // consider both synced entries and unsynced entries, i.e. We need to
@@ -982,7 +981,6 @@ void Replica::FastReplyTd(int id, int cvId) {
 
         LogEntry* unsyncedEntry = minUnSyncedLogEntryByKey_[entry->body.opKey];
         LogEntry* syncedEntry = maxSyncedLogEntryByKey_[entry->body.opKey];
-
         if (syncedEntry == NULL || unsyncedEntry == NULL ||
             unsyncedEntry->logId <= safeToClearUnSyncedLogId_[id]) {
           // The index sync process may have not been started, or may have not
@@ -991,9 +989,9 @@ void Replica::FastReplyTd(int id, int cvId) {
           // safeToClearUnSyncedLogId_) We cannot decide the sync-point, so
           // we directly reply with the XORed hash (similar to the leader)
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-          reply.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+          reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
           uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
-          repliedSyncPoint_[proxyMachineId] = reply.syncedlogid();
+          repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
 
@@ -1005,16 +1003,17 @@ void Replica::FastReplyTd(int id, int cvId) {
           // syncedEntry->hash represents them
           if (entry->LessOrEqual(*syncedEntry)) {
             // No need to send fast replies, because this entry has already
-            // been covered by index sync process
-            LogEntry* alreadySyncedEntry =
-                syncedLogEntryByReqKey_.get(entry->body.reqKey);
-            if (alreadySyncedEntry) {
-              // if it really exits in syncedLogEntryMap, handle it to
-              // slowReply
-              uint32_t quId =
-                  (alreadySyncedEntry->body.reqKey) % slowReplyQu_.size();
-              slowReplyQu_[quId].enqueue(alreadySyncedEntry);
-              continue;
+            // been covered by index sync process, just give it a dummy reply,
+            // which includes the max-synced-log-id
+            uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
+            if (repliedSyncPoint_[proxyMachineId] <
+                maxSyncedLogEntry_.load()->logId) {
+              reply.set_clientid(0);
+              reply.set_reqid(0);
+              reply.set_logid(0);
+              reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
+              fastReplySender_[id]->SendMsgTo(*addr, reply,
+                                              MessageType::FAST_REPLY);
             }
           }
           // Beyond syncedEntry, we need to find the boundary in the unsynced
@@ -1038,9 +1037,9 @@ void Replica::FastReplyTd(int id, int cvId) {
           // Let's add the synced part
           hash.XOR(syncedEntry->hash);
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-          reply.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+          reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
           uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
-          repliedSyncPoint_[proxyMachineId] = reply.syncedlogid();
+          repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
         }
@@ -1051,56 +1050,58 @@ void Replica::FastReplyTd(int id, int cvId) {
   LOG(INFO) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";
 }
 
-void Replica::SlowReplyTd(int id) {
-  activeWorkerNum_.fetch_add(1);
-  Reply reply;
-  reply.set_replicaid(replicaId_);
-  reply.set_hash("");
-  uint32_t replyNum = 0;
-  uint64_t startTime, endTime;
-  while (status_ != ReplicaStatus::TERMINATED) {
-    BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
-    if (AmLeader()) {
-      // Leader does not send slow replies
-      nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
-      continue;
-    }
-    LogEntry* entry = NULL;
-    if (slowReplyQu_[id].try_dequeue(entry)) {
-      uint32_t logId = entry->logId;
-      reply.set_view(viewId_);
-      reply.set_clientid((entry->body.reqKey) >> 32);
-      reply.set_reqid((uint32_t)(entry->body.reqKey));
-      // Optimize: SLOW_REPLY => COMMIT_REPLY
-      if (logId <= committedLogId_) {
-        reply.set_replytype(MessageType::COMMIT_REPLY);
-        reply.set_result(entry->result);
-      } else {
-        reply.set_replytype(MessageType::SLOW_REPLY);
-        reply.set_result("");
-      }
-      reply.set_owd(owdMap_.get(entry->body.proxyId));
+// void Replica::SlowReplyTd(int id) {
+//   activeWorkerNum_.fetch_add(1);
+//   Reply reply;
+//   reply.set_replicaid(replicaId_);
+//   reply.set_hash("");
+//   uint32_t replyNum = 0;
+//   uint64_t startTime, endTime;
+//   while (status_ != ReplicaStatus::TERMINATED) {
+//     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
+//     if (AmLeader()) {
+//       // Leader does not send slow replies
+//       nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
+//       continue;
+//     }
+//     LogEntry* entry = NULL;
+//     if (slowReplyQu_[id].try_dequeue(entry)) {
+//       uint32_t logId = entry->logId;
+//       reply.set_view(viewId_);
+//       reply.set_clientid((entry->body.reqKey) >> 32);
+//       reply.set_reqid((uint32_t)(entry->body.reqKey));
+//       // Optimize: SLOW_REPLY => COMMIT_REPLY
+//       if (logId <= committedLogId_) {
+//         reply.set_replytype(MessageType::COMMIT_REPLY);
+//         reply.set_result(entry->result);
+//       } else {
+//         reply.set_replytype(MessageType::SLOW_REPLY);
+//         reply.set_result("");
+//       }
+//       reply.set_owd(owdMap_.get(entry->body.proxyId));
 
-      Address* addr = proxyAddressMap_.get(entry->body.proxyId);
-      if (addr) {
-        slowReplySender_[id]->SendMsgTo(*addr, reply, MessageType::SLOW_REPLY);
-      }
-      // replyNum++;
-      // if (replyNum == 1) {
-      //   startTime = GetMicrosecondTimestamp();
-      // } else if (replyNum % 100000 == 0) {
-      //   endTime = GetMicrosecondTimestamp();
-      //   float rate = 100000 / ((endTime - startTime) * 1e-6);
-      //   LOG(INFO) << "id=" << id << "\t Slow Reply Rate=" << rate
-      //             << "\t QuLen=" << slowReplyQu_[id].size_approx() << "\t"
-      //             << "pendingIndexSync_ qu =" << pendingIndexSync_.size();
-      //   startTime = endTime;
-      // }
-    }
-  }
-  uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining";
-}
+//       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
+//       if (addr) {
+//         slowReplySender_[id]->SendMsgTo(*addr, reply,
+//         MessageType::SLOW_REPLY);
+//       }
+//       // replyNum++;
+//       // if (replyNum == 1) {
+//       //   startTime = GetMicrosecondTimestamp();
+//       // } else if (replyNum % 100000 == 0) {
+//       //   endTime = GetMicrosecondTimestamp();
+//       //   float rate = 100000 / ((endTime - startTime) * 1e-6);
+//       //   LOG(INFO) << "id=" << id << "\t Slow Reply Rate=" << rate
+//       //             << "\t QuLen=" << slowReplyQu_[id].size_approx() << "\t"
+//       //             << "pendingIndexSync_ qu =" << pendingIndexSync_.size();
+//       //   startTime = endTime;
+//       // }
+//     }
+//   }
+//   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
+//   LOG(INFO) << "SlowReplyTd Terminated " << preVal - 1 << " worker
+//   remaining";
+// }
 
 void Replica::IndexSendTd(int id, int cvId) {
   activeWorkerNum_.fetch_add(1);
@@ -1306,8 +1307,8 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
       ASSERT(prevMaxLogId + 1 == logId);
       maxSyncedLogEntryByKey_[newEntry->body.opKey] = newEntry;
       // Enqueue for slow Reply (Try removing it)
-      uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
-      slowReplyQu_[quId].enqueue(newEntry);
+      // uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
+      // slowReplyQu_[quId].enqueue(newEntry);
 
       // if (newEntry->prev->logId + 1 != newEntry->logId) {
       //   LOG(ERROR) << "newEntry--" << newEntry->logId << "\t"

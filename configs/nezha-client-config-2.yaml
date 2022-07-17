@@ -3,7 +3,7 @@ proxy-info:
   proxy-ips:
     - 10.128.2.23
     - 10.128.2.24
-  proxy-shards: 12
+  proxy-shards: 24
   request-port-base: 32000
 client-info:
   endpoint-type: 1 # 1 for UDP Endpoint, 2 for GRPC Endpoint [to be supported soon]

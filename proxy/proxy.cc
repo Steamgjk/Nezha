@@ -198,6 +198,8 @@ void Proxy::CheckQuorumTd(const int id) {
   ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
   ConcurrentMap<uint64_t, Log*>& logs = logMap_[id];
   std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
+  std::map<uint32_t, Reply*> uncommittedReply;  // Key: logId, value: reqKey
+
   int sz = 0;
   char buffer[UDP_BUFFER_SIZE];
   MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
@@ -223,9 +225,15 @@ void Proxy::CheckQuorumTd(const int id) {
               std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
         }
 
-        uint64_t syncPoint = CONCAT_UINT32(reply.view(), reply.syncedlogid());
+        uint64_t syncPoint =
+            CONCAT_UINT32(reply.view(), reply.maxsyncedlogid());
         if (replicaSyncedPoints_[reply.replicaid()] < syncPoint) {
           replicaSyncedPoints_[reply.replicaid()] = syncPoint;
+        }
+        if (reply.clientid() == 0 && reply.reqid() == 0) {
+          // Dummy reply, just used to update
+          // replicaSyncedPoints_[reply.replicaid()]
+          continue;
         }
 
         committedAck = committedReply.get(reqKey);
@@ -244,6 +252,7 @@ void Proxy::CheckQuorumTd(const int id) {
           committedAck = isQuorumReady(replyQuorum[reqKey]);
         } else if (reply.view() > replyQuorum[reqKey].begin()->second.view()) {
           // New view has come, clear existing replies for this request
+          uncommittedReply.clear();
           replyQuorum[reqKey].clear();
           replyQuorum[reqKey][reply.replicaid()] = reply;
           committedAck = isQuorumReady(replyQuorum[reqKey]);
@@ -260,7 +269,7 @@ void Proxy::CheckQuorumTd(const int id) {
         }  // else: reply.view()< replyQuorum[reqKey].begin()->second.view(),
            // ignore it
 
-        if (committedAck != NULL) {
+        if (committedAck != NULL && committedAck->replytype() > 0) {
           // Ack to client
           struct sockaddr_in* clientAddr = clientAddrs_.get(reply.clientid());
           std::string replyMsg = committedAck->SerializeAsString();
@@ -278,27 +287,97 @@ void Proxy::CheckQuorumTd(const int id) {
             litem->commitType_ = committedAck->replytype();
             logQu_.enqueue(*litem);
           }
-
           // Add to cache
           committedReply.assign(reqKey, committedAck);
           replyQuorum.erase(reqKey);
+
+          auto checkIter = uncommittedReply.find(committedAck->logid());
+          if (checkIter != uncommittedReply.end()) {
+            delete checkIter->second;
+            uncommittedReply.erase(committedAck->logid());
+          }
+
+          // Check whether some uncommittedReply can be committed
+          while (!uncommittedReply.empty()) {
+            uint64_t reqKey =
+                CONCAT_UINT32(uncommittedReply.begin()->second->clientid(),
+                              uncommittedReply.begin()->second->reqid());
+            Reply* r = isQuorumReady(replyQuorum[reqKey]);
+            if (r != NULL && r->replytype() > 0) {
+              // committed
+              delete uncommittedReply.begin()->second;
+              uncommittedReply.erase(uncommittedReply.begin());
+              committedReply.assign(reqKey, r);
+            } else {
+              break;
+            }
+          }
+
           // LOG(INFO) << "reqId=" << committedAck->reqid()
           //           << "\t type=" << committedAck->replytype();
-          // replyNum++;
-          // if (replyNum == 1) {
-          //   startTime = GetMicrosecondTimestamp();
-          // } else if (replyNum % 100 == 0) {
-          //   endTime = GetMicrosecondTimestamp();
-          //   float rate = 100 / ((endTime - startTime) * 1e-6);
-          //   LOG(INFO) << "id=" << id << "\t"
-          //             << "replyNum=" << replyNum << "\t"
-          //             << "rate = " << rate;
-          //   startTime = endTime;
-          // }
+          replyNum++;
+          if (replyNum == 1) {
+            startTime = GetMicrosecondTimestamp();
+          } else if (replyNum % 100000 == 0) {
+            endTime = GetMicrosecondTimestamp();
+            float rate = 100000 / ((endTime - startTime) * 1e-6);
+            LOG(INFO) << "id=" << id << "\t"
+                      << "replyNum=" << replyNum << "\t"
+                      << "rate = " << rate << "\t"
+                      << "uncommittedLen = " << uncommittedReply.size();
+            startTime = endTime;
+          }
+        } else if (committedAck != NULL && committedAck->replytype() == 0) {
+          // record in uncommittedRequests
+          uncommittedReply[committedAck->logid()] = committedAck;
         }
       }
     }
   }
+}
+
+Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
+  // These replies are of the same view for sure (we have previously forbidden
+  // inconsistency)
+  uint32_t view = quorum.begin()->second.view();
+  uint32_t leaderId = view % replicaNum_;
+  if (quorum.find(leaderId) == quorum.end()) {
+    return NULL;
+  }
+
+  Reply& leaderReply = quorum[leaderId];
+
+  uint32_t fastOrSlowReplyNum = 0;  // slowReply can be used as fastReply
+  uint32_t slowReplyNum = 0;        // But fastReply cannot be used as slowReply
+  for (const auto& kv : quorum) {
+    bool fastSatisfied = (kv.second.replytype() == MessageType::FAST_REPLY &&
+                          kv.second.view() == leaderReply.view() &&
+                          kv.second.hash() == leaderReply.hash());
+    bool slowSatisfied =
+        (HIGH_32BIT(replicaSyncedPoints_[kv.first]) == leaderReply.view() &&
+         LOW_32BIT(replicaSyncedPoints_[kv.first]) >= leaderReply.logid());
+
+    if (fastSatisfied || slowSatisfied) {
+      fastOrSlowReplyNum++;
+    }
+    if (slowSatisfied) {
+      slowReplyNum++;
+    }
+  }
+
+  Reply* committedReply = new Reply(leaderReply);
+  if (fastOrSlowReplyNum >= (uint32_t)fastQuorum_) {
+    // Fast Commit
+    committedReply->set_replytype(MessageType::FAST_REPLY);
+  } else if (slowReplyNum >= (uint32_t)f_ + 1) {
+    // Slow Commit: Together with the leader reply, it forms the simple quorum
+    // of f+1
+    committedReply->set_replytype(MessageType::SLOW_REPLY);
+  } else {
+    // Uncommitted
+    committedReply->set_replytype(0);
+  }
+  return committedReply;
 }
 
 // Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
@@ -316,18 +395,12 @@ void Proxy::CheckQuorumTd(const int id) {
 //   uint32_t fastOrSlowReplyNum = 0;  // slowReply can be used as fastReply
 //   uint32_t slowReplyNum = 0;        // But fastReply cannot be used as
 //   slowReply for (const auto& kv : quorum) {
-//     bool fastSatisfied = (kv.second.replytype() == MessageType::FAST_REPLY &&
-//                           kv.second.view() == leaderReply.view() &&
-//                           kv.second.hash() == leaderReply.hash());
-//     bool slowSatisfied =
-//         (HIGH_32BIT(replicaSyncedPoints_[kv.first]) == leaderReply.view() &&
-//          LOW_32BIT(replicaSyncedPoints_[kv.first]) >=
-//              leaderReply.syncedlogid());
-
-//     if (fastSatisfied || slowSatisfied) {
+//     if (kv.second.replytype() == MessageType::FAST_REPLY &&
+//             kv.second.hash() == leaderReply.hash() ||
+//         kv.second.replytype() == MessageType::SLOW_REPLY) {
 //       fastOrSlowReplyNum++;
 //     }
-//     if (slowSatisfied) {
+//     if (kv.second.replytype() == MessageType::SLOW_REPLY) {
 //       slowReplyNum++;
 //     }
 //   }
@@ -348,47 +421,6 @@ void Proxy::CheckQuorumTd(const int id) {
 
 //   return NULL;
 // }
-
-Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
-  // These replies are of the same view for sure (we have previously forbidden
-  // inconsistency)
-  uint32_t view = quorum.begin()->second.view();
-  uint32_t leaderId = view % replicaNum_;
-  if (quorum.find(leaderId) == quorum.end()) {
-    return NULL;
-  }
-
-  Reply& leaderReply = quorum[leaderId];
-
-  uint32_t fastOrSlowReplyNum = 0;  // slowReply can be used as fastReply
-  uint32_t slowReplyNum = 0;        // But fastReply cannot be used as slowReply
-  for (const auto& kv : quorum) {
-    if (kv.second.replytype() == MessageType::FAST_REPLY &&
-            kv.second.hash() == leaderReply.hash() ||
-        kv.second.replytype() == MessageType::SLOW_REPLY) {
-      fastOrSlowReplyNum++;
-    }
-    if (kv.second.replytype() == MessageType::SLOW_REPLY) {
-      slowReplyNum++;
-    }
-  }
-
-  if (fastOrSlowReplyNum >= (uint32_t)fastQuorum_) {
-    // Fast Commit
-    Reply* committedReply = new Reply(leaderReply);
-    committedReply->set_replytype(MessageType::FAST_REPLY);
-    return committedReply;
-  }
-
-  if (slowReplyNum >= (uint32_t)f_) {
-    // together with leader's fast reply, it forms the quorum of f+1
-    Reply* committedReply = new Reply(leaderReply);
-    committedReply->set_replytype(MessageType::SLOW_REPLY);
-    return committedReply;
-  }
-
-  return NULL;
-}
 
 void Proxy::ForwardRequestsTd(const int id) {
   ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];

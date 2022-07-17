@@ -24,7 +24,7 @@ def ThroughputAnalysis(merge_df):
     grouped_apply_orders = grouped.apply(throughput_apply_func)
     grouped_apply_orders = grouped_apply_orders.dropna()
     grouped_apply_orders = grouped_apply_orders[5:-5]
-    print(grouped_apply_orders['AvgThroughput'])
+    # print(grouped_apply_orders['AvgThroughput'])
     throughput = (grouped_apply_orders['AvgThroughput']/bin_interval_s).mean()
     return throughput
 

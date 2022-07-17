@@ -39,9 +39,8 @@ message Reply {
     bytes result = 6;
     uint32 replytype = 7;
     uint32 owd = 8;
-    uint32 syncedlogid = 9; // Leader: it is the log id of this request; 
-                            // Follower: this is the largest syncedlogid of my synced logs
-    TimeStats t = 10;
+    uint32 maxsyncedlogid = 9; // This is the largest syncedlogid of my synced logs
+    uint32 logid = 10; // only set by the leader, it is the log id of the entry replied
 }
 
 message IndexSync {
