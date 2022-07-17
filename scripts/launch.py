@@ -407,8 +407,8 @@ if __name__ == '__main__':
     #### del_instance_list(instance_list=vm_name_list)
 
 
-    stop_instance_list(instance_list = vm_name_list)
-    exit(0)
+    # stop_instance_list(instance_list = vm_name_list)
+    # exit(0)
 
 
     # start_instance_list(instance_list = vm_name_list)
