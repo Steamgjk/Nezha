@@ -541,6 +541,7 @@ void Replica::LaunchThreads() {
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
+
   for (int i = 0; i < replyShardNum; i++) {
     totalWorkerNum_++;
     std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
@@ -955,6 +956,7 @@ void Replica::FastReplyTd(int id, int cvId) {
         // Leader's logic is very easy: after XORing the crashVector and the
         // log entry hash together, it can directly reply
         reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+        reply.set_syncedlogid(entry->logId);
         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
         // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
         //     << "opKey=" << entry->opKey << "\t"
@@ -989,6 +991,9 @@ void Replica::FastReplyTd(int id, int cvId) {
           // safeToClearUnSyncedLogId_) We cannot decide the sync-point, so
           // we directly reply with the XORed hash (similar to the leader)
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+          reply.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+          uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
+          repliedSyncPoint_[proxyMachineId] = reply.syncedlogid();
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
 
@@ -1033,34 +1038,13 @@ void Replica::FastReplyTd(int id, int cvId) {
           // Let's add the synced part
           hash.XOR(syncedEntry->hash);
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+          reply.set_syncedlogid(maxSyncedLogEntry_.load()->logId);
+          uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
+          repliedSyncPoint_[proxyMachineId] = reply.syncedlogid();
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
         }
       }
-      // if ((entry->body.opKey >= 1 && entry->body.opKey <= 100)) {
-      //   assert(entry != NULL);
-      //   LOG(INFO) << "clientId=" << reply.clientid()
-      //             << "\treqid=" << reply.reqid() << "\tlogId=" <<
-      //             entry->logId
-      //             << "\tkey=" << entry->body.opKey
-      //             << "\tfhash=" << hash.toString()
-      //             << "\tmyhash=" << entry->myhash.toString();
-      // }
-      //   // replyNum++;
-      //   // if (replyNum % 100000 == 0) {
-      //   //   LOG(INFO) << "maxSynced " << maxSyncedLogEntry_.load()->logId <<
-      //   //   "\t"
-      //   //             << "UnSynced " << maxUnSyncedLogEntry_.load()->logId;
-      //   // }
-      //   // if (replyNum == 1) {
-      //   //   startTime = GetMicrosecondTimestamp();
-      //   // } else if (replyNum % 100000 == 0) {
-      //   //   endTime = GetMicrosecondTimestamp();
-      //   //   float rate = 100000 / ((endTime - startTime) * 1e-6);
-      //   //   LOG(INFO) << "id=" << id << "\t Fast Reply Rate=" << rate <<
-      //   "\t";
-      //   //   startTime = endTime;
-      //   // }
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
@@ -1217,28 +1201,6 @@ void Replica::IndexProcessTd() {
           }
 
           lastHeartBeatTime_ = GetMicrosecondTimestamp();
-          // if (pendingIndexSync_.size() > 0 &&
-          //     pendingIndexSync_.size() % 10000 == 0) {
-          //   LOG(INFO) << "pendingIndexSync_ " << pendingIndexSync_.size()
-          //             << "\t msgLen=" << msgHdr->msgLen;
-          //   LOG(INFO) << " missing Idx? " << missedIndices_.first << "-"
-          //             << missedIndices_.second;
-          //   LOG(INFO) << " missing req ? " << missedReqKeys_.size();
-          //   LOG(INFO) << "pending..."
-          //             << pendingIndexSync_.begin()->second.logidbegin() <<
-          //             "--"
-          //             << pendingIndexSync_.begin()->second.logidend();
-          //   LOG(INFO) << "Missed Fetch Size " << fetchTime_.size();
-          //   if (fetchTime_.size() > 0) {
-          //     sort(fetchTime_.begin(), fetchTime_.end());
-          //     LOG(INFO) << "Fetch " << fetchTime_[fetchTime_.size() / 2] <<
-          //     "\t"
-          //               << fetchTime_[fetchTime_.size() / 4 * 3] << "\t"
-          //               << fetchTime_[fetchTime_.size() / 10 * 9] << "\t";
-          //     fetchTime_.clear();
-          //   }
-          // }
-
           if (idxSyncMsg.logidbegin() > idxSyncMsg.logidend()) {
             // Pure heart beat
             continue;
@@ -1270,7 +1232,6 @@ void Replica::IndexProcessTd() {
               // We must handle it to ProcessTd instead of processing it here,
               // to avoid data race (and further memroy leakage), although it
               // is a trivial possibility
-
               uint32_t quId = rbMsg.reqkey() % recordQu_.size();
               recordQu_[quId].enqueue(rb);
 
@@ -1339,23 +1300,21 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
       if (prevNonCommutativeEntry) {
         prevNonCommutativeEntry->nextNonCommutative = newEntry;
       }
-
-      uint32_t prevMaxLogId = maxSyncedLogEntry_.load()->logId;
+      // uint32_t prevMaxLogId = maxSyncedLogEntry_.load()->logId;
       maxSyncedLogEntry_ = newEntry;
       ASSERT(maxSyncedLogEntry_.load()->logId == logId);
       ASSERT(prevMaxLogId + 1 == logId);
-
       maxSyncedLogEntryByKey_[newEntry->body.opKey] = newEntry;
-      // // Enqueue for slow Reply (Try remove it)
-      // uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
-      // slowReplyQu_[quId].enqueue(newEntry);
+      // Enqueue for slow Reply (Try removing it)
+      uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
+      slowReplyQu_[quId].enqueue(newEntry);
 
-      if (newEntry->prev->logId + 1 != newEntry->logId) {
-        LOG(ERROR) << "newEntry--" << newEntry->logId << "\t"
-                   << "prev--" << newEntry->prev->logId << "\t"
-                   << "prevMaxLogId=" << prevMaxLogId << "\t"
-                   << "logId=" << logId;
-      }
+      // if (newEntry->prev->logId + 1 != newEntry->logId) {
+      //   LOG(ERROR) << "newEntry--" << newEntry->logId << "\t"
+      //              << "prev--" << newEntry->prev->logId << "\t"
+      //              << "prevMaxLogId=" << prevMaxLogId << "\t"
+      //              << "logId=" << logId;
+      // }
       ASSERT(newEntry->prev->logId + 1 == newEntry->logId);
       // TODO： Think about the order above
 

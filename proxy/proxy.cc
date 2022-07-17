@@ -207,7 +207,6 @@ void Proxy::CheckQuorumTd(const int id) {
   Reply* committedAck = NULL;
   uint32_t replyNum = 0;
   uint64_t startTime, endTime;
-  LOG(INFO) << "log " << id;
   while (running_) {
     if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
@@ -224,14 +223,15 @@ void Proxy::CheckQuorumTd(const int id) {
               std::pair<uint32_t, uint32_t>(reply.replicaid(), reply.owd()));
         }
 
+        uint64_t syncPoint = CONCAT_UINT32(reply.view(), reply.syncedlogid());
+        if (replicaSyncedPoints_[reply.replicaid()] < syncPoint) {
+          replicaSyncedPoints_[reply.replicaid()] = syncPoint;
+        }
+
         committedAck = committedReply.get(reqKey);
         if (committedAck != NULL) {
           // already committed;  ignore
           continue;
-        }
-        uint64_t syncPoint = CONCAT_UINT32(reply.view(), reply.syncedlogid());
-        if (replicaSyncedPoints_[reply.replicaid()] < syncPoint) {
-          replicaSyncedPoints_[reply.replicaid()] = syncPoint;
         }
 
         // LOG(INFO) << reply.DebugString();
@@ -301,6 +301,54 @@ void Proxy::CheckQuorumTd(const int id) {
   }
 }
 
+// Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
+//   // These replies are of the same view for sure (we have previously
+//   forbidden
+//   // inconsistency)
+//   uint32_t view = quorum.begin()->second.view();
+//   uint32_t leaderId = view % replicaNum_;
+//   if (quorum.find(leaderId) == quorum.end()) {
+//     return NULL;
+//   }
+
+//   Reply& leaderReply = quorum[leaderId];
+
+//   uint32_t fastOrSlowReplyNum = 0;  // slowReply can be used as fastReply
+//   uint32_t slowReplyNum = 0;        // But fastReply cannot be used as
+//   slowReply for (const auto& kv : quorum) {
+//     bool fastSatisfied = (kv.second.replytype() == MessageType::FAST_REPLY &&
+//                           kv.second.view() == leaderReply.view() &&
+//                           kv.second.hash() == leaderReply.hash());
+//     bool slowSatisfied =
+//         (HIGH_32BIT(replicaSyncedPoints_[kv.first]) == leaderReply.view() &&
+//          LOW_32BIT(replicaSyncedPoints_[kv.first]) >=
+//              leaderReply.syncedlogid());
+
+//     if (fastSatisfied || slowSatisfied) {
+//       fastOrSlowReplyNum++;
+//     }
+//     if (slowSatisfied) {
+//       slowReplyNum++;
+//     }
+//   }
+
+//   if (fastOrSlowReplyNum >= (uint32_t)fastQuorum_) {
+//     // Fast Commit
+//     Reply* committedReply = new Reply(leaderReply);
+//     committedReply->set_replytype(MessageType::FAST_REPLY);
+//     return committedReply;
+//   }
+
+//   if (slowReplyNum >= (uint32_t)f_) {
+//     // together with leader's fast reply, it forms the quorum of f+1
+//     Reply* committedReply = new Reply(leaderReply);
+//     committedReply->set_replytype(MessageType::SLOW_REPLY);
+//     return committedReply;
+//   }
+
+//   return NULL;
+// }
+
 Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
   // These replies are of the same view for sure (we have previously forbidden
   // inconsistency)
@@ -335,12 +383,6 @@ Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
   if (slowReplyNum >= (uint32_t)f_) {
     // together with leader's fast reply, it forms the quorum of f+1
     Reply* committedReply = new Reply(leaderReply);
-    committedReply->set_replytype(MessageType::FAST_REPLY);
-    return committedReply;
-  }
-
-  if (quorum.size() >= (uint32_t)fastQuorum_) {
-    Reply* committedReply = new Reply(quorum[leaderId]);
     committedReply->set_replytype(MessageType::SLOW_REPLY);
     return committedReply;
   }

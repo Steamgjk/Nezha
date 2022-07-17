@@ -39,7 +39,8 @@ message Reply {
     bytes result = 6;
     uint32 replytype = 7;
     uint32 owd = 8;
-    uint32 syncedlogid = 9; // use this value to piggyback slow-reply
+    uint32 syncedlogid = 9; // Leader: it is the log id of this request; 
+                            // Follower: this is the largest syncedlogid of my synced logs
     TimeStats t = 10;
 }
 
