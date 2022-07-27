@@ -1,8 +1,6 @@
 print-config: true
 proxy-info:
-  proxy-ips:
-    - 10.128.2.23
-    - 10.128.2.24
+  proxy-ips: []
   proxy-shards: 24
   request-port-base: 32000
 client-info:

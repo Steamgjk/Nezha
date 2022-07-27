@@ -48,7 +48,7 @@ class Endpoint {
    * https://metacpan.org/dist/EV/view/libev/ev.pod) */
   Endpoint(const std::string& ip = "", const int port = -1,
            const bool isMasterReceiver = false);
-  ~Endpoint();
+  virtual ~Endpoint();
 
   /** Send the message to the specific destination. The method needs to know the
    * message type (3rd parameter) and include such information in the buffer */

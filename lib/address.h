@@ -29,8 +29,7 @@ class Address {
       : ip_(addr.ip_), port_(addr.port_), mac_(addr.mac_) {
     memcpy(&addr_, &(addr.addr_), sizeof(struct sockaddr_in));
   }
-  Address(const std::string& ip, const int port,
-          const std::string& mac = std::string(""));
+  Address(const std::string& ip, const int port, const std::string& mac = "");
   ~Address();
 
   std::string GetIPAsString();

@@ -315,18 +315,18 @@ void Proxy::CheckQuorumTd(const int id) {
 
           // LOG(INFO) << "reqId=" << committedAck->reqid()
           //           << "\t type=" << committedAck->replytype();
-          replyNum++;
-          if (replyNum == 1) {
-            startTime = GetMicrosecondTimestamp();
-          } else if (replyNum % 100000 == 0) {
-            endTime = GetMicrosecondTimestamp();
-            float rate = 100000 / ((endTime - startTime) * 1e-6);
-            LOG(INFO) << "id=" << id << "\t"
-                      << "replyNum=" << replyNum << "\t"
-                      << "rate = " << rate << "\t"
-                      << "uncommittedLen = " << uncommittedReply.size();
-            startTime = endTime;
-          }
+          // replyNum++;
+          // if (replyNum == 1) {
+          //   startTime = GetMicrosecondTimestamp();
+          // } else if (replyNum % 100000 == 0) {
+          //   endTime = GetMicrosecondTimestamp();
+          //   float rate = 100000 / ((endTime - startTime) * 1e-6);
+          //   LOG(INFO) << "id=" << id << "\t"
+          //             << "replyNum=" << replyNum << "\t"
+          //             << "rate = " << rate << "\t"
+          //             << "uncommittedLen = " << uncommittedReply.size();
+          //   startTime = endTime;
+          // }
         } else if (committedAck != NULL && committedAck->replytype() == 0) {
           // record in uncommittedRequests
           uncommittedReply[committedAck->logid()] = committedAck;
