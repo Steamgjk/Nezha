@@ -25,7 +25,6 @@ Each module is composed of three files:
 
 Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) to get its full configuration, the sample configuration files are placed in the configs folder
 
-Stale files and experiemental files are put into archive folder, and will be deleted finally.
 
 
 ## Install Dependencies
