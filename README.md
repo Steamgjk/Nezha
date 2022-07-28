@@ -157,7 +157,7 @@ Refer to [our paper](https://arxiv.org/pdf/2206.03285.pdf) for the relevant perf
 
 
 ## Authors and Acknowledgment
-Nezha project is developed and maintained by [Jinkun Geng](https://steamgjk.github.io/) and his three supervisors, i.e., [Prof. Anirudh Sivaraman] (https://cs.nyu.edu/~anirudh/),[Prof. Balaji Prabhakar](https://web.stanford.edu/~balaji/), and [Prof. Mendel Rosenblum](http://web.stanford.edu/~mendel/).
+Nezha project is developed and maintained by [Jinkun Geng](https://steamgjk.github.io/) and his three supervisors, i.e., [Prof. Anirudh Sivaraman](https://cs.nyu.edu/~anirudh/), [Prof. Balaji Prabhakar](https://web.stanford.edu/~balaji/) and [Prof. Mendel Rosenblum](http://web.stanford.edu/~mendel/).
 
 We are fortunate to get the help from many researchers during the development of Nezha. Below we list the acknowledge them according to the timeline.
 
