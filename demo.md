@@ -1,5 +1,5 @@
 
-## One-Box Demo
+## Single-Machine Test (All-In-One-Box)
 We have prepared the configuration files in ```configs``` folder, these configuration files will be used to launch 3 replicas, 1 proxy and 1 client.
 
 - nezha-replica-config-0.yaml 
