@@ -171,7 +171,7 @@ We are fortunate to get the help from many researchers during the development of
 
 [Prof. Zhaoguo Wang](https://ipads.se.sjtu.edu.cn/pub/members/zhaoguo_wang) shared with us the experience in testing Raft.
 
-The [Derecho team](https://derecho-project.github.io/) (Prof. Ken Birman, Dr. Weijia Song, Dr. Sagar Jha, Dr. Lorenzo Rosa, etc) offered technical support and technical discussion during our measurement of Derecho.
+The [Derecho team](https://derecho-project.github.io/) (Prof. Ken Birman, Dr. Weijia Song, Dr. Sagar Jha, Dr. Lorenzo Rosa, etc) offered technical support and discussion during our measurement of Derecho.
 
 The [ClockWork](https://www.clockwork.io/) Staff (Dr. Yilong Geng and Dr. Deepak Merugu) offered technical support in deploying Huygens. Dr. Deepak Merugu also gave suggestions on the coding-styles of Nezha codebase. Katie Gioioso provided feedback on Nezha design. Bhagirath Mehta participated in the single-machine test of Nezha.
 
