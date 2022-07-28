@@ -5,91 +5,6 @@ Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks [[pre
 
 An early presentation of Nezha was made at [Stanford Platform Lab Winter Review 2022](https://platformlab.stanford.edu/winter-review/platform-lab-winter-review-2022/) [[slides](https://platformlab.stanford.edu/wp-content/uploads/2022/03/Jinkun-Geng.pdf)]
 
-## Install Dependencies
-
-### Machine Requirement
-
-We are using Ubuntu 20.04.4 LTS as the operating system. To run the single-machine test, please choose a beefy machine (e.g. 32-CPU VM).
-
-### Install Essentials
-
-**Reminder:** Sometimes the code block can break if you directly copy them to the terminal and run in batch. I recommend you run the shell command line by line. 
-```
-# Ubuntu 20.04.4 LTS
-sudo apt update
-sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake libssl-dev libboost-all-dev
-sudo apt install -y libgflags-dev  libgoogle-glog-dev  
-# We are using libprotoc 3.6.1, newer version should also work
-sudo apt install -y protobuf-compiler
-protoc --version
-```
-
-
-### Install yaml-cpp
-
-Please follow the [official instructions](https://github.com/jbeder/yaml-cpp) or run the following commands
-
-```
-git clone https://github.com/jbeder/yaml-cpp.git
-cd yaml-cpp && mkdir build && cd build 
-cmake ..
-make && sudo make install
-cd $HOME
-```
-
-
-### Install libev
-```
-git clone https://github.com/enki/libev.git
-chmod -R 777 libev
-cd libev && sudo ./autogen.sh 
-./configure && make && sudo make install
-cd $HOME
-```
-
-### Install concurrent queue
-It is a single-file library, we only need concurrentqueue.h
-```
-git clone https://github.com/cameron314/concurrentqueue.git
-sudo cp concurrentqueue/concurrentqueue.h /usr/local/include/
-cd $HOME
-```
-
-### Install junction and turf
-```
-git clone https://github.com/preshing/junction.git
-git clone https://github.com/preshing/turf.git
-cd junction
-mkdir build
-cd build
-cmake ..
-make
-# it will install turf and junction together in /usr/local/lib
-sudo make install
-cd $HOME
-```
-
-### Install bazel 5.2.0 
-Please follow the [instructions](https://bazel.build/install/ubuntu#install-on-ubuntu), or simply run the following commands
-
-```
-sudo apt install -y apt-transport-https curl gnupg
-curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
-sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-sudo apt update
-sudo apt install -y bazel-5.2.0
-sudo mv /usr/bin/bazel-5.2.0 /usr/bin/bazel
-bazel --version
-cd $HOME
-```
-
-### Refresh Dependency Links
-After all libs above have been installed, run the following command to create the necessary links
-```
-sudo ldconfig
-```
-
 ## Clone Project
 
 ```
@@ -112,6 +27,14 @@ Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) 
 
 Stale files and experiemental files are put into archive folder, and will be deleted finally.
 
+
+## Install Dependencies
+
+We have packaged the installation of all depencies into one script. Please check [install-dep.sh](script/install-dep.sh) for the detailed dependencies we require.
+
+```
+./scripts/install-dep.sh
+```
 
 ## Build Nezha with Bazel
 
