@@ -30,7 +30,7 @@ Stale files and experiemental files are put into archive folder, and will be del
 
 ## Install Dependencies
 
-We have packaged the installation of all depencies into one script. Please check [install-dep.sh](script/install-dep.sh) for the detailed dependencies we require.
+We have packaged the installation of all depencies into one script. Please check [install-dep.sh](./scripts/install-dep.sh) for the detailed dependencies we require.
 
 ```
 ./scripts/install-dep.sh
