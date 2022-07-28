@@ -3,31 +3,60 @@
 Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks [[preprint](https://arxiv.org/pdf/2206.03285.pdf)]
 
 
+An early presentation of Nezha was made at [Stanford Platform Lab Winter Review 2022](https://platformlab.stanford.edu/winter-review/platform-lab-winter-review-2022/) [[slides](https://platformlab.stanford.edu/wp-content/uploads/2022/03/Jinkun-Geng.pdf)]
 
 ## Install Dependencies
 
+### Machine Requirement
+
+We are using Ubuntu 20.04.4 LTS as the operating system. To run the single-machine test, please choose a beefy machine (e.g. 32-CPU VM).
+
+### Install Essentials
+
+**Reminder:** Sometimes the code block can break if you directly copy them to the terminal and run in batch. I recommend you run the shell command line by line. 
 ```
 # Ubuntu 20.04.4 LTS
 sudo apt update
 sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake libssl-dev libboost-all-dev
+sudo apt install -y libgflags-dev  libgoogle-glog-dev  
+# We are using libprotoc 3.6.1, newer version should also work
+sudo apt install -y protobuf-compiler
+protoc --version
+```
 
-# install protobuf (3.20.1-rc1). Please follow the instructions at https://github.com/protocolbuffers/protobuf/blob/main/src/README.md 
-# Install protobuf from source code (because apt install gives an old version)
 
-# install yamlcpp. Please follow the instructions at https://github.com/jbeder/yaml-cpp
+### Install yaml-cpp
 
-# install libev
+Please follow the [official instructions](https://github.com/jbeder/yaml-cpp) or run the following commands
+
+```
+git clone https://github.com/jbeder/yaml-cpp.git
+cd yaml-cpp && mkdir build && cd build 
+cmake ..
+make && sudo make install
+cd $HOME
+```
+
+
+### Install libev
+```
 git clone https://github.com/enki/libev.git
 chmod -R 777 libev
 cd libev && sudo ./autogen.sh 
 ./configure && make && sudo make install
+cd $HOME
+```
 
-# install concurrent queue, it is a single-file library, we only need concurrentqueue.h
+### Install concurrent queue
+It is a single-file library, we only need concurrentqueue.h
+```
 git clone https://github.com/cameron314/concurrentqueue.git
 sudo cp concurrentqueue/concurrentqueue.h /usr/local/include/
+cd $HOME
+```
 
-
-# install junction and the turf
+### Install junction and turf
+```
 git clone https://github.com/preshing/junction.git
 git clone https://github.com/preshing/turf.git
 cd junction
@@ -37,28 +66,34 @@ cmake ..
 make
 # it will install turf and junction together in /usr/local/lib
 sudo make install
+cd $HOME
+```
 
-# install glog (I recommend install from source, the apt install have some problems) https://github.com/google/glog
-# install gflag 
-sudo apt-get install libgflags-dev -y
+### Install bazel 5.2.0 
+Please follow the [instructions](https://bazel.build/install/ubuntu#install-on-ubuntu), or simply run the following commands
 
-# install bazel 5.2.0, please follow the instructions at https://bazel.build/install/ubuntu#install-on-ubuntu
-
-sudo apt install apt-transport-https curl gnupg -y
+```
+sudo apt install -y apt-transport-https curl gnupg
 curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
 sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-
 sudo apt update
-sudo apt install bazel-5.2.0
+sudo apt install -y bazel-5.2.0
 sudo mv /usr/bin/bazel-5.2.0 /usr/bin/bazel
+bazel --version
+cd $HOME
+```
 
+### Refresh Dependency Links
+After all libs above have been installed, run the following command to create the necessary links
+```
+sudo ldconfig
 ```
 
 ## Clone Project
 
 ```
-git clone  https://gitlab.com/steamgjk/nezhav2.git
+git clone --depth=1 https://gitlab.com/steamgjk/nezhav2.git
 ```
 
 
@@ -69,9 +104,9 @@ The core part includes three modules (folders), i.e.,
 - client 
 
 Each module is composed of three files: 
-- a header file (e.g., nezha-replica.h), 
-- a source implementation file (nezha-replica.cc), 
-- a launching file (e.g., nezha-replica-run.cc). 
+- a header file (e.g., replica.h), 
+- a source implementation file (replica.cc), 
+- a launching file (e.g., replica_run.cc). 
 
 Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) to get its full configuration, the sample configuration files are placed in the configs folder
 
@@ -82,9 +117,8 @@ Stale files and experiemental files are put into archive folder, and will be del
 
 Since Bazel is becoming popular, we have migrated nezha from Makefile-based building system to the bazel building system. The bazel version in use is 5.2.0
 
-
 ```
-    cd nezhav2 && bazel build //...
+cd nezhav2 && bazel build //...
 ```
 
 
@@ -92,71 +126,63 @@ After building the project successfully, the executable files will be generated 
 
 
 
-## All-in-One-Box Test
+## Single-Machine Tests
 
-We briefly describe the commands to launch the all-in-one-box test.
+Please refer to [the single-machine instructions](docs/demo.md) to run Nezha under various scenarios (view change, request commit, recovery from failure of replica).
 
-The readers can also refer to [more detailed instructions](demo.md) to run the one-box demo.
+## Multi-Machine Tests
 
-```
-# Launch one beefy machine (e.g., with 16 or 32 CPUs)
-# Launch 3 replicas (All the configuration info is written in ONE yaml file)
-GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml
-GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-1.yaml
-GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-2.yaml
-
-# GLOG_v is the flag provided by glog, which allows users to specify the verbose level of logs. It can be completely removed if the user does not want to see too many logs
-
-# Launch 1 proxy
-GLOG_v=2 nezhav2/bazel-bin/proxy/nezha_proxy --config nezhav2/configs/nezha-proxy-config.yaml
-
-# Lauch 1 client
-GLOG_v=2 nezhav2/bazel-bin/client/nezha_client  --config nezhav2/configs/nezha-client-config.yaml
-
-
-# Kill 1 replica (the leader, Replica-0), Crtl+C 
-
-# We can see the remaining 2 replicas do the view change.
-# The 2 replicas enter a new view (viewId=1), with Replica-1 as the leader
-
-# Relaunch Replica-0 to rejoin as one follower
-GLOG_v=2 nezhav2/bazel-bin/replica/nezha_replica --config nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
-
-# Add the flag --isRecovering true to indicate it is recovering
-
-```
-
-
+We use [scripts/launch.py](scripts/launch.py) to conduct distributed tests across multiple machines. After the tests have completed, [scripts/analysis.py](scripts/analysis.py) is used to analyze the results to generate performance numbers. The current scripts only support Google Cloud Platform (GCP). They require GCP credentials to create and delete VMs on GCP.
 
 
 ## Important Configuration Parameters
 ### Replica
-- replica-ips must include 2f+1 ips
-- replica-id starts from 0 to 2f
-- index-transfer-batch, request-key-transfer-batch, request-transfer-batch. The values of the three <em>batch parameters</em> should be carefully chosen in order not to overflow the [maximum size of UDP packets](https://stackoverflow.com/questions/1098897/what-is-the-largest-safe-udp-packet-size-on-the-internet). 
+- ```replica-ips``` must include 2f+1 ips
+- ```replica-id``` starts from 0 to 2f
+- ```index-transfer-batch```, ```request-key-transfer-batch```, ```request-transfer-batch```. The values of the three <em>batch parameters</em> should be carefully chosen in order not to overflow the [maximum size of UDP packets](https://stackoverflow.com/questions/1098897/what-is-the-largest-safe-udp-packet-size-on-the-internet). 
 
-### Client
-- is-openloop: We support two types of clients, i.e., open-loop clients and closed-loop clients. When this flag is true, --poission-rate becomes meaningful.
-- skew-factor and key-number decides the workload, which further affects the commutativity optimization
+### Clients
+- We support two types of clients, i.e., open-loop clients and closed-loop clients.
+- Open-loop clients generate requests according to a Poisson process configured with a specific rate.
+- Closed-loop clients use a sliding window protocol to keep a fixed number of requests in flight at any given time, release a new request when an old one is completed.
+- ```is-openloop```:  When this flag is true, --poission-rate becomes meaningful.
+- ```skew-factor``` and key-number decides the workload, which further affects the commutativity optimization
 
 ### Proxy
-- shard-num decides how many threads will be launched. 1 shard includes 1 forwarding thread to forward client requests to replicas and 1 replying thread to receive and replies from replicas and does quorum check
-- max-owd  is used in the clamping function to estimate one-way delay, more details are described in Sec 4 [Adpative latency bound] of the paper.
+- ```shard-num``` decides how many threads will be launched. 1 shard includes 1 forwarding thread to forward client requests to replicas and 1 replying thread to receive and replies from replicas and does quorum check
+- ```max-owd```  is used in the clamping function to estimate one-way delay, more details are described in Sec 4 [Adpative latency bound] of the paper.
 
 ## Performance Benchmark
-To be continued
+Refer to [our paper](https://arxiv.org/pdf/2206.03285.pdf) for the relevant performance stats. Compared with the experimental version, we have refactored the codebase with some higher-performance libraries (e.g. libev instead of libevent) and data structures (e.g., ConcurrentMap and ConcurrentQueue). The performance will be slightly better than the original version. New benchmark data will be updated soon. 
 
 
 ## Authors and Acknowledgment
-Show your appreciation to those who have contributed to the project.
+Nezha project is developed and maintained by [Jinkun Geng](https://steamgjk.github.io/) and his three supervisors, i.e., [Prof. Anirudh Sivaraman] (https://cs.nyu.edu/~anirudh/),[Prof. Balaji Prabhakar](https://web.stanford.edu/~balaji/), and [Prof. Mendel Rosenblum](http://web.stanford.edu/~mendel/).
+
+We are fortunate to get the help from many researchers during the development of Nezha. Below we list the acknowledge them according to the timeline.
+
+[Dr. Shiyu Liu](https://web.stanford.edu/~shiyuliu/) and [Dr. Feiran Wang](https://www.linkedin.com/in/feiran-wang/) joined the early discussion of Nezha. Feiran explained the details of Craft and Shiyu explained Huygens and other clock sync solutions.
+
+[Prof. Dan Ports](https://drkp.net/), [Prof. Jialin Li](https://www.comp.nus.edu.sg/~lijl/) and [Dr. Ellis Michael](https://ellismichael.com/) provided helpful discussion related to Speculative Paxos and NOPaxos. Dan also gave us the pointer to crash vector and diskless recovery. 
+
+[Prof. Jinyang Li](http://www.news.cs.nyu.edu/~jinyang/) listened to our early presentation of Nezha, and gave some useful feedback.
+
+[Dr. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability. Seo Jin also provided explanation about CURP.
+
+[Prof. Zhaoguo Wang](https://ipads.se.sjtu.edu.cn/pub/members/zhaoguo_wang) shared with us the experience in testing Raft.
+
+The [Derecho team](https://derecho-project.github.io/) (Prof. Ken Birman, Dr. Weijia Song, Dr. Sagar Jha, Dr. Lorenzo Rosa, etc) offered technical support and technical discussion during our measurement of Derecho.
+
+The [ClockWork](https://www.clockwork.io/) Staff (Dr. Yilong Geng and Dr. Deepak Merugu) offered technical support in deploying Huygens. Dr. Deepak Merugu also gave suggestions on the coding-styles of Nezha codebase. Katie Gioioso provided feedback on Nezha design. Bhagirath Mehta participated in the single-machine test of Nezha.
+
+
 
 ## License
-For open source projects, say how it is licensed.
+Please refer to [license.md](license.md)
 
-## Project Status
-I have just completed some basic tests in distributed and one-box setting (3 replicas + 1 proxy + 1 client). The normal workflow, leader failure and election, replica rejoin work fine. Performance tests have not been conducted, because more bugs are expected to show up as the test cases become more complex. I will continue to 
+## Future Plan
 
-(1) Conduct more tests to make the functionality robust, and then go on to measure the performance
+(1) Conduct more functionality and performance tests to make Nezha more robust and optimized
 
-(2) Clean the codebase and add more optimizations
+(3) Support grpc-based communication primitive, and further replace [the etcd backend for Kubenetes](https://learnk8s.io/etcd-kubernetes).
 
