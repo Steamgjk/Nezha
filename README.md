@@ -75,7 +75,7 @@ We use [scripts/launch.py](scripts/launch.py) to conduct distributed tests acros
 - ```max-owd```  is used in the clamping function to estimate one-way delay, more details are described in Sec 4 [Adpative latency bound] of the paper.
 
 ## Performance Benchmark
-Refer to [our paper](https://arxiv.org/pdf/2206.03285.pdf) for the relevant performance stats. Compared with the experimental version, we have refactored the codebase with some higher-performance libraries (e.g. libev instead of libevent) and data structures (e.g., ConcurrentMap and ConcurrentQueue). The performance will be slightly better than the original version. New benchmark data will be updated soon. 
+Refer to [our paper](https://arxiv.org/pdf/2206.03285.pdf) for the relevant performance stats. Compared with the experimental version, we have refactored the codebase with some higher-performance libraries (e.g. libev instead of libevent) and data structures (e.g., ConcurrentMap and ConcurrentQueue). Besides, we have also conducted further optimization with the pipeline. The performance will be somewhat better than the original version used in the paper. New benchmark data will be updated soon. 
 
 
 ## Authors and Acknowledgment
