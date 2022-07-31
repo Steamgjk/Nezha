@@ -81,7 +81,7 @@ Refer to [our paper](https://arxiv.org/pdf/2206.03285.pdf) for the relevant perf
 ## Authors and Acknowledgment
 Nezha project is developed and maintained by [Jinkun Geng](https://steamgjk.github.io/) and his three supervisors, i.e., [Prof. Anirudh Sivaraman](https://cs.nyu.edu/~anirudh/), [Prof. Balaji Prabhakar](https://web.stanford.edu/~balaji/) and [Prof. Mendel Rosenblum](http://web.stanford.edu/~mendel/).
 
-We are fortunate to get the help from many researchers during the development of Nezha. Below we list the acknowledge them according to the timeline.
+We are fortunate to get the help from many researchers during the development of Nezha. Below we list and acknowledge them according to the timeline.
 
 [Dr. Shiyu Liu](https://web.stanford.edu/~shiyuliu/) and [Dr. Feiran Wang](https://www.linkedin.com/in/feiran-wang/) joined the early discussion of Nezha. Feiran explained the details of Craft and Shiyu explained Huygens and other clock sync solutions.
 
@@ -89,13 +89,18 @@ We are fortunate to get the help from many researchers during the development of
 
 [Prof. Jinyang Li](http://www.news.cs.nyu.edu/~jinyang/) listened to our early presentation of Nezha, and gave some useful feedback.
 
-[Dr. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability. Seo Jin also provided explanation about CURP.
+[Dr. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability. Seo Jin also provided some explanation about CURP.
 
-[Prof. Zhaoguo Wang](https://ipads.se.sjtu.edu.cn/pub/members/zhaoguo_wang) shared with us the experience in testing Raft.
+[Prof. Zhaoguo Wang](https://ipads.se.sjtu.edu.cn/pub/members/zhaoguo_wang) shared with us his experience in testing Raft.
 
 The [Derecho team](https://derecho-project.github.io/) (Prof. Ken Birman, Dr. Weijia Song, Dr. Sagar Jha, Dr. Lorenzo Rosa, etc) offered technical support and discussion during our measurement of Derecho.
 
 The [ClockWork](https://www.clockwork.io/) Staff (Dr. Yilong Geng and Dr. Deepak Merugu) offered technical support in deploying Huygens. Dr. Deepak Merugu also gave suggestions on the coding-styles of Nezha codebase. Katie Gioioso provided feedback on Nezha design. Bhagirath Mehta participated in the single-machine test of Nezha.
+
+[Prof. Eugene Wu](http://www.cs.columbia.edu/~ewu/) provided suggestions on the revision of Nezha paper.
+
+[Prof. Aurojit Panda](https://cs.nyu.edu/~apanda/) discussed with us about Nezha's correctness during leader change. Aurojit reviewed our draft and offered some constructive suggestions on the revision.
+
 
 
 
