@@ -89,7 +89,7 @@ We are fortunate to get the help from many researchers during the development of
 
 [Prof. Jinyang Li](http://www.news.cs.nyu.edu/~jinyang/) listened to our early presentation of Nezha, and gave some useful feedback.
 
-[Dr. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability. Seo Jin also provided some explanation about CURP.
+[Prof. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability. Seo Jin also provided some explanation about CURP.
 
 [Prof. Zhaoguo Wang](https://ipads.se.sjtu.edu.cn/pub/members/zhaoguo_wang) shared with us his experience in testing Raft.
 
