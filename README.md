@@ -83,13 +83,13 @@ Nezha project is developed and maintained by [Jinkun Geng](https://steamgjk.gith
 
 We are fortunate to get the help from many researchers during the development of Nezha. Below we list and acknowledge them according to the timeline.
 
-[Dr. Shiyu Liu](https://web.stanford.edu/~shiyuliu/) and [Dr. Feiran Wang](https://www.linkedin.com/in/feiran-wang/) joined the discussion during the early design of Nezha. Feiran explained the details of Craft and Shiyu explained Huygens and other clock sync solutions.
+[Dr. Shiyu Liu](https://web.stanford.edu/~shiyuliu/) and [Dr. Feiran Wang](https://www.linkedin.com/in/feiran-wang/) joined the discussion during the early design of Nezha. Feiran explained the details of CRaft and the related correctness properties.  Shiyu explained the principles of Huygens and the other clock sync solutions.
 
 [Prof. Dan Ports](https://drkp.net/), [Prof. Jialin Li](https://www.comp.nus.edu.sg/~lijl/) and [Dr. Ellis Michael](https://ellismichael.com/) provided helpful discussion related to Speculative Paxos and NOPaxos. Dan also gave us the pointer to crash vector and diskless recovery. 
 
 [Prof. Jinyang Li](http://www.news.cs.nyu.edu/~jinyang/) listened to our early presentation of Nezha, and gave some useful feedback.
 
-[Prof. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability. Seo Jin also provided some explanation about CURP.
+[Prof. Seo Jin Park](https://seojinpark.net/) discussed with us about the definition of linearizability and other correctness properties. Seo Jin also provided some explanation about CURP.
 
 [Prof. Zhaoguo Wang](https://ipads.se.sjtu.edu.cn/pub/members/zhaoguo_wang) shared with us his experience in testing Raft.
 
@@ -100,6 +100,8 @@ The [ClockWork](https://www.clockwork.io/) Staff (Dr. Yilong Geng and Dr. Deepak
 [Prof. Eugene Wu](http://www.cs.columbia.edu/~ewu/) provided suggestions on the revision of Nezha paper.
 
 [Prof. Aurojit Panda](https://cs.nyu.edu/~apanda/) discussed with us about Nezha's correctness during leader change. Aurojit reviewed our draft and offered some constructive suggestions on the revision.
+
+The [Raft community](https://groups.google.com/u/1/g/raft-dev/c/SmnAvZMufB0) offered much insightful discussion for us. Many community members discussed with us and helped to justify our design decisions about Nezha.
 
 
 
