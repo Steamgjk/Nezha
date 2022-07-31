@@ -83,7 +83,7 @@ Nezha project is developed and maintained by [Jinkun Geng](https://steamgjk.gith
 
 We are fortunate to get the help from many researchers during the development of Nezha. Below we list and acknowledge them according to the timeline.
 
-[Dr. Shiyu Liu](https://web.stanford.edu/~shiyuliu/) and [Dr. Feiran Wang](https://www.linkedin.com/in/feiran-wang/) joined the early discussion of Nezha. Feiran explained the details of Craft and Shiyu explained Huygens and other clock sync solutions.
+[Dr. Shiyu Liu](https://web.stanford.edu/~shiyuliu/) and [Dr. Feiran Wang](https://www.linkedin.com/in/feiran-wang/) joined the discussion during the early design of Nezha. Feiran explained the details of Craft and Shiyu explained Huygens and other clock sync solutions.
 
 [Prof. Dan Ports](https://drkp.net/), [Prof. Jialin Li](https://www.comp.nus.edu.sg/~lijl/) and [Dr. Ellis Michael](https://ellismichael.com/) provided helpful discussion related to Speculative Paxos and NOPaxos. Dan also gave us the pointer to crash vector and diskless recovery. 
 
