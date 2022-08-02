@@ -1,6 +1,6 @@
 # Nezhav2
 
-Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks [[preprint](https://arxiv.org/pdf/2206.03285.pdf)]
+Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks [[preprint](docs/Nezha-technical-report.pdf)]
 
 
 An early presentation of Nezha was made at [Stanford Platform Lab Winter Review 2022](https://platformlab.stanford.edu/winter-review/platform-lab-winter-review-2022/) [[slides](https://platformlab.stanford.edu/wp-content/uploads/2022/03/Jinkun-Geng.pdf)]
