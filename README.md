@@ -3,7 +3,7 @@
 <img src="docs/nezha-img.jpeg" width="200">
 
 ----
-Nezha (哪吒) is a legendary figure in Chinese mythology. Nezha has 3 heads and 6 arms, which achieves much better fault tolerance than ordinary persons :)
+Nezha (哪吒) is a legendary figure in Chinese mythology. Nezha has 3 heads and 6 arms, which achieves much better fault tolerance than ordinary people :)
 
 ## Paper and Presentation
 Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks (12 pages) [[preprint](docs/Nezha-vldb-v4-3.pdf)]
