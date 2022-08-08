@@ -305,8 +305,8 @@ class Replica {
 
   /** To communinicate between ProcessTd and FastReplyTd */
   std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
-  // /** To communinicate between ProcessTd and SlowReplyTd */
-  // std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
+  /** To communinicate between ProcessTd and SlowReplyTd */
+  std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
   /** To communicate between ReceiveTd and OWDCalcTd (Transmit <proxyId, owd>)
    */
   ConcurrentQueue<std::pair<uint64_t, uint32_t>> owdQu_;
