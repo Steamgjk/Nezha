@@ -711,7 +711,6 @@ void Replica::ReceiveTd(int id) {
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
   LOG(INFO) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";
-  ;
 }
 
 void Replica::RecordTd(int id) {
