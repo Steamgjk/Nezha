@@ -972,7 +972,7 @@ void Replica::FastReplyTd(int id, int cvId) {
       reply.set_owd(owdMap_.get(entry->body.proxyId));
 
       SHA_HASH hash(entry->hash);
-      // hash.XOR(cv->cvHash_);
+      hash.XOR(cv->cvHash_);
       if (amLeader) {
         // Leader's logic is very easy: after XORing the crashVector and the
         // log entry hash together, it can directly reply
