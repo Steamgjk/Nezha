@@ -10,9 +10,7 @@ message Request {
     bytes command=5;
     uint64 proxyid = 6;
     uint32 key = 7;
-    uint64 clienttime = 8;
-    uint64 replicatime = 9;
-    uint64 tagid = 10;
+    bool iswrite = 8;
 }
 
 message RequestBodyMsg {
@@ -21,6 +19,7 @@ message RequestBodyMsg {
     uint64 proxyid = 3;
     bytes command = 4;
     uint32 key = 5;
+    bool iswrite = 6;
 }
 message TimeStats {
     uint64 clienttime = 1;
@@ -41,6 +40,8 @@ message Reply {
     uint32 owd = 8;
     uint32 maxsyncedlogid = 9; // This is the largest syncedlogid of my synced logs
     uint32 logid = 10; // only set by the leader, it is the log id of the entry replied
+    bool iswrite = 11;
+    uint32 opkey = 12;
 }
 
 message IndexSync {
