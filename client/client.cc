@@ -68,7 +68,9 @@ Client::Client(const std::string& configFile) {
   /** Generate zipfian workload */
   int keyNum = clientConfig_["client-info"]["key-num"].as<int>();
   float skewFactor = clientConfig_["client-info"]["skew-factor"].as<float>();
-  LOG(INFO) << "keyNum=" << keyNum << "\tskewFactor=" << skewFactor;
+  writeRatio_ = clientConfig_["client-info"]["write-ratio"].as<float>();
+  LOG(INFO) << "keyNum=" << keyNum << "\tskewFactor=" << skewFactor
+            << "\twriteRatio=" << writeRatio_;
   zipfianKeys_.resize(1000000, 0);
   retryTimeoutus_ =
       clientConfig_["client-info"]["request-retry-time-us"].as<uint32_t>();
@@ -87,6 +89,8 @@ Client::Client(const std::string& configFile) {
   nextReqId_ = 1;
   retryNumber_ = 0;
   committedNum_ = 0;
+  fastCommitNum_ = 0;
+  fastWriteNum_ = 0;
 }
 
 void Client::Run() {
@@ -179,6 +183,39 @@ void Client::ReceiveReply(MessageHeader* msgHdr, char* msgBuffer,
   if (msgHdr->msgType == MessageType::COMMIT_REPLY &&
       reply.ParseFromArray(msgBuffer, msgHdr->msgLen)) {
     committedNum_++;
+    if (reply.replytype() == MessageType::FAST_REPLY) {
+      fastCommitNum_++;
+      if (reply.iswrite()) {
+        fastWriteNum_++;
+      }
+    }
+
+    // if (committedNum_ % 100000 == 0) {
+    //   LOG(INFO) << "commitNum=" << committedNum_
+    //             << "\tfastWriteNum_=" << fastWriteNum_
+    //             << "\tFastCommitNum=" << fastCommitNum_ <<
+    //             "\tWriteRatioCommit="
+    //             << (fastWriteNum_ * 100.0 / fastCommitNum_)
+    //             << "\t fastRatio=" << (fastCommitNum_ * 100.0 /
+    //             committedNum_);
+    // }
+
+    if (committedReqId_ < reply.reqid()) {
+      committedReqId_ = reply.reqid();
+      // // LOG(INFO) << "committedReqId_=" << committedReqId_;
+      // uint64_t st = outstandingRequestSendTime_.get(reply.reqid());
+      // uint64_t et = GetMicrosecondTimestamp();
+      // ls.push_back((et - st));
+      // if (ls.size() >= 1000) {
+      //   for (uint32_t i = 0; i < 1000; i++) {
+      //     printf("%u\t", ls[i]);
+      //     if (i % 20 == 0) {
+      //       printf("\n");
+      //     }
+      //   }
+      //   exit(0);
+      // }
+    }
     uint64_t sendTime = outstandingRequestSendTime_.get(reply.reqid());
     if (sendTime > 0) {
       /** The corresponding request has not been committed, because it is still
@@ -207,6 +244,7 @@ void Client::OpenLoopSubmissionTd() {
       startTime +
       clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
 
+  srandom(clientId_);
   endTime += 10 * 1000ul * 1000ul;
   LOG(INFO) << "Expected to end at " << endTime;
   // Poisson rate is ``10ms as one unit''
@@ -237,7 +275,6 @@ void Client::OpenLoopSubmissionTd() {
           roundRobinIdx % (proxyAddrs_.size() * proxyAddrs_[0].size());
       Request* request = NULL;
       if (retryQu_.try_dequeue(request)) {
-        request->set_clienttime(GetMicrosecondTimestamp());  // To Delete
         // Retry this request
         Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()]
                                              [mapIdx / proxyAddrs_.size()];
@@ -254,10 +291,28 @@ void Client::OpenLoopSubmissionTd() {
         request = new Request();
         request->set_clientid(clientId_);
         request->set_reqid(nextReqId_);
-        request->set_command("");
+        if (random() % 100 < 100 * writeRatio_) {
+          request->set_iswrite(true);
+        } else {
+          request->set_iswrite(false);
+        }
+
         request->set_key(zipfianKeys_[nextReqId_ % zipfianKeys_.size()]);
+        // // if (nextReqId_ % 10 == 1 && clientId_ <= 10) {
+        // if (clientId_ <= 12) {
+        //   if (nextReqId_ % 2 == 1)
+        //     request->set_iswrite(true);
+        //   else
+        //     request->set_iswrite(false);
+
+        //   // request->set_iswrite(true);
+        //   // LOG(INFO) << "One Write " << request->key()
+        //   //           << " reqId=" << request->reqid();
+        // } else {
+        //   exit(0);
+        // }
+
         // request->set_key(nextReqId_ % 100000 + 100000 * (clientId_ - 1));
-        request->set_clienttime(GetMicrosecondTimestamp());  // To Delete
         Address* roundRobinAddr = proxyAddrs_[mapIdx % proxyAddrs_.size()]
                                              [mapIdx / proxyAddrs_.size()];
         // LOG(INFO) << "Sed " << request->reqid() << "to "
@@ -291,6 +346,7 @@ void Client::CloseLoopSubmissionTd() {
       clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
   endTime += 10 * 1000ul * 1000ul;
   LOG(INFO) << "Expected to end at " << endTime;
+  srand(clientId_);
   while (running_) {
     if (GetMicrosecondTimestamp() >= endTime) {
       // Client has executed long enough, should terminate
@@ -306,7 +362,11 @@ void Client::CloseLoopSubmissionTd() {
       request = new Request();
       request->set_clientid(clientId_);
       request->set_reqid(nextReqId_);
-      request->set_command("");
+      if (random() % 100 < 100 * writeRatio_) {
+        request->set_iswrite(true);
+      } else {
+        request->set_iswrite(false);
+      }
       request->set_key(zipfianKeys_[nextReqId_ % zipfianKeys_.size()]);
       Address* roundRobinAddr =
           proxyAddrs_[mapIdx % proxyAddrs_.size()][mapIdx / proxyAddrs_.size()];
@@ -352,7 +412,7 @@ void Client::LogTd() {
   startTime = GetMicrosecondTimestamp();
   while (running_) {
     endTime = GetMicrosecondTimestamp();
-    if (endTime - startTime >= 2000000) {
+    if (endTime - startTime >= 5000000) {
       float duration = (endTime - startTime) * 1e-6;
       uint32_t submittedReqNum = nextReqId_ - 1 - lastSubmitteddReqId;
       uint32_t committedReqNum = committedNum_ - lastCountCommitedReq;
@@ -369,6 +429,8 @@ void Client::LogTd() {
                 << "lastCommittedReqId_=" << lastCommittedReqId_ << "\t"
                 << "submissionRate=" << submissionRate << " req/sec\t"
                 << "commitRate=" << commitRate << " req/sec"
+                << "\t"
+                << "FastCommitRatio=" << fastCommitNum_ * 100.0 / committedNum_
                 << "\t"
                 << "latency(Sample)=" << latencySample << " us"
                 << "\t"
@@ -396,21 +458,21 @@ void Client::LogTd() {
       delete log;
     }
 
-    // Check whether any requests need retry
-    for (uint32_t reqId = committedReqId_ + 1; reqId < nextReqId_; reqId++) {
-      uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
-      if (sendTime > 0) {
-        // Find it
-        if (false && GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
-          // timeout, should retry
-          Request* request = outstandingRequests_.get(reqId);
-          VLOG(1) << "Timeout Retry " << request->reqid();
-          outstandingRequestSendTime_.erase(reqId);
-          retryQu_.enqueue(request);
-          retryNumber_++;
-        }
-      }
-    }
+    // // Check whether any requests need retry
+    // for (uint32_t reqId = committedReqId_ + 1; reqId < nextReqId_; reqId++) {
+    //   uint64_t sendTime = outstandingRequestSendTime_.get(reqId);
+    //   if (sendTime > 0) {
+    //     // Find it
+    //     if (GetMicrosecondTimestamp() - sendTime > retryTimeoutus_) {
+    //       // timeout, should retry
+    //       Request* request = outstandingRequests_.get(reqId);
+    //       LOG(INFO) << "Timeout Retry " << request->reqid();
+    //       outstandingRequestSendTime_.erase(reqId);
+    //       retryQu_.enqueue(request);
+    //       retryNumber_++;
+    //     }
+    //   }
+    // }
 
     while (reclaimedReqId_ + 1000 < committedReqId_) {
       // do not reclaim request too aggressive
@@ -424,11 +486,19 @@ void Client::LogTd() {
       reclaimedReqId_++;
     }
   }
+  LOG(INFO) << "The runtime have been terminated, we still need to dump "
+            << logQu_.size_approx() << " Logs before exit";
 
+  uint32_t cnt = 0;
   while (logQu_.try_dequeue(log)) {
     // log stats
     ofs << log->toString() << std::endl;
     delete log;
+    cnt++;
+    if (cnt % 10000 == 0) {
+      LOG(INFO) << "Remaining Log Number " << logQu_.size_approx();
+      ofs.flush();
+    }
   }
   ofs.flush();
   LOG(INFO) << "Dump Finished";

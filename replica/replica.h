@@ -6,6 +6,7 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <condition_variable>
+#include <fstream>
 #include "lib/utils.h"
 #include "proto/nezha_proto.pb.h"
 
@@ -315,6 +316,7 @@ class Replica {
   ConcurrentMap<uint64_t, uint32_t> owdMap_;
   /** To window size used to estimate one-way delay */
   uint32_t slidingWindowLen_;
+  double movingPercentile_;
   std::map<uint64_t, std::vector<uint32_t>> slidingWindow_;  // <proxyid, vec>
   std::map<uint64_t, uint64_t> owdSampleNum_;
 

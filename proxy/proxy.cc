@@ -84,17 +84,17 @@ Proxy::~Proxy() {
     clientIter.next();
   }
 
-  for (uint32_t i = 0; i < committedReplyMap_.size(); i++) {
-    ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[i];
-    ConcurrentMap<uint64_t, Reply*>::Iterator iter(committedReply);
-    while (iter.isValid()) {
-      Reply* reply = iter.getValue();
-      if (reply) {
-        delete reply;
-      }
-      iter.next();
-    }
-  }
+  // for (uint32_t i = 0; i < committedReplyMap_.size(); i++) {
+  //   ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[i];
+  //   ConcurrentMap<uint64_t, Reply*>::Iterator iter(committedReply);
+  //   while (iter.isValid()) {
+  //     Reply* reply = iter.getValue();
+  //     if (reply) {
+  //       delete reply;
+  //     }
+  //     iter.next();
+  //   }
+  // }
 }
 
 int Proxy::CreateSocketFd(const std::string& sip, const int sport) {
@@ -141,8 +141,8 @@ void Proxy::LaunchThreads() {
     threadPool_[key] = new std::thread(&Proxy::ForwardRequestsTd, this, i);
   }
 
-  std::string key = "LogTd";
-  threadPool_[key] = new std::thread(&Proxy::LogTd, this);
+  // std::string key = "LogTd";
+  // threadPool_[key] = new std::thread(&Proxy::LogTd, this);
 }
 
 void Proxy::CalculateLatencyBoundTd() {
@@ -155,7 +155,7 @@ void Proxy::CalculateLatencyBoundTd() {
     LOG(INFO) << "replicaOWD " << i << "\t" << replicaOWDs[i];
   }
   while (running_) {
-    if (owdQu_.try_dequeue(owdSample)) {
+    while (owdQu_.try_dequeue(owdSample)) {
       VLOG(1) << "replica=" << owdSample.first << "\towd=" << owdSample.second;
       replicaOWDs[owdSample.first] = owdSample.second;
       // Update latency bound
@@ -171,6 +171,7 @@ void Proxy::CalculateLatencyBoundTd() {
       latencyBound_.store(estimatedOWD);
       VLOG(1) << "Update bound " << latencyBound_;
     }
+    usleep(5000);
   }
 }
 
@@ -178,7 +179,9 @@ void Proxy::LogTd() {
   Log litem;
   int proxyId = proxyConfig_["proxy-info"]["proxy-id"].as<int>();
   std::ofstream ofs("Proxy-Stats-" + std::to_string(proxyId) + ".csv");
-  ofs << "ReplicaId,ClientTime,ProxyTime,RecvTime,Deadline,FastReplyTime,"
+  ofs << "ReplicaId,ClientId,RequestId,ClientTime,ProxyTime,"
+         "ProxyEndProcessTime,RecvTime,Deadline,"
+         "FastReplyTime,"
          "SlowReplyTime,"
          "ProxyRecvTime,CommitType"
       << std::endl;
@@ -195,11 +198,12 @@ void Proxy::LogTd() {
 }
 
 void Proxy::CheckQuorumTd(const int id) {
-  ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
+  // ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
+  std::unordered_map<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
   ConcurrentMap<uint64_t, Log*>& logs = logMap_[id];
   std::map<uint64_t, std::map<uint32_t, Reply>> replyQuorum;
   std::map<uint32_t, Reply*> uncommittedReply;  // Key: logId, value: reqKey
-
+  uint32_t currentView = 0;
   int sz = 0;
   char buffer[UDP_BUFFER_SIZE];
   MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
@@ -209,6 +213,7 @@ void Proxy::CheckQuorumTd(const int id) {
   Reply* committedAck = NULL;
   uint32_t replyNum = 0;
   uint64_t startTime, endTime;
+  std::vector<uint64_t>& replicaSyncedPoint = replicaSyncedPoints_[id];
   while (running_) {
     if ((sz = recvfrom(forwardFds_[id], buffer, UDP_BUFFER_SIZE, 0,
                        (struct sockaddr*)(&recvAddr), &sockLen)) > 0) {
@@ -227,35 +232,61 @@ void Proxy::CheckQuorumTd(const int id) {
 
         uint64_t syncPoint =
             CONCAT_UINT32(reply.view(), reply.maxsyncedlogid());
-        if (replicaSyncedPoints_[reply.replicaid()] < syncPoint) {
-          replicaSyncedPoints_[reply.replicaid()] = syncPoint;
+
+        if (replicaSyncedPoint[reply.replicaid()] < syncPoint) {
+          replicaSyncedPoint[reply.replicaid()] = syncPoint;
         }
+
         if (reply.clientid() == 0 && reply.reqid() == 0) {
           // Dummy reply, just used to update
-          // replicaSyncedPoints_[reply.replicaid()]
           continue;
         }
 
-        committedAck = committedReply.get(reqKey);
-        if (committedAck != NULL) {
-          // already committed;  ignore
+        // committedAck = committedReply.get(reqKey);
+        // if (committedAck != NULL) {
+        //   // already committed;  ignore
+        //   continue;
+        // }
+        auto iter = committedReply.find(reqKey);
+        if (iter != committedReply.end()) {
+          // already committed; ignore
           continue;
+        }
+
+        if (reply.view() < currentView) {
+          LOG(INFO) << "Replied from old view";
+          continue;
+        }
+
+        if (currentView < reply.view()) {
+          // Replicas have upgraded to a new view
+          // Reset current state
+          currentView = reply.view();
+          uncommittedReply.clear();
+          replyQuorum.clear();
+          for (int i = 0; i < replicaNum_; i++) {
+            replicaSyncedPoint[i] = replicaSyncedPoint[reply.replicaid()];
+          }
+          currentView = reply.view();
         }
 
         // LOG(INFO) << reply.DebugString();
         if (reply.replytype() == (uint32_t)MessageType::COMMIT_REPLY) {
           committedAck = new Reply(reply);
-          committedReply.assign(reqKey, committedAck);
+          // committedReply.assign(reqKey, committedAck);
         } else if (replyQuorum[reqKey].find(reply.replicaid()) ==
                    replyQuorum[reqKey].end()) {
           replyQuorum[reqKey][reply.replicaid()] = reply;
-          committedAck = isQuorumReady(replyQuorum[reqKey]);
+          committedAck = isQuorumReady(replicaSyncedPoint, replyQuorum[reqKey]);
         } else if (reply.view() > replyQuorum[reqKey].begin()->second.view()) {
           // New view has come, clear existing replies for this request
           uncommittedReply.clear();
           replyQuorum[reqKey].clear();
           replyQuorum[reqKey][reply.replicaid()] = reply;
-          committedAck = isQuorumReady(replyQuorum[reqKey]);
+          for (int i = 0; i < replicaNum_; i++) {
+            replicaSyncedPoint[i] = replicaSyncedPoint[reply.replicaid()];
+          }
+          committedAck = isQuorumReady(replicaSyncedPoint, replyQuorum[reqKey]);
         } else if (reply.view() == replyQuorum[reqKey].begin()->second.view()) {
           const Reply& existedReply = replyQuorum[reqKey][reply.replicaid()];
           if (existedReply.view() < reply.view()) {
@@ -265,13 +296,14 @@ void Proxy::CheckQuorumTd(const int id) {
             // FAST_REPLY < SLOW_REPLY < COMMIT_REPLY
             replyQuorum[reqKey][reply.replicaid()] = reply;
           }
-          committedAck = isQuorumReady(replyQuorum[reqKey]);
+          committedAck = isQuorumReady(replicaSyncedPoint, replyQuorum[reqKey]);
         }  // else: reply.view()< replyQuorum[reqKey].begin()->second.view(),
            // ignore it
 
         if (committedAck != NULL && committedAck->replytype() > 0) {
           // Ack to client
-          struct sockaddr_in* clientAddr = clientAddrs_.get(reply.clientid());
+          struct sockaddr_in* clientAddr =
+              clientAddrs_.get(committedAck->clientid());
           std::string replyMsg = committedAck->SerializeAsString();
           msgHdr->msgType = MessageType::COMMIT_REPLY;
           msgHdr->msgLen = replyMsg.length();
@@ -281,36 +313,43 @@ void Proxy::CheckQuorumTd(const int id) {
                  replyMsg.length() + sizeof(MessageHeader), 0,
                  (struct sockaddr*)clientAddr, sizeof(sockaddr));
 
-          Log* litem = logs.get(reqKey);
-          if (litem) {
-            litem->proxyRecvTime_ = GetMicrosecondTimestamp();
-            litem->commitType_ = committedAck->replytype();
-            logQu_.enqueue(*litem);
-          }
           // Add to cache
-          committedReply.assign(reqKey, committedAck);
+          // committedReply.assign(reqKey, committedAck);
+          committedReply[reqKey] = committedAck;
           replyQuorum.erase(reqKey);
 
-          auto checkIter = uncommittedReply.find(committedAck->logid());
-          if (checkIter != uncommittedReply.end()) {
-            delete checkIter->second;
-            uncommittedReply.erase(committedAck->logid());
-          }
+          // Disable Log
+          // Log* litem = logs.get(reqKey);
+          // if (litem) {
+          //   litem->proxyRecvTime_ = GetMicrosecondTimestamp();
+          //   litem->commitType_ = committedAck->replytype();
+          //   logQu_.enqueue(*litem);
+          // }
 
           // Check whether some uncommittedReply can be committed
-          while (!uncommittedReply.empty()) {
-            uint64_t reqKey =
-                CONCAT_UINT32(uncommittedReply.begin()->second->clientid(),
-                              uncommittedReply.begin()->second->reqid());
-            Reply* r = isQuorumReady(replyQuorum[reqKey]);
-            if (r != NULL && r->replytype() > 0) {
-              // committed
-              delete uncommittedReply.begin()->second;
-              uncommittedReply.erase(uncommittedReply.begin());
-              committedReply.assign(reqKey, r);
-            } else {
-              break;
+          while ((!uncommittedReply.empty()) &&
+                 uncommittedReply.begin()->first <= committedAck->logid()) {
+            Reply* ack = uncommittedReply.begin()->second;
+            ack->set_replytype(MessageType::COMMIT_REPLY);
+            if (uncommittedReply.begin()->first < committedAck->logid()) {
+              const Reply* ack = uncommittedReply.begin()->second;
+              struct sockaddr_in* clientAddr =
+                  clientAddrs_.get(ack->clientid());
+              std::string replyMsg = ack->SerializeAsString();
+              msgHdr->msgType = MessageType::COMMIT_REPLY;
+              msgHdr->msgLen = replyMsg.length();
+              memcpy(buffer + sizeof(MessageHeader), replyMsg.c_str(),
+                     replyMsg.length());
+              sendto(replyFds_[id], buffer,
+                     replyMsg.length() + sizeof(MessageHeader), 0,
+                     (struct sockaddr*)clientAddr, sizeof(sockaddr));
             }
+            uint64_t reqKey = CONCAT_UINT32(ack->clientid(), ack->reqid());
+            // committedReply.assign(reqKey, ack);
+            committedReply[reqKey] = ack;
+            replyQuorum.erase(reqKey);
+            uncommittedReply.erase(uncommittedReply.begin());
+            delete ack;
           }
 
           // LOG(INFO) << "reqId=" << committedAck->reqid()
@@ -329,14 +368,24 @@ void Proxy::CheckQuorumTd(const int id) {
           // }
         } else if (committedAck != NULL && committedAck->replytype() == 0) {
           // record in uncommittedRequests
-          uncommittedReply[committedAck->logid()] = committedAck;
+          if (committedAck->replicaid() == currentView % replicaNum_) {
+            // This is a leader's reply, cache it
+            if (uncommittedReply.find(committedAck->logid()) ==
+                uncommittedReply.end()) {
+              uncommittedReply[committedAck->logid()] = committedAck;
+            }
+
+          } else {
+            delete committedAck;
+          }
         }
       }
     }
   }
 }
 
-Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
+Reply* Proxy::isQuorumReady(std::vector<uint64_t>& replicaSyncedPoint,
+                            std::map<uint32_t, Reply>& quorum) {
   // These replies are of the same view for sure (we have previously forbidden
   // inconsistency)
   uint32_t view = quorum.begin()->second.view();
@@ -354,15 +403,29 @@ Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
                           kv.second.view() == leaderReply.view() &&
                           kv.second.hash() == leaderReply.hash());
     bool slowSatisfied =
-        (HIGH_32BIT(replicaSyncedPoints_[kv.first]) == leaderReply.view() &&
-         LOW_32BIT(replicaSyncedPoints_[kv.first]) >= leaderReply.logid());
+        (HIGH_32BIT(replicaSyncedPoint[kv.first]) == leaderReply.view() &&
+         LOW_32BIT(replicaSyncedPoint[kv.first]) >= leaderReply.logid());
 
+    // if (kv.second.replytype() == MessageType::FAST_REPLY &&
+    //     kv.second.hash() != leaderReply.hash()) {
+    //   LOG(INFO) << kv.second.DebugString()
+    //             << "\t\t\nLeader: " << leaderReply.DebugString();
+    // }
     if (fastSatisfied || slowSatisfied) {
       fastOrSlowReplyNum++;
     }
     if (slowSatisfied) {
       slowReplyNum++;
     }
+    // if( (!fastSatisfied) && (!slowSatisfied) && quorum.size()==3) {
+    //   LOG(INFO) <<"Wrong "<<kv.second.DebugString();
+    //   LOG(INFO) <<"leader "<<leaderReply.DebugString();
+    //   LOG(INFO)
+    //   <<"kv.first="<<kv.first<<"\t"<<replicaSyncedPoint[kv.first]<<"\t"
+    //   <<(HIGH_32BIT(replicaSyncedPoint[kv.first]) ==
+    //   leaderReply.view())<<"\t"
+    //   <<(LOW_32BIT(replicaSyncedPoint[kv.first]) >= leaderReply.logid()) ;
+    // }
   }
 
   Reply* committedReply = new Reply(leaderReply);
@@ -375,55 +438,20 @@ Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
     committedReply->set_replytype(MessageType::SLOW_REPLY);
   } else {
     // Uncommitted
+    // if(quorum.size()==3) {
+
+    //   LOG(INFO) <<"fastOrSlowReplyNum="<<fastOrSlowReplyNum;
+    //   LOG(INFO) <<quorum[0].DebugString();
+    //   LOG(INFO) <<quorum[1].DebugString();
+    //   LOG(INFO) <<quorum[2].DebugString();
+    // }
     committedReply->set_replytype(0);
   }
   return committedReply;
 }
 
-// Reply* Proxy::isQuorumReady(std::map<uint32_t, Reply>& quorum) {
-//   // These replies are of the same view for sure (we have previously
-//   forbidden
-//   // inconsistency)
-//   uint32_t view = quorum.begin()->second.view();
-//   uint32_t leaderId = view % replicaNum_;
-//   if (quorum.find(leaderId) == quorum.end()) {
-//     return NULL;
-//   }
-
-//   Reply& leaderReply = quorum[leaderId];
-
-//   uint32_t fastOrSlowReplyNum = 0;  // slowReply can be used as fastReply
-//   uint32_t slowReplyNum = 0;        // But fastReply cannot be used as
-//   slowReply for (const auto& kv : quorum) {
-//     if (kv.second.replytype() == MessageType::FAST_REPLY &&
-//             kv.second.hash() == leaderReply.hash() ||
-//         kv.second.replytype() == MessageType::SLOW_REPLY) {
-//       fastOrSlowReplyNum++;
-//     }
-//     if (kv.second.replytype() == MessageType::SLOW_REPLY) {
-//       slowReplyNum++;
-//     }
-//   }
-
-//   if (fastOrSlowReplyNum >= (uint32_t)fastQuorum_) {
-//     // Fast Commit
-//     Reply* committedReply = new Reply(leaderReply);
-//     committedReply->set_replytype(MessageType::FAST_REPLY);
-//     return committedReply;
-//   }
-
-//   if (slowReplyNum >= (uint32_t)f_) {
-//     // together with leader's fast reply, it forms the quorum of f+1
-//     Reply* committedReply = new Reply(leaderReply);
-//     committedReply->set_replytype(MessageType::SLOW_REPLY);
-//     return committedReply;
-//   }
-
-//   return NULL;
-// }
-
 void Proxy::ForwardRequestsTd(const int id) {
-  ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
+  // ConcurrentMap<uint64_t, Reply*>& committedReply = committedReplyMap_[id];
   ConcurrentMap<uint64_t, Log*>& logs = logMap_[id];
   char buffer[UDP_BUFFER_SIZE];
   MessageHeader* msgHdr = (MessageHeader*)(void*)buffer;
@@ -445,19 +473,6 @@ void Proxy::ForwardRequestsTd(const int id) {
           request.ParseFromArray(buffer + sizeof(MessageHeader),
                                  msgHdr->msgLen)) {
         uint64_t reqKey = CONCAT_UINT32(request.clientid(), request.reqid());
-        Reply* commitAck = committedReply.get(reqKey);
-        if (commitAck != NULL) {
-          std::string replyStr = commitAck->SerializeAsString();
-          msgHdr->msgType = MessageType::COMMIT_REPLY;
-          msgHdr->msgLen = replyStr.length();
-          memcpy(buffer + sizeof(MessageHeader), replyStr.c_str(),
-                 replyStr.length());
-          sendto(requestReceiveFds_[id], buffer,
-                 replyStr.length() + sizeof(MessageHeader), 0,
-                 (struct sockaddr*)&receiverAddr, len);
-          continue;
-        }
-
         request.set_bound(latencyBound_);
         request.set_proxyid(proxyIds_[id]);
         request.set_sendtime(GetMicrosecondTimestamp());
@@ -483,11 +498,14 @@ void Proxy::ForwardRequestsTd(const int id) {
                  msgHdr->msgLen + sizeof(MessageHeader), 0,
                  (struct sockaddr*)replicaAddr, sizeof(sockaddr_in));
         }
-
-        Log* litem = new Log();
-        litem->proxyTime_ = request.sendtime();
-        litem->deadline_ = request.sendtime() + request.bound();
-        logs.assign(reqKey, litem);
+        // Log* litem = new Log();
+        // litem->clientId_ = request.clientid();
+        // litem->reqId_ = request.reqid();
+        // litem->clientTime_ = request.clienttime();
+        // litem->proxyTime_ = request.sendtime();
+        // litem->deadline_ = request.sendtime() + request.bound();
+        // logs.assign(reqKey, litem);
+        // litem->proxyEndProcessTime_ = GetMicrosecondTimestamp();
         // LOG(INFO) << "id=" << id << "\t"
         //           << "cid=" << request.clientid() << "\t" << request.reqid();
 
@@ -540,7 +558,11 @@ void Proxy::CreateContext() {
   replicaNum_ = proxyConfig_["replica-info"]["replica-ips"].size();
   assert(replicaNum_ % 2 == 1);
   f_ = replicaNum_ / 2;
-  replicaSyncedPoints_.assign(replicaNum_, CONCURRENT_MAP_START_INDEX);
+
+  replicaSyncedPoints_.resize(shardNum);
+  for (int i = 0; i < shardNum; i++) {
+    replicaSyncedPoints_[i].assign(replicaNum_, CONCURRENT_MAP_START_INDEX);
+  }
 
   fastQuorum_ = (f_ % 2 == 1) ? (f_ + (f_ + 1) / 2 + 1) : (f_ + f_ / 2 + 1);
   replicaAddrs_.resize(replicaNum_);

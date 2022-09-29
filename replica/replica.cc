@@ -392,6 +392,7 @@ void Replica::CreateContext() {
       },
       replicaConfig_["recovery-request-period-ms"].as<int>(), this);
 
+  movingPercentile_ = replicaConfig_["moving_percentile"].as<double>();
   slidingWindowLen_ = replicaConfig_["owd-estimation-window"].as<uint32_t>();
 
   // Signal variable for garbage collection (of followers)
@@ -596,16 +597,21 @@ void Replica::LaunchThreads() {
   LOG(INFO) << "Launched MissedReqAckTd\t"
             << threadPool_["MissedReqAckTd"]->native_handle();
 
-  totalWorkerNum_++;
-  threadPool_["GarbageCollectTd"] =
-      new std::thread(&Replica::GarbageCollectTd, this);
-  LOG(INFO) << "Launch  GarbageCollectTd "
-            << threadPool_["GarbageCollectTd"]->native_handle();
+  // totalWorkerNum_++;
+  // threadPool_["GarbageCollectTd"] =
+  //     new std::thread(&Replica::GarbageCollectTd, this);
+  // LOG(INFO) << "Launch  GarbageCollectTd "
+  //           << threadPool_["GarbageCollectTd"]->native_handle();
 
   totalWorkerNum_++;
   threadPool_["OWDCalcTd"] = new std::thread(&Replica::OWDCalcTd, this);
   LOG(INFO) << "Launch  OWDCalcTd "
             << threadPool_["OWDCalcTd"]->native_handle();
+
+  // totalWorkerNum_++;
+  // threadPool_["LogHash"] = new std::thread(&Replica::LogHash, this);
+  // LOG(INFO) << "Launched IndexRecvTd\t"
+  //           << threadPool_["LogHash"]->native_handle();
 
   LOG(INFO) << "Master Thread " << pthread_self();
 
@@ -642,8 +648,9 @@ void Replica::ReceiveClientRequest(MessageHeader* msgHdr, char* msgBuffer,
       }
       uint64_t reqKey = CONCAT_UINT32(request.clientid(), request.reqid());
       uint64_t deadline = request.sendtime() + request.bound();
-      RequestBody* rb = new RequestBody(deadline, reqKey, request.key(),
-                                        request.proxyid(), request.command());
+      RequestBody* rb =
+          new RequestBody(deadline, reqKey, request.key(), request.proxyid(),
+                          request.command(), request.iswrite());
       uint32_t quId = (reqKey) % recordQu_.size();
       recordQu_[quId].enqueue(rb);
 
@@ -691,8 +698,9 @@ void Replica::OWDCalcTd() {
       if (owdSampleNum_[proxyId] >= slidingWindowLen_) {
         std::vector<uint32_t> tmpSamples(slidingWindow_[proxyId]);
         sort(tmpSamples.begin(), tmpSamples.end());
-        uint32_t movingMedian = tmpSamples[slidingWindowLen_ / 2];
-        owdMap_.assign(proxyId, movingMedian);
+        uint32_t movingEstimate =
+            tmpSamples[slidingWindowLen_ * movingPercentile_];
+        owdMap_.assign(proxyId, movingEstimate);
       }
     }
     // reduce CPU cost
@@ -811,6 +819,11 @@ void Replica::ProcessTd(int id) {
           earlyBuffer_[rankKey] = entry;
           entry->status = EntryStatus::IN_PROCESS;
         } else {
+          // LOG(INFO) <<"Abnormal "<<entry->body.opKey
+          //         <<"\t<"<<rankKey.first<<","<<rankKey.second<<">\t"
+          //          <<"\t<"<<lastReleasedEntryByKeys_[entry->body.opKey].first
+          //          <<","<<lastReleasedEntryByKeys_[entry->body.opKey].second
+          //          <<">";
           // This entry cannot enter early buffer
           if (amLeader) {
             // Leader modifies its deadline
@@ -841,7 +854,10 @@ void Replica::ProcessTd(int id) {
     while ((!earlyBuffer_.empty()) &&
            nowTime >= earlyBuffer_.begin()->first.first) {
       entry = earlyBuffer_.begin()->second;
-      lastReleasedEntryByKeys_[entry->body.opKey] = earlyBuffer_.begin()->first;
+      if (entry->body.isWrite) {
+        lastReleasedEntryByKeys_[entry->body.opKey] =
+            earlyBuffer_.begin()->first;
+      }
       ProcessRequest(entry, amLeader, true, amLeader);
       earlyBuffer_.erase(earlyBuffer_.begin());
     }
@@ -853,48 +869,49 @@ void Replica::ProcessTd(int id) {
 void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
                              const bool sendReply, const bool canExecute) {
   RequestBody& rb = entry->body;
-  entry->myhash = CalculateHash(rb.deadline, rb.reqKey);
-  entry->hash = entry->myhash;
-  if (isSyncedReq) {
-    // The log id of the previous non-commutative entry in the synced logs
-    entry->prevNonCommutative = maxSyncedLogEntryByKey_[rb.opKey];
-    entry->prev = maxSyncedLogEntry_;
+  // Read Request do not contribute to hash
+  entry->hash = entry->myhash =
+      rb.isWrite ? CalculateHash(rb.deadline, rb.reqKey) : SHA_HASH();
 
-    std::string result = canExecute ? ApplicationExecute(rb) : "";
-    if (entry->prevNonCommutative) {
-      entry->hash.XOR(entry->prevNonCommutative->hash);
+  std::vector<LogEntry*>& maxEntryByKey =
+      isSyncedReq ? maxSyncedLogEntryByKey_ : maxUnSyncedLogEntryByKey_;
+  std::atomic<LogEntry*>& maxEntry =
+      isSyncedReq ? maxSyncedLogEntry_ : maxUnSyncedLogEntry_;
+
+  // The log id of the previous non-commutative entry in the synced logs
+  entry->prevNonCommutative = maxEntryByKey[rb.opKey];
+  if (entry->prevNonCommutative) {
+    if (entry->prevNonCommutative->body.isWrite) {
+      entry->prevNonCommutativeWrite = entry->prevNonCommutative;
+    } else {
+      entry->prevNonCommutativeWrite =
+          entry->prevNonCommutative->prevNonCommutativeWrite;
     }
-    ASSERT(entry->prev != NULL);
-    entry->logId = entry->prev->logId + 1;
-    entry->status = EntryStatus::PROCESSED;
-    // Only after the entry has been completely prepared, can we link the pre's
-    // next to it
-    if (entry->prevNonCommutative) {
-      entry->prevNonCommutative->nextNonCommutative = entry;
-    }
-    entry->prev->next = entry;
-    maxSyncedLogEntryByKey_[rb.opKey] = entry;
-    maxSyncedLogEntry_ = entry;
-  } else {
-    // // The log id of the previous non-commutative entry in the unsynced logs
-    entry->prevNonCommutative = maxUnSyncedLogEntryByKey_[rb.opKey];
-    entry->prev = maxUnSyncedLogEntry_;
-    if (entry->prevNonCommutative) {
-      entry->hash.XOR(entry->prevNonCommutative->hash);
-    }
-    ASSERT(entry->prev != NULL);
-    entry->logId = entry->prev->logId + 1;
-    entry->status = EntryStatus::PROCESSED;
-    entry->prev->next = entry;
-    if (entry->prevNonCommutative) {
-      entry->prevNonCommutative->nextNonCommutative = entry;
-    }
-    if (minUnSyncedLogEntryByKey_[rb.opKey] == NULL) {
-      minUnSyncedLogEntryByKey_[rb.opKey] = entry;
-    }
-    maxUnSyncedLogEntryByKey_[rb.opKey] = entry;
-    maxUnSyncedLogEntry_ = entry;
   }
+  entry->prev = maxEntry;
+
+  entry->result = (isSyncedReq && canExecute) ? ApplicationExecute(rb) : "";
+
+  if (entry->prevNonCommutativeWrite) {
+    entry->hash.XOR(entry->prevNonCommutativeWrite->hash);
+  }
+  ASSERT(entry->prev != NULL);
+  entry->logId = entry->prev->logId + 1;
+  entry->status = EntryStatus::PROCESSED;
+
+  if (entry->prevNonCommutative) {
+    entry->prevNonCommutative->nextNonCommutative = entry;
+  }
+  if (entry->prevNonCommutativeWrite && rb.isWrite) {
+    entry->prevNonCommutativeWrite->nextNonCommutativeWrite = entry;
+  }
+  if (isSyncedReq == false && minUnSyncedLogEntryByKey_[rb.opKey] == NULL) {
+    minUnSyncedLogEntryByKey_[rb.opKey] = entry;
+  }
+  entry->prev->next = entry;
+
+  maxEntryByKey[rb.opKey] = entry;
+  maxEntry = entry;
 
   if (sendReply) {
     uint32_t quId = (entry->body.reqKey) % fastReplyQu_.size();
@@ -908,7 +925,7 @@ void Replica::FastReplyTd(int id, int cvId) {
   reply.set_replytype(MessageType::FAST_REPLY);
   reply.set_replicaid(replicaId_);
   CrashVectorStruct* cv = crashVectorInUse_[cvId];
-  // uint32_t replyNum = 0;
+  uint32_t replyNum = 0;
   // uint64_t startTime, endTime;
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -924,6 +941,12 @@ void Replica::FastReplyTd(int id, int cvId) {
     }
     LogEntry* entry = NULL;
     if (fastReplyQu_[id].try_dequeue(entry)) {
+      reply.set_iswrite(entry->body.isWrite);
+      reply.set_opkey(entry->body.opKey);
+      replyNum++;
+      // if (replyNum % 500000 == 0) {
+      //   LOG(INFO) << id << "QuLen=" << fastReplyQu_[id].size_approx();
+      // }
       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
       if (!addr) {
         // The replica cannot find the address to send reply
@@ -947,17 +970,21 @@ void Replica::FastReplyTd(int id, int cvId) {
       // the dummy value of protobuf, and the proxy will not consider it as an
       // estimated owd)
       reply.set_owd(owdMap_.get(entry->body.proxyId));
+
       SHA_HASH hash(entry->hash);
-      hash.XOR(cv->cvHash_);
+      // hash.XOR(cv->cvHash_);
       if (amLeader) {
         // Leader's logic is very easy: after XORing the crashVector and the
         // log entry hash together, it can directly reply
         reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
         reply.set_logid(entry->logId);
         reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
+
         uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
         repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
         fastReplySender_[id]->SendMsgTo(*addr, reply, MessageType::FAST_REPLY);
+
+        // replyLogQu_.enqueue(reply);
         // LOG(INFO) << "Leader reply=" << reply.reqid() << "\t"
         //     << "opKey=" << entry->opKey << "\t"
         //     << "hash=" << hash.toString();
@@ -978,8 +1005,13 @@ void Replica::FastReplyTd(int id, int cvId) {
 
         LogEntry* unsyncedEntry = minUnSyncedLogEntryByKey_[entry->body.opKey];
         LogEntry* syncedEntry = maxSyncedLogEntryByKey_[entry->body.opKey];
-        if (syncedEntry == NULL || unsyncedEntry == NULL ||
-            unsyncedEntry->logId <= safeToClearUnSyncedLogId_[id]) {
+
+        if (syncedEntry && syncedEntry->body.isWrite == false) {
+          // Only Write matters
+          syncedEntry = syncedEntry->prevNonCommutativeWrite;
+          assert(syncedEntry == NULL || syncedEntry->body.isWrite);
+        }
+        if (syncedEntry == NULL) {
           // The index sync process may have not been started, or may have not
           // catch up; Or the unsynced logs have been reclaimed by
           // GarbageCollectionTd (we have advanced
@@ -991,7 +1023,7 @@ void Replica::FastReplyTd(int id, int cvId) {
           repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
           fastReplySender_[id]->SendMsgTo(*addr, reply,
                                           MessageType::FAST_REPLY);
-
+          // replyLogQu_.enqueue(reply);
         } else {
           // The follower already gets some synced non-commutative logs (via
           // index sync process)
@@ -1012,33 +1044,55 @@ void Replica::FastReplyTd(int id, int cvId) {
               fastReplySender_[id]->SendMsgTo(*addr, reply,
                                               MessageType::FAST_REPLY);
             }
-          }
-          // Beyond syncedEntry, we need to find the boundary in the unsynced
-          // logs
+          } else {
+            // Beyond syncedEntry, we need to find the boundary in the unsynced
+            // logs
+            // TODO: Check the following
+            // Since unsyncedLogId is no fresher (maybe older) than syncedLogId,
+            // then unsyncedEntry may have already been surpasssed by
+            // syncedEntry, we need to remove the (potential) overlap
 
-          // TODO: Check the following
-          // Since unsyncedLogId is no fresher (maybe older) than syncedLogId,
-          // then unsyncedEntry may have already been surpasssed by
-          // syncedEntry, we need to remove the (potential) overlap
-          while (unsyncedEntry->LessOrEqual(*syncedEntry)) {
-            if (unsyncedEntry->nextNonCommutative != NULL) {
-              unsyncedEntry = unsyncedEntry->nextNonCommutative;
-            } else {
-              break;
+            while (unsyncedEntry->LessOrEqual(*syncedEntry)) {
+              if (unsyncedEntry->body.isWrite) {
+                if (unsyncedEntry->nextNonCommutative) {
+                  unsyncedEntry = unsyncedEntry->nextNonCommutative;
+                } else {
+                  break;
+                }
+              } else {
+                if (unsyncedEntry->nextNonCommutative) {
+                  unsyncedEntry = unsyncedEntry->nextNonCommutative;
+                } else {
+                  break;
+                }
+              }
             }
+            // LogStruct log;
+            // log.originalHash = hash.toString();
+            // hash encodes all the (unsynced) entries up to entry
+            hash.XOR(unsyncedEntry->hash);  // Remove all previous hash
+            // before unsyncedEntry [included]
+            // log.unsynced = unsyncedEntry;
+            // log.addback = false;
+            if (syncedEntry->LessThan(*unsyncedEntry)) {
+              // add itself back (read request is 0)
+              hash.XOR(unsyncedEntry->myhash);
+              // log.addback = true;
+            }
+            // Now hash only encodes [unsyncedEntry, entry]
+            // Let's add the synced part
+            // log.synced = syncedEntry;
+            hash.XOR(syncedEntry->hash);
+            // log.finalE = entry;
+            // entryQu_.enqueue(log);
+            reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
+            reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
+            uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
+            repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
+            fastReplySender_[id]->SendMsgTo(*addr, reply,
+                                            MessageType::FAST_REPLY);
+            // replyLogQu_.enqueue(reply);
           }
-          // hash encodes all the (unsynced) entries up to entry
-          hash.XOR(unsyncedEntry->hash);
-          hash.XOR(unsyncedEntry->myhash);  // add itself back
-          // Now hash only encodes [unsyncedEntry, entry]
-          // Let's add the synced part
-          hash.XOR(syncedEntry->hash);
-          reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
-          reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
-          uint32_t proxyMachineId = HIGH_32BIT(entry->body.proxyId);
-          repliedSyncPoint_[proxyMachineId] = reply.maxsyncedlogid();
-          fastReplySender_[id]->SendMsgTo(*addr, reply,
-                                          MessageType::FAST_REPLY);
         }
       }
     }
@@ -1076,6 +1130,7 @@ void Replica::SlowReplyTd(int id) {
         reply.set_result("");
       }
       reply.set_owd(owdMap_.get(entry->body.proxyId));
+      reply.set_maxsyncedlogid(maxSyncedLogEntry_.load()->logId);
 
       Address* addr = proxyAddressMap_.get(entry->body.proxyId);
       if (addr) {
@@ -1222,9 +1277,9 @@ void Replica::IndexProcessTd() {
           for (int i = 0; i < missedReqMsg.reqs().size(); i++) {
             const RequestBodyMsg& rbMsg = missedReqMsg.reqs(i);
             if (missedReqKeys_.find(rbMsg.reqkey()) != missedReqKeys_.end()) {
-              RequestBody* rb =
-                  new RequestBody(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
-                                  rbMsg.proxyid(), rbMsg.command());
+              RequestBody* rb = new RequestBody(
+                  rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
+                  rbMsg.proxyid(), rbMsg.command(), rbMsg.iswrite());
               // We must handle it to ProcessTd instead of processing it here,
               // to avoid data race (and further memroy leakage), although it
               // is a trivial possibility
@@ -1270,47 +1325,56 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
 
   for (uint32_t logId = maxSyncedLogId + 1; logId <= idxSyncMsg.logidend();
        logId++) {
-    // LOG(ERROR) << "logId=" << logId << "\t" <<
-    // maxSyncedLogEntry_.load()->logId;
     uint32_t offset = logId - idxSyncMsg.logidbegin();
     uint64_t reqKey = idxSyncMsg.reqkeys(offset);
     uint64_t deadline = idxSyncMsg.deadlines(offset);
     uint32_t quId = reqKey % recordMap_.size();
     LogEntry* entry = recordMap_[quId].get(reqKey);
     if (entry && missedReqKeys_.empty()) {
-      SHA_HASH myHash = CalculateHash(deadline, reqKey);
-      SHA_HASH hash(myHash);
-      LogEntry* prevNonCommutativeEntry =
-          maxSyncedLogEntryByKey_[entry->body.opKey];
-      if (prevNonCommutativeEntry) {
+      SHA_HASH myHash;
+      SHA_HASH hash;
+      if (entry->body.isWrite) {
+        myHash = CalculateHash(deadline, reqKey);
+        hash = myHash;
+      }
+      LogEntry* prevNonCommutative = maxSyncedLogEntryByKey_[entry->body.opKey];
+      LogEntry* prevNonCommutativeWrite = NULL;
+      if (prevNonCommutative) {
+        if (prevNonCommutative->body.isWrite) {
+          prevNonCommutativeWrite = prevNonCommutative;
+        } else {
+          prevNonCommutativeWrite = prevNonCommutative->prevNonCommutativeWrite;
+        }
+      }
+      assert(prevNonCommutativeWrite == NULL ||
+             prevNonCommutativeWrite->body.isWrite);
+      if (prevNonCommutativeWrite) {
         // This request has some pre non-commutative ones
         // In that way, XOR the previous accumulated hash
-        hash.XOR(prevNonCommutativeEntry->hash);
+        hash.XOR(prevNonCommutativeWrite->hash);
       }
       LogEntry* newEntry =
-          new LogEntry(entry->body, myHash, hash, prevNonCommutativeEntry, NULL,
-                       maxSyncedLogEntry_, NULL);
+          new LogEntry(entry->body, myHash, hash, prevNonCommutative, NULL,
+                       prevNonCommutativeWrite, NULL, maxSyncedLogEntry_, NULL);
+      newEntry->status = EntryStatus::TO_SLOW_REPLY;
       newEntry->logId = logId;
       ASSERT(logId == maxSyncedLogEntry_.load()->logId + 1);
       maxSyncedLogEntry_.load()->next = newEntry;
-      if (prevNonCommutativeEntry) {
-        prevNonCommutativeEntry->nextNonCommutative = newEntry;
+      if (prevNonCommutative) {
+        prevNonCommutative->nextNonCommutative = newEntry;
+      }
+      if (newEntry->body.isWrite && prevNonCommutativeWrite) {
+        prevNonCommutativeWrite->nextNonCommutativeWrite = newEntry;
       }
       // uint32_t prevMaxLogId = maxSyncedLogEntry_.load()->logId;
       maxSyncedLogEntry_ = newEntry;
       ASSERT(maxSyncedLogEntry_.load()->logId == logId);
       ASSERT(prevMaxLogId + 1 == logId);
+
       maxSyncedLogEntryByKey_[newEntry->body.opKey] = newEntry;
-      // Enqueue for slow Reply (Try removing it)
       uint32_t quId = (newEntry->body.reqKey) % slowReplyQu_.size();
       slowReplyQu_[quId].enqueue(newEntry);
 
-      // if (newEntry->prev->logId + 1 != newEntry->logId) {
-      //   LOG(ERROR) << "newEntry--" << newEntry->logId << "\t"
-      //              << "prev--" << newEntry->prev->logId << "\t"
-      //              << "prevMaxLogId=" << prevMaxLogId << "\t"
-      //              << "logId=" << logId;
-      // }
       ASSERT(newEntry->prev->logId + 1 == newEntry->logId);
       // TODO： Think about the order above
 
@@ -1319,9 +1383,21 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
         // Try to advance  minUnSyncedLogIdByKey_[opKey]
         LogEntry* unSyncedEntry =
             minUnSyncedLogEntryByKey_[newEntry->body.opKey];
-        while (unSyncedEntry->LessOrEqual(*entry) &&
-               unSyncedEntry->nextNonCommutative != NULL) {
-          unSyncedEntry = unSyncedEntry->nextNonCommutative;
+
+        while (unSyncedEntry->LessOrEqual(*entry)) {
+          if (unSyncedEntry->body.isWrite) {
+            if (unSyncedEntry->nextNonCommutativeWrite) {
+              unSyncedEntry = unSyncedEntry->nextNonCommutativeWrite;
+            } else {
+              break;
+            }
+          } else {
+            if (unSyncedEntry->nextNonCommutative) {
+              unSyncedEntry = unSyncedEntry->nextNonCommutative;
+            } else {
+              break;
+            }
+          }
         }
         minUnSyncedLogEntryByKey_[newEntry->body.opKey] = unSyncedEntry;
       }
@@ -1433,6 +1509,7 @@ void Replica::RequestBodyToMessage(const RequestBody& rb,
   rbMsg->set_proxyid(rb.proxyId);
   rbMsg->set_command(rb.command);
   rbMsg->set_key(rb.opKey);
+  rbMsg->set_iswrite(rb.isWrite);
 }
 
 void Replica::AskMissedIndex() {
@@ -2275,9 +2352,9 @@ void Replica::ProcessStateTransferReply(
          i++) {
       const RequestBodyMsg& rbMsg =
           stateTransferReply.reqs(i - iter->second.first);
-      LogEntry* entry =
-          new LogEntry(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
-                       rbMsg.proxyid(), rbMsg.command(), dummy, dummy);
+      LogEntry* entry = new LogEntry(
+          rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(),
+          rbMsg.command(), rbMsg.iswrite(), dummy, dummy);
       ProcessRequest(entry, true, false, false);
       // LOG(INFO) << "Processed " << entry->logId << "\t"
       //           << maxSyncedLogEntry_.load()->logId;
@@ -2297,9 +2374,9 @@ void Replica::ProcessStateTransferReply(
       const RequestBodyMsg& rbMsg = stateTransferReply.reqs(i);
       std::pair<uint64_t, uint64_t> key(rbMsg.deadline(), rbMsg.reqkey());
       if (requestsToMerge_.find(key) != requestsToMerge_.end()) {
-        LogEntry* entry =
-            new LogEntry(rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
-                         rbMsg.proxyid(), rbMsg.command(), dummy, dummy);
+        LogEntry* entry = new LogEntry(
+            rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(), rbMsg.proxyid(),
+            rbMsg.command(), rbMsg.iswrite(), dummy, dummy);
 
         requestsToMerge_[key] = {entry, 1};
       } else {

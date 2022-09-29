@@ -88,11 +88,13 @@ class Client {
    * shard of the ith proxy */
   std::vector<std::vector<Address*>> proxyAddrs_;
 
-  /** To test commutativity, we generate different zipfian workloads, i.e., we
-   * generate random numbers following the zipfian distribution. These random
-   * numbers are stored in zipfianKeys_ and serve as the keys that will be
-   * written/read by requests */
+  /** To test commutativity, we generate different zipfian workloads and write
+   * ratios, i.e., we generate random numbers following the zipfian
+   * distribution. These random numbers are stored in zipfianKeys_ and serve as
+   * the keys that will be written/read by requests */
   std::vector<uint32_t> zipfianKeys_;
+
+  float writeRatio_;
 
   /** Those requests which have been submitted but not yet committed (key is the
    * requestId)*/
@@ -113,6 +115,8 @@ class Client {
   /** Performance counters, to show how many requests are retried/committed */
   uint32_t retryNumber_;
   uint32_t committedNum_;
+  uint32_t fastCommitNum_;
+  uint32_t fastWriteNum_;
 
   /** Stats */
   std::vector<uint32_t> hop3s;
@@ -162,6 +166,7 @@ class Client {
 
   /** For debug */
   uint64_t lastCommittedReqId_;
+  std::vector<uint32_t> ls;
 };
 
 }  // namespace nezha

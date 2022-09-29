@@ -55,7 +55,7 @@ class Proxy {
    * If the request has been committed, it returns the reply message, which will
    * be delievered to the client; otherwise, it returns NULL
    */
-  Reply* isQuorumReady(std::map<uint32_t, Reply>& quorum);
+  Reply* isQuorumReady(std::vector<uint64_t>& repliedSyncPoint, std::map<uint32_t, Reply>& quorum);
 
   /** Tools function: given ip and port, create a socket fd. If ip is not empty,
    * the socket will be binded to the <ip:port>   */
@@ -102,8 +102,11 @@ class Proxy {
   /** Just used to collect logs, can be deleted in the release version*/
   struct Log {
     uint32_t replicaId_;
+    uint32_t clientId_;
+    uint32_t reqId_;
     uint64_t clientTime_;
     uint64_t proxyTime_;
+    uint64_t proxyEndProcessTime_;
     uint64_t recvTime_;
     uint64_t deadline_;
     uint64_t fastReplyTime_;
@@ -111,10 +114,13 @@ class Proxy {
     uint64_t proxyRecvTime_;
     uint32_t commitType_;
 
-    Log(uint32_t rid = 0, uint64_t ctime = 0, uint64_t ptime = 0,
+    Log(uint32_t rid = 0, uint32_t cId = 0, uint32_t reqId = 0,
+        uint64_t ctime = 0, uint64_t ptime = 0, uint64_t pedtime = 0,
         uint64_t rtime = 0, uint64_t ddl = 0, uint64_t fttime = 0,
         uint64_t swtime = 0, uint64_t prcvt = 0, uint32_t cmtt = 0)
         : replicaId_(rid),
+          clientId_(cId),
+          reqId_(reqId),
           clientTime_(ctime),
           proxyTime_(ptime),
           recvTime_(rtime),
@@ -124,8 +130,10 @@ class Proxy {
           proxyRecvTime_(prcvt),
           commitType_(cmtt) {}
     std::string ToString() {
-      return std::to_string(replicaId_) + "," + std::to_string(clientTime_) +
+      return std::to_string(replicaId_) + "," + std::to_string(clientId_) +
+             "," + std::to_string(reqId_) + "," + std::to_string(clientTime_) +
              "," + std::to_string(proxyTime_) + "," +
+             std::to_string(proxyEndProcessTime_) + "," +
              std::to_string(recvTime_) + "," + std::to_string(deadline_) + "," +
              std::to_string(fastReplyTime_) + "," +
              std::to_string(slowReplyTime_) + "," +
@@ -158,7 +166,7 @@ class Proxy {
    * resend the reply, instead of adding additional burden to the replicas
    */
 
-  std::vector<ConcurrentMap<uint64_t, Reply*>> committedReplyMap_;
+  std::vector<std::unordered_map<uint64_t, Reply*>> committedReplyMap_;
 
   std::vector<ConcurrentMap<uint64_t, uint64_t>> sendTimeMap_;
 
@@ -174,7 +182,7 @@ class Proxy {
   void Terminate();
 
   /** Tentative */
-  std::vector<uint64_t> replicaSyncedPoints_;
+  std::vector<std::vector<uint64_t>> replicaSyncedPoints_;
 };
 
 }  // namespace nezha
