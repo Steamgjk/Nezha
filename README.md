@@ -49,7 +49,7 @@ We have packaged the installation of all depencies into one script. Please check
 Since Bazel is becoming popular, we have migrated nezha from Makefile-based building system to the bazel building system. The bazel version in use is 5.2.0
 
 ```
-cd nezhav2 && bazel build //...
+cd Nezha && bazel build //...
 ```
 
 
