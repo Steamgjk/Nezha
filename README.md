@@ -1,4 +1,4 @@
-# Nezhav2
+# Nezha
 
 <img src="docs/nezha-img.jpeg" width="200">
 
