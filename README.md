@@ -17,7 +17,7 @@ An early presentation of Nezha was made at [Stanford Platform Lab Winter Review 
 ## Clone Project
 
 ```
-git clone --depth=1 https://gitlab.com/steamgjk/nezhav2.git
+git clone --depth=1 https://github.com/Steamgjk/Nezha.git
 ```
 
 
