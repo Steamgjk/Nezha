@@ -12,13 +12,13 @@ We have prepared the configuration files in ```configs``` folder, these configur
 **Step 1**: Launch 3 replicas (i.e. replica-0, replica-1, replica-2). Open 3 terminals and launch one replica in each terminal.
 ```
 # In the first terminal (replica-0)
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-0.yaml
 
 # In the second terminal (replica-1)
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-1.yaml
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-1.yaml
 
 # In the third terminal (replica-2)
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-2.yaml
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-2.yaml
 
 ```
 
@@ -37,7 +37,7 @@ $HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nez
 **Step 5**: We want the failed replica to rejoin the system. Therefore, we launch replica-0. This time, we set the flag ```isRecovering``` as true, so that it goes through the recovery procedure and retrieves the state from the other healthy replicas.
 ```
 # In the first terminal 
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-0.yaml --isRecovering true
 ```
 
 ![Step-5](figs/nezha-vr-test-figs/step-5.png)
@@ -60,19 +60,19 @@ poisson-rate: 10
 
 ```
 # In the first terminal (replica-0)
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-0.yaml
 
 # In the second terminal (replica-1)
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-1.yaml
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-1.yaml
 
 # In the third terminal (replica-2)
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-2.yaml
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-2.yaml
 
 # In the fourth terminal (proxy)
-$HOME/nezhav2/bazel-bin/proxy/nezha_proxy --config $HOME/nezhav2/configs/local/nezha-proxy-config.yaml
+$HOME/Nezha/bazel-bin/proxy/nezha_proxy --config $HOME/Nezha/configs/local/nezha-proxy-config.yaml
 
 # In the fifth terminal (client-1)
-$HOME/nezhav2/bazel-bin/client/nezha_client  --config $HOME/nezhav2/configs/nezha-client-config.yaml
+$HOME/Nezha/bazel-bin/client/nezha_client  --config $HOME/Nezha/configs/nezha-client-config.yaml
 
 ```
 
@@ -92,7 +92,7 @@ $HOME/nezhav2/bazel-bin/client/nezha_client  --config $HOME/nezhav2/configs/nezh
 
 ```
 # In the first terminal
-$HOME/nezhav2/bazel-bin/replica/nezha_replica --config $HOME/nezhav2/configs/nezha-replica-config-0.yaml --isRecovering true
+$HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-0.yaml --isRecovering true
 ```
 
 ![Step-4](figs/nezha-test-with-client/step-4.png)
