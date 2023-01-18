@@ -151,5 +151,5 @@ Please refer to [license.md](license.md)
 
 (1) Conduct more functionality and performance tests to make Nezha more robust and optimized
 
-(3) Support grpc-based communication, and further replace [the etcd backend for Kubenetes](https://learnk8s.io/etcd-kubernetes).
+(3) Replace [the etcd backend for Kubenetes](https://learnk8s.io/etcd-kubernetes) to boost the performance of Kubenetes.
 
