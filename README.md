@@ -6,13 +6,42 @@
 Nezha (哪吒) is a legendary figure in Chinese mythology. Nezha has 3 heads and 6 arms, so he/she achieves much better fault tolerance than ordinary people :)
 
 ## Paper and Presentation
-Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks (Conference Version) [[pdf](docs/Nezha-VLDB.pdf)]
+Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks (Conference Version) [[pdf]([docs/Nezha-VLDB.pdf](https://www.vldb.org/pvldb/vol16/p629-geng.pdf))]
 
 
 Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks(Technical Report) [[pdf](docs/Nezha-technical-report.pdf)]
 
 
 An early presentation of Nezha was made at [Stanford Platform Lab Winter Review 2022](https://platformlab.stanford.edu/winter-review/platform-lab-winter-review-2022/) [[slides](https://platformlab.stanford.edu/wp-content/uploads/2022/03/Jinkun-Geng.pdf)]
+
+
+If you find our work helpful to your research or project, we would very appreciate it if you could cite our papers. The bib for the papers are as below. 
+
+```
+@article{vldb23-nezha,
+author = {Geng, Jinkun and Sivaraman, Anirudh and Prabhakar, Balaji and Rosenblum, Mendel}, 
+title = {Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks},
+year = {2023},
+journal = {Proceedings of the VLDB Endowment},
+url = {https://www.vldb.org/pvldb/vol16/p629-geng.pdf},
+publisher = {VLDB Endowment},
+issn = {2150-8097},
+volume = {16},
+pages = {629-642},
+numpages = {14}
+}
+
+@misc{nezha-tech,
+  author = {Geng, Jinkun and Sivaraman, Anirudh and Prabhakar, Balaji and Rosenblum, Mendel},
+  title = {Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks},
+  doi = {10.48550/ARXIV.2206.03285},
+  url = {https://arxiv.org/abs/2206.03285},
+  publisher = {arXiv},
+  year = {2022},
+}
+
+```
+
 
 ## Clone Project
 
