@@ -15,7 +15,7 @@ Nezha: Deployable and High-Performance Consensus Using Synchronized Clocks(Techn
 An early presentation of Nezha was made at [Stanford Platform Lab Winter Review 2022](https://platformlab.stanford.edu/winter-review/platform-lab-winter-review-2022/) [[slides](https://platformlab.stanford.edu/wp-content/uploads/2022/03/Jinkun-Geng.pdf)]
 
 
-If you find our work helpful to your research or project, we would very appreciate it if you could cite our papers. The bib for the papers are as below. 
+If you find our work helpful to your research or project, we would very appreciate it if you could **add a star** to our repo and/or **cite our papers**. The bib for the papers are as below. 
 
 ```
 @article{vldb23-nezha,
