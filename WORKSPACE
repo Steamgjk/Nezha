@@ -58,7 +58,7 @@ http_archive(
 git_repository(
     name = "com_github_jbeder_yaml_cpp",
     commit = "fcbb8193b94921e058be7b563aea053531e5b2d9",  # 19-Aug-2023
-    remote = "git@github.com:jbeder/yaml-cpp.git",
+    remote = "https://github.com/jbeder/yaml-cpp.git",
     shallow_since = "1692473776 -0400"
 )
 

@@ -79,7 +79,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":endpoint"
+        ":endpoint",
+        "@com_github_enki_libev//:libev"
     ],
 )
 
@@ -95,7 +96,6 @@ cc_library(
         "@com_github_gflags_gflags//:gflags",
         "@com_github_google_glog//:glog",
         "@openssl//:openssl"
-        # "@com_github_enki_libev//:libev"
     ],
     visibility = ["//visibility:public"],
 )
