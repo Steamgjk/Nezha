@@ -83,13 +83,20 @@ cc_library(
     ],
 )
 
+
 cc_library(
     name = "utils",
     srcs = ["utils.cc"],
     hdrs = ["utils.h"],
     deps = [
         ":udp_socket_endpoint",
-         "@com_github_cameron314_concurrentqueue//:concurrentqueue",
+        "@com_github_cameron314_concurrentqueue//:concurrentqueue",
+        "@com_github_preshing_junction//:libjunction",
+        "@com_github_gflags_gflags//:gflags",
+        "@com_github_google_glog//:glog",
+        "@openssl//:openssl"
+        # "@com_github_enki_libev//:libev"
     ],
     visibility = ["//visibility:public"],
 )
+

@@ -7,6 +7,7 @@ cc_library(
         "//lib:utils",
         "@com_github_jbeder_yaml_cpp//:yaml-cpp",
         "@com_github_preshing_junction//:libjunction",
+        "@com_github_enki_libev//:libev"
     ],
 
 )
@@ -18,10 +19,10 @@ cc_binary(
     deps = [
         ":replica_class",
     ],
-    copts = [
-        "-I/usr/local/include"
-    ],
-    linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
-                "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
+    # copts = [
+    #     "-I/usr/local/include"
+    # ],
+    # linkopts = [ "-L/usr/local/lib", "-ldl",# "-lturf", "-ljunction", "-lev", "-ldl",  "-lyaml-cpp",
+    #             "-lcrypto", "-lgflags",  "-lglog", "-pthread" ],
 
 )

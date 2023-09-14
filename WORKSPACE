@@ -65,7 +65,7 @@ git_repository(
 new_git_repository(
     name = "com_github_cameron314_concurrentqueue",
     build_file = "//third_party/concurrentqueue:BUILD.bazel",
-    commit = "6dd38b8",
+    commit = "6dd38b8a1dbaa7863aa907045f32308a56a6ff5d",
     shallow_since = "1686439287 -0400",
     remote = "https://github.com/cameron314/concurrentqueue.git",
 )
@@ -88,6 +88,34 @@ new_git_repository(
     remote = "https://github.com/preshing/turf",
 )
 
+new_git_repository(
+    name = "com_github_enki_libev",
+    commit = "93823e6ca699df195a6c7b8bfa6006ec40ee0003",
+    shallow_since = "1463172876 -0700",
+    build_file = "//third_party/libev:BUILD.bazel",
+    remote = "https://github.com/enki/libev.git",
+)
+
+# Google gflags.
+git_repository(
+    name = "com_github_gflags_gflags",
+    commit = "e171aa2d15ed9eb17054558e0b3a6a413bb01067",  # 11-Nov-2018
+    remote = "https://github.com/gflags/gflags.git",
+    shallow_since = "1541971260 +0000",
+)
+
+# Google glog.
+new_git_repository(
+    name = "com_github_google_glog",
+    build_file = "//third_party/glog:BUILD.glog",
+    commit = "ba8a9f6952d04d1403b97df24e6836227751454e",  # 7-May-2019
+    remote = "https://github.com/google/glog.git",
+    # Shallow since doesn't work here for some weird reason. See
+    # https://github.com/bazelbuild/bazel/issues/10292
+    # shallow_since = "1557212520 +0000",
+)
+
+
 http_archive(
     name = "rules_foreign_cc",
     sha256 = "2a8000ce03dd9bb324bc9bb7f1f5d01debac406611f4d9fedd385192718804f0",
@@ -98,3 +126,11 @@ http_archive(
 load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
 
 rules_foreign_cc_dependencies()
+
+http_archive(
+    name = "openssl",
+    build_file = "//third_party/openssl:BUILD.bazel",
+    sha256 = "23011a5cc78e53d0dc98dfa608c51e72bcd350aa57df74c5d5574ba4ffb62e74",
+    strip_prefix = "openssl-OpenSSL_1_1_1d",
+    urls = ["https://github.com/openssl/openssl/archive/OpenSSL_1_1_1d.tar.gz"]
+)

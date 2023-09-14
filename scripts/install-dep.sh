@@ -3,46 +3,46 @@
 # Ubuntu 20.04.4 LTS 
 # Install Essentials
 sudo apt update
-sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake libssl-dev libboost-all-dev
-sudo apt install -y libgflags-dev  libgoogle-glog-dev  
+sudo apt install -y net-tools autoconf libtool build-essential pkg-config cmake libboost-all-dev # libssl-dev
+# sudo apt install -y libgflags-dev  libgoogle-glog-dev  
 # We are using libprotoc 3.6.1, newer version should also work
 sudo apt install -y protobuf-compiler
 protoc --version
 
 
 # Install yaml-cpp
-git clone https://github.com/jbeder/yaml-cpp.git
-cd yaml-cpp && mkdir build && cd build 
-cmake ..
-make && sudo make install
-cd $HOME
+# git clone https://github.com/jbeder/yaml-cpp.git
+# cd yaml-cpp && mkdir build && cd build 
+# cmake ..
+# make && sudo make install
+# cd $HOME
 
-# Install libev
-git clone https://github.com/enki/libev.git
-chmod -R 777 libev
-cd libev && sudo ./autogen.sh 
-./configure && make && sudo make install
-cd $HOME
+# # Install libev
+# git clone https://github.com/enki/libev.git
+# chmod -R 777 libev
+# cd libev && sudo ./autogen.sh 
+# ./configure && make && sudo make install
+# cd $HOME
 
 
 # Install concurrent queue
 ## It is a single-file library, we only need concurrentqueue.h
-git clone https://github.com/cameron314/concurrentqueue.git
-sudo cp concurrentqueue/concurrentqueue.h /usr/local/include/
-cd $HOME
+# git clone https://github.com/cameron314/concurrentqueue.git
+# sudo cp concurrentqueue/concurrentqueue.h /usr/local/include/
+# cd $HOME
 
 
 # Install junction and turf
-git clone https://github.com/preshing/junction.git
-git clone https://github.com/preshing/turf.git
-cd junction
-mkdir build
-cd build
-cmake ..
-make
-# it will install turf and junction together in /usr/local/lib
-sudo make install
-cd $HOME
+# git clone https://github.com/preshing/junction.git
+# git clone https://github.com/preshing/turf.git
+# cd junction
+# mkdir build
+# cd build
+# cmake ..
+# make
+# # it will install turf and junction together in /usr/local/lib
+# sudo make install
+# cd $HOME
 
 
 # Install bazel 5.2.0

@@ -3,7 +3,6 @@
 
 #include <arpa/inet.h>
 #include <ev.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <junction/ConcurrentMap_Leapfrog.h>
 #include <netinet/in.h>
@@ -15,6 +14,7 @@
 #include <chrono>
 #include <cstring>
 #include "concurrentqueue.h"
+#include "gflags/gflags.h"
 #include "lib/udp_socket_endpoint.h"
 
 template <typename T1>
