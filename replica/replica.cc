@@ -843,6 +843,9 @@ void Replica::ProcessTd(int id) {
       } else if (entry->status == EntryStatus::PROCESSED) {
         uint32_t quId = (entry->body.reqKey) % fastReplyQu_.size();
         fastReplyQu_[quId].enqueue(entry);
+      } else if (entry->status == EntryStatus::TO_SLOW_REPLY) {
+        uint32_t quId = (entry->body.reqKey) % slowReplyQu_.size();
+        slowReplyQu_[quId].enqueue(entry);
       } else {
         LOG(WARNING) << "Unexpected Entry Status " << (int)(entry->status);
       }
