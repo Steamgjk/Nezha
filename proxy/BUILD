@@ -6,6 +6,7 @@ cc_library(
         "//proto:nezha_cc_proto",
         "//lib:utils",
         "//lib:address",
+        "@com_github_jbeder_yaml_cpp//:yaml-cpp"
     ],
 )
 

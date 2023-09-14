@@ -8,7 +8,8 @@ cc_library(
     deps = [
         "//proto:nezha_cc_proto",
         "//lib:zipfian",
-        "//lib:utils"
+        "//lib:utils",
+        "@com_github_jbeder_yaml_cpp//:yaml-cpp"
     ],
 )
 
@@ -26,5 +27,3 @@ cc_binary(
                 "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
 
 )
-
-

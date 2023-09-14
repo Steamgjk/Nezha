@@ -1,5 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_repository")
 
 http_archive(
     name = "rules_proto",
@@ -54,3 +54,47 @@ http_archive(
     strip_prefix = "protobuf-1.3.2/",
     build_file="@//external:gogoprotobuf.BUILD"
 )
+
+git_repository(
+    name = "com_github_jbeder_yaml_cpp",
+    commit = "fcbb8193b94921e058be7b563aea053531e5b2d9",  # 19-Aug-2023
+    remote = "git@github.com:jbeder/yaml-cpp.git",
+    shallow_since = "1692473776 -0400"
+)
+
+new_git_repository(
+    name = "com_github_cameron314_concurrentqueue",
+    build_file = "//third_party/concurrentqueue:BUILD.bazel",
+    commit = "6dd38b8",
+    shallow_since = "1686439287 -0400",
+    remote = "https://github.com/cameron314/concurrentqueue.git",
+)
+
+new_git_repository(
+    name = "com_github_preshing_junction",
+    commit = "5ad3be7ce1d3f16b9f7ed6065bbfeacd2d629a08",
+    shallow_since = "1518982100 -0500",
+    patches = ["//third_party/junction:p1"],
+    patch_args = ["-p1"],
+    build_file = "//third_party/junction:BUILD.bazel",
+    remote = "https://github.com/preshing/junction",
+)
+
+new_git_repository(
+    name = "com_github_preshing_turf",
+    commit = "9ae0d4b984fa95ed5f823274b39c87ee742f6650", 
+    shallow_since = "1484317994 -0500" ,
+    build_file = "//third_party/turf:BUILD.bazel",
+    remote = "https://github.com/preshing/turf",
+)
+
+http_archive(
+    name = "rules_foreign_cc",
+    sha256 = "2a8000ce03dd9bb324bc9bb7f1f5d01debac406611f4d9fedd385192718804f0",
+    strip_prefix = "rules_foreign_cc-60813d57a0e99be1a009c1a0e9627cdbe81fcd19",
+    url = "https://github.com/bazelbuild/rules_foreign_cc/archive/60813d57a0e99be1a009c1a0e9627cdbe81fcd19.tar.gz",
+)
+
+load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
+
+rules_foreign_cc_dependencies()

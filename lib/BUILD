@@ -88,7 +88,8 @@ cc_library(
     srcs = ["utils.cc"],
     hdrs = ["utils.h"],
     deps = [
-        ":udp_socket_endpoint"
+        ":udp_socket_endpoint",
+         "@com_github_cameron314_concurrentqueue//:concurrentqueue",
     ],
     visibility = ["//visibility:public"],
 )

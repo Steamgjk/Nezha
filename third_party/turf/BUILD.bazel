@@ -1,0 +1,15 @@
+load("@rules_foreign_cc//foreign_cc:cmake.bzl", "cmake")
+
+filegroup(
+    name = "all_srcs",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+# cmake(
+#     name = "turf",
+#     lib_source = "//turf:all_srcs",
+#     # data = [ "@com_github_preshing_turf//:all_srcs"],
+#     visibility = ["//visibility:public"],
+#     # deps = ['"']
+# )
