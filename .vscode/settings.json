@@ -72,6 +72,8 @@
         "scoped_allocator": "cpp",
         "typeindex": "cpp",
         "valarray": "cpp",
-        "variant": "cpp"
+        "variant": "cpp",
+        "hash_map": "cpp",
+        "hash_set": "cpp"
     }
 }

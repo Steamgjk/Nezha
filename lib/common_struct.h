@@ -76,10 +76,16 @@ struct RequestBody {
                         // the replica, and later replicas will send the
                         // corresponding reply to the proxy.
   std::string command;  // command is the content to execute
+  bool isWrite;
   RequestBody() {}
   RequestBody(const uint64_t d, const uint64_t r, const uint32_t ok,
-              const uint64_t p, const std::string& cmd)
-      : deadline(d), reqKey(r), opKey(ok), proxyId(p), command(cmd) {}
+              const uint64_t p, const std::string& cmd, const bool isw)
+      : deadline(d),
+        reqKey(r),
+        opKey(ok),
+        proxyId(p),
+        command(cmd),
+        isWrite(isw) {}
 
   /** The following methods are used to compare different requests so as to
    * decide their order*/
@@ -118,6 +124,12 @@ struct LogEntry {
   LogEntry* prevNonCommutative;  // The previous non-commutative entry
   LogEntry* nextNonCommutative;  // The next non-commutative entry
 
+  LogEntry* prevNonCommutativeWrite;  // The entry's prevNonCommutative may be a
+                                      // write, or may be a read
+  // But only the prevNonCommutativeWrite is used to calculate the incremental
+  // hash, see Sec 8.2 of Nezha's Technical Report
+  LogEntry* nextNonCommutativeWrite;
+
   /** prev and next organizes the LogEntries as a link list, and easier to
    * traverse/modify/delete */
 
@@ -132,36 +144,45 @@ struct LogEntry {
   LogEntry()
       : prevNonCommutative(NULL),
         nextNonCommutative(NULL),
+        prevNonCommutativeWrite(NULL),
+        nextNonCommutativeWrite(NULL),
         prev(NULL),
         next(NULL),
         result(""),
         status(EntryStatus::INITIAL),
         logId(0) {}
   LogEntry(const RequestBody& rb, const SHA_HASH& mh, const SHA_HASH& h,
-           LogEntry* prevN = NULL, LogEntry* nextN = NULL, LogEntry* pre = NULL,
-           LogEntry* nxt = NULL, const std::string& re = "",
-           const char sts = EntryStatus::INITIAL, const uint32_t lid = 0)
+           LogEntry* prevNonComm = NULL, LogEntry* nextNonComm = NULL,
+           LogEntry* preNonCOmmW = NULL, LogEntry* nextNonCommW = NULL,
+           LogEntry* pre = NULL, LogEntry* nxt = NULL,
+           const std::string& re = "", const char sts = EntryStatus::INITIAL,
+           const uint32_t lid = 0)
       : body(rb),
         myhash(mh),
         hash(h),
-        prevNonCommutative(prevN),
-        nextNonCommutative(nextN),
+        prevNonCommutative(prevNonComm),
+        nextNonCommutative(nextNonComm),
+        prevNonCommutativeWrite(preNonCOmmW),
+        nextNonCommutativeWrite(nextNonCommW),
         prev(pre),
         next(nxt),
         result(re),
         status(sts),
         logId(lid) {}
   LogEntry(const uint64_t d, const uint64_t r, const uint32_t ok,
-           const uint64_t p, const std::string& cmd, const SHA_HASH& mh,
-           const SHA_HASH& h, LogEntry* prevN = NULL, LogEntry* nextN = NULL,
-           LogEntry* pre = NULL, LogEntry* nxt = NULL,
-           const std::string& re = "", const char sts = EntryStatus::INITIAL,
-           const uint32_t lid = 0)
-      : body(d, r, ok, p, cmd),
+           const uint64_t p, const std::string& cmd, const bool& isw,
+           const SHA_HASH& mh, const SHA_HASH& h, LogEntry* prevNonComm = NULL,
+           LogEntry* nextNonComm = NULL, LogEntry* preNonCOmmW = NULL,
+           LogEntry* nextNonCommW = NULL, LogEntry* pre = NULL,
+           LogEntry* nxt = NULL, const std::string& re = "",
+           const char sts = EntryStatus::INITIAL, const uint32_t lid = 0)
+      : body(d, r, ok, p, cmd, isw),
         myhash(mh),
         hash(h),
-        prevNonCommutative(prevN),
-        nextNonCommutative(nextN),
+        prevNonCommutative(prevNonComm),
+        nextNonCommutative(nextNonComm),
+        prevNonCommutativeWrite(preNonCOmmW),
+        nextNonCommutativeWrite(nextNonCommW),
         prev(pre),
         next(nxt),
         result(re),

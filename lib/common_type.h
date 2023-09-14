@@ -14,7 +14,14 @@ enum ReplicaStatus { NORMAL = 1, VIEWCHANGE, RECOVERING, TERMINATED };
 
 /** A LogEntry is INITIAL at the beginning, then it may switch to either
  * IN_PROCESS->PROCESSED->REPLIED  or directly IN_LATEBUFFER */
-enum EntryStatus { INITIAL = 1, IN_PROCESS, IN_LATEBUFFER, PROCESSED, REPLIED };
+enum EntryStatus {
+  INITIAL = 1,
+  IN_PROCESS,
+  IN_LATEBUFFER,
+  PROCESSED,
+  TO_SLOW_REPLY,
+  REPLIED
+};
 
 /**
  * The message types are defined according to the proto files and the
