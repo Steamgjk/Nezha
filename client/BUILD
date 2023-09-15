@@ -9,7 +9,7 @@ cc_library(
         "//proto:nezha_cc_proto",
         "//lib:zipfian",
         "//lib:utils",
-        "@com_github_jbeder_yaml_cpp//:yaml-cpp"
+        "@com_github_jbeder_yaml_cpp//:yaml-cpp",
     ],
 )
 
@@ -20,10 +20,4 @@ cc_binary(
     deps = [
         ":client_class"
     ],
-    # copts = [
-    #     "-I/usr/local/include"
-    # ],
-    # linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
-    #             "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
-
 )

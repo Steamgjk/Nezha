@@ -74,7 +74,7 @@ new_git_repository(
     name = "com_github_preshing_junction",
     commit = "5ad3be7ce1d3f16b9f7ed6065bbfeacd2d629a08",
     shallow_since = "1518982100 -0500",
-    patches = ["//third_party/junction:p1"],
+    patches = ["//third_party/junction:junction.patch"],
     patch_args = ["-p1"],
     build_file = "//third_party/junction:BUILD.bazel",
     remote = "https://github.com/preshing/junction",

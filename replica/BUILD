@@ -19,10 +19,4 @@ cc_binary(
     deps = [
         ":replica_class",
     ],
-    # copts = [
-    #     "-I/usr/local/include"
-    # ],
-    # linkopts = [ "-L/usr/local/lib", "-ldl",# "-lturf", "-ljunction", "-lev", "-ldl",  "-lyaml-cpp",
-    #             "-lcrypto", "-lgflags",  "-lglog", "-pthread" ],
-
 )
