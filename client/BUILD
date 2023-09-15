@@ -18,6 +18,6 @@ cc_binary(
     name = "nezha_client",
     srcs = ["client_run.cc"],
     deps = [
-        ":client_class"
+        ":client_class",
     ],
 )
