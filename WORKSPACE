@@ -40,8 +40,14 @@ load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
 grpc_extra_deps()
 
 # rules foreign cc deps
+http_archive(
+    name = "rules_foreign_cc",
+    sha256 = "2a8000ce03dd9bb324bc9bb7f1f5d01debac406611f4d9fedd385192718804f0",
+    strip_prefix = "rules_foreign_cc-60813d57a0e99be1a009c1a0e9627cdbe81fcd19",
+    url = "https://github.com/bazelbuild/rules_foreign_cc/archive/60813d57a0e99be1a009c1a0e9627cdbe81fcd19.tar.gz",
+)
 load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
-rules_foreign_cc_dependencies()'
+rules_foreign_cc_dependencies()
 
 
 ####### All other deps #########
@@ -133,13 +139,6 @@ git_repository(
     commit = "21027a27c4c2ec1000859ccbcfff46d83b16e1ed",  # 21-Apr-2022, v3.20.1
     remote = "https://github.com/protocolbuffers/protobuf",
     shallow_since = "1650589240 +0000",
-)
-
-http_archive(
-    name = "rules_foreign_cc",
-    sha256 = "2a8000ce03dd9bb324bc9bb7f1f5d01debac406611f4d9fedd385192718804f0",
-    strip_prefix = "rules_foreign_cc-60813d57a0e99be1a009c1a0e9627cdbe81fcd19",
-    url = "https://github.com/bazelbuild/rules_foreign_cc/archive/60813d57a0e99be1a009c1a0e9627cdbe81fcd19.tar.gz",
 )
 
 http_archive(
