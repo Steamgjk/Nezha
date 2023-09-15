@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set up Bazel
+      - name: Setup Bazel
         run: | 
           sudo apt install -y apt-transport-https curl gnupg
           curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
