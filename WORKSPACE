@@ -1,7 +1,6 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_repository")
 
-# proto deps
 http_archive(
     name = "rules_proto",
     sha256 = "e017528fd1c91c5a33f15493e3a398181a9e821a804eb7ff5acdd1d2d6c2b18d",
@@ -15,17 +14,6 @@ rules_proto_dependencies()
 rules_proto_toolchains()
 
 
-# boost deps
-http_archive(
-    name = "com_github_nelhage_rules_boost",
-    url = "https://github.com/nelhage/rules_boost/archive/96e9b631f104b43a53c21c87b01ac538ad6f3b48.tar.gz",
-    strip_prefix = "rules_boost-96e9b631f104b43a53c21c87b01ac538ad6f3b48",
-    sha256 = "5ea00abc70cdf396a23fb53201db19ebce2837d28887a08544429d27783309ed",
-)
-load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
-boost_deps()
-
-# grpc deps
 http_archive(
     name = "com_github_grpc_grpc",
     sha256 = "9f387689b7fdf6c003fd90ef55853107f89a2121792146770df5486f0199f400",
@@ -39,18 +27,6 @@ grpc_deps()
 load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
 grpc_extra_deps()
 
-# rules foreign cc deps
-http_archive(
-    name = "rules_foreign_cc",
-    sha256 = "2a8000ce03dd9bb324bc9bb7f1f5d01debac406611f4d9fedd385192718804f0",
-    strip_prefix = "rules_foreign_cc-60813d57a0e99be1a009c1a0e9627cdbe81fcd19",
-    url = "https://github.com/bazelbuild/rules_foreign_cc/archive/60813d57a0e99be1a009c1a0e9627cdbe81fcd19.tar.gz",
-)
-load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
-rules_foreign_cc_dependencies()
-
-
-####### All other deps #########
 
 http_archive(
     name = "googleapi",
@@ -60,6 +36,7 @@ http_archive(
     build_file="@//external:googleapi.BUILD",
 )
 
+
 http_archive(
     name = "etcd",
     sha256 = "580ce584dc7628efebb57f8c8240674918d334ad21e33186bbc5f6348f465bc1",
@@ -67,6 +44,8 @@ http_archive(
     strip_prefix = "etcd-3.5.0/",
     build_file="@//external:etcd.BUILD",
 )
+
+
 
 http_archive(
     name = "gogoprotobuf",
@@ -117,6 +96,7 @@ new_git_repository(
     remote = "https://github.com/enki/libev.git",
 )
 
+# Google gflags.
 git_repository(
     name = "com_github_gflags_gflags",
     commit = "e171aa2d15ed9eb17054558e0b3a6a413bb01067",  # 11-Nov-2018
@@ -124,6 +104,7 @@ git_repository(
     shallow_since = "1541971260 +0000",
 )
 
+# Google glog.
 new_git_repository(
     name = "com_github_google_glog",
     build_file = "//third_party/glog:BUILD.glog",
@@ -134,6 +115,7 @@ new_git_repository(
     # shallow_since = "1557212520 +0000",
 )
 
+# Google protobuf.
 git_repository(
     name = "com_google_protobuf",
     commit = "21027a27c4c2ec1000859ccbcfff46d83b16e1ed",  # 21-Apr-2022, v3.20.1
@@ -142,9 +124,29 @@ git_repository(
 )
 
 http_archive(
+    name = "rules_foreign_cc",
+    sha256 = "2a8000ce03dd9bb324bc9bb7f1f5d01debac406611f4d9fedd385192718804f0",
+    strip_prefix = "rules_foreign_cc-60813d57a0e99be1a009c1a0e9627cdbe81fcd19",
+    url = "https://github.com/bazelbuild/rules_foreign_cc/archive/60813d57a0e99be1a009c1a0e9627cdbe81fcd19.tar.gz",
+)
+
+load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
+
+rules_foreign_cc_dependencies()
+
+http_archive(
     name = "openssl",
     build_file = "//third_party/openssl:BUILD.bazel",
     sha256 = "23011a5cc78e53d0dc98dfa608c51e72bcd350aa57df74c5d5574ba4ffb62e74",
     strip_prefix = "openssl-OpenSSL_1_1_1d",
-    url = "https://github.com/openssl/openssl/archive/OpenSSL_1_1_1d.tar.gz",
+    urls = ["https://github.com/openssl/openssl/archive/OpenSSL_1_1_1d.tar.gz"],
 )
+
+http_archive(
+    name = "com_github_nelhage_rules_boost",
+    url = "https://github.com/nelhage/rules_boost/archive/96e9b631f104b43a53c21c87b01ac538ad6f3b48.tar.gz",
+    strip_prefix = "rules_boost-96e9b631f104b43a53c21c87b01ac538ad6f3b48",
+    sha256 = "5ea00abc70cdf396a23fb53201db19ebce2837d28887a08544429d27783309ed",
+)
+load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
+boost_deps()
