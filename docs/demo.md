@@ -1,6 +1,6 @@
 
 ## One-Box Demo
-We have prepared the configuration files in ```configs``` folder, these configuration files will be used to launch 3 replicas, 1 proxy and 1 client.
+We have prepared the configuration files in ```configs``` folder, these configuration files will be used to launch 3 replicas, 1 proxy and 1 client. Under ```configs``` folder, we have ```local``` folder (for the single-machine test), containing: 
 
 - nezha-replica-config-0.yaml 
 - nezha-replica-config-1.yaml
@@ -8,8 +8,13 @@ We have prepared the configuration files in ```configs``` folder, these configur
 - nezha-proxy-config.yaml
 - nezha-client-config.yaml
 
+When running distributed tests, the user can refer to the template files (e.g., ```configs/nezha-replica-config-template.yaml```) to generate their customized config files (such as configuring the IP addresses in the config files). 
+
+Before running the experiment, we assume the user has generated and copied their configuration files into the ```$HOME/Nezha/configs``` folder.
+
 ### View Change Test
 **Step 1**: Launch 3 replicas (i.e. replica-0, replica-1, replica-2). Open 3 terminals and launch one replica in each terminal.
+
 ```
 # In the first terminal (replica-0)
 $HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/nezha-replica-config-0.yaml
