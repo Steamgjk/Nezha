@@ -1,0 +1,5 @@
+licenses(['notice'])
+
+load('@//third_party/glog:glog.bzl', 'glog_library')
+
+glog_library('')

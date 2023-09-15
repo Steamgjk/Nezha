@@ -6,6 +6,7 @@ cc_library(
         "//proto:nezha_cc_proto",
         "//lib:utils",
         "//lib:address",
+        "@com_github_jbeder_yaml_cpp//:yaml-cpp",
     ],
 )
 
@@ -13,13 +14,8 @@ cc_binary(
     name = "nezha_proxy",
     srcs = ["proxy_run.cc"],
     deps = [
-        ":proxy_class"
+        ":proxy_class",
     ],
-    copts = [
-        "-I/usr/local/include"
-    ],
-    linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
-                "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
 
 )
 

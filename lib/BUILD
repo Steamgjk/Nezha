@@ -22,7 +22,7 @@ cc_library(
     hdrs = ["common_struct.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":common_type"
+        ":common_type",
     ],
 )
 
@@ -41,7 +41,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":common_type"
+        ":common_type",
     ],
 )
 
@@ -52,7 +52,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":common_type"
+        ":common_type",
     ],
 )
 
@@ -65,7 +65,11 @@ cc_library(
         ":address",
         ":common_struct",
         ":message_handler",
-        ":timer"
+        ":timer",
+        "@com_github_enki_libev//:libev",
+        "@com_github_google_glog//:glog",
+        "@com_google_protobuf//:protobuf",
+        "@openssl//:openssl",
     ],
 )
 
@@ -79,16 +83,26 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":address",
-        ":endpoint"
+        ":endpoint",
+        "@com_github_enki_libev//:libev",
+        "@com_google_protobuf//:protobuf",
+        "@openssl//:openssl",
     ],
 )
+
 
 cc_library(
     name = "utils",
     srcs = ["utils.cc"],
     hdrs = ["utils.h"],
     deps = [
-        ":udp_socket_endpoint"
+        ":udp_socket_endpoint",
+        "@com_github_cameron314_concurrentqueue//:concurrentqueue",
+        "@com_github_preshing_junction//:libjunction",
+        "@com_github_gflags_gflags//:gflags",
+        "@com_github_google_glog//:glog",
+        "@openssl//:openssl",
     ],
     visibility = ["//visibility:public"],
 )
+

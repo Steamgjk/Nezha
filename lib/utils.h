@@ -2,9 +2,7 @@
 #define NEZHA_UTILS_H
 
 #include <arpa/inet.h>
-#include <concurrentqueue.h>
 #include <ev.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <junction/ConcurrentMap_Leapfrog.h>
 #include <netinet/in.h>
@@ -15,6 +13,8 @@
 #include <unistd.h>
 #include <chrono>
 #include <cstring>
+#include "concurrentqueue.h"
+#include "gflags/gflags.h"
 #include "lib/udp_socket_endpoint.h"
 
 template <typename T1>
