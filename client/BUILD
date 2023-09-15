@@ -20,10 +20,10 @@ cc_binary(
     deps = [
         ":client_class"
     ],
-    copts = [
-        "-I/usr/local/include"
-    ],
-    linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
-                "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
+    # copts = [
+    #     "-I/usr/local/include"
+    # ],
+    # linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
+    #             "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
 
 )

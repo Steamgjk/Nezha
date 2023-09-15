@@ -115,6 +115,13 @@ new_git_repository(
     # shallow_since = "1557212520 +0000",
 )
 
+# Google protobuf.
+git_repository(
+    name = "com_google_protobuf",
+    commit = "21027a27c4c2ec1000859ccbcfff46d83b16e1ed",  # 21-Apr-2022, v3.20.1
+    remote = "https://github.com/protocolbuffers/protobuf",
+    shallow_since = "1650589240 +0000",
+)
 
 http_archive(
     name = "rules_foreign_cc",
@@ -134,3 +141,13 @@ http_archive(
     strip_prefix = "openssl-OpenSSL_1_1_1d",
     urls = ["https://github.com/openssl/openssl/archive/OpenSSL_1_1_1d.tar.gz"]
 )
+
+
+http_archive(
+    name = "com_github_nelhage_rules_boost",
+    url = "https://github.com/nelhage/rules_boost/archive/96e9b631f104b43a53c21c87b01ac538ad6f3b48.tar.gz",
+    strip_prefix = "rules_boost-96e9b631f104b43a53c21c87b01ac538ad6f3b48",
+    sha256 = "5ea00abc70cdf396a23fb53201db19ebce2837d28887a08544429d27783309ed",
+)
+load("@com_github_nelhage_rules_boost//:boost/boost.bzl", "boost_deps")
+boost_deps()

@@ -67,6 +67,9 @@ cc_library(
         ":message_handler",
         ":timer",
         "@com_github_enki_libev//:libev",
+        "@com_github_google_glog//:glog",
+        "@com_google_protobuf//:protobuf",
+        "@openssl//:openssl",
     ],
 )
 
@@ -82,6 +85,8 @@ cc_library(
         ":address",
         ":endpoint",
         "@com_github_enki_libev//:libev",
+        "@com_google_protobuf//:protobuf",
+        "@openssl//:openssl",
     ],
 )
 

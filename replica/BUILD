@@ -7,9 +7,9 @@ cc_library(
         "//lib:utils",
         "@com_github_jbeder_yaml_cpp//:yaml-cpp",
         "@com_github_preshing_junction//:libjunction",
-        "@com_github_enki_libev//:libev"
+        "@com_github_enki_libev//:libev",
+        "@boost//:uuid",
     ],
-
 )
 
 

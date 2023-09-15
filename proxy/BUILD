@@ -16,11 +16,6 @@ cc_binary(
     deps = [
         ":proxy_class"
     ],
-    copts = [
-        "-I/usr/local/include"
-    ],
-    linkopts = [ "-L/usr/local/lib", "-lev", "-ldl", "-lturf", "-ljunction", 
-                "-lcrypto", "-lgflags",  "-lglog",  "-lyaml-cpp", "-pthread" ],
 
 )
 
