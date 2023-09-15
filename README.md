@@ -67,12 +67,23 @@ Each process reads an independent yaml file (e.g., nezha-replica-config-0.yaml) 
 
 
 
-## Install Dependencies
+## Install Bazel
 
-We have packaged the installation of all depencies into one script. Please check [install-dep.sh](./scripts/install-dep.sh) for the detailed dependencies we require.
+We use Bazel 5.2.0 for building Nezha.
 
 ```
-./scripts/install-dep.sh
+# Install bazel 5.2.0
+# Please follow the instructions at https://bazel.build/install/ubuntu#install-on-ubuntu, 
+# or simply run the following commands
+
+sudo apt install -y apt-transport-https curl gnupg
+curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
+sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+sudo apt update
+sudo apt install -y bazel-5.2.0
+sudo mv /usr/bin/bazel-5.2.0 /usr/bin/bazel
+bazel --version
 ```
 
 ## Build Nezha with Bazel
@@ -80,11 +91,11 @@ We have packaged the installation of all depencies into one script. Please check
 Since Bazel is becoming popular, we have migrated nezha from Makefile-based building system to the bazel building system. The bazel version in use is 5.2.0
 
 ```
-cd Nezha && bazel build //...
+cd Nezha && bazel build //replica/... //client/... //proxy/...
 ```
 
 
-After building the project successfully, the executable files will be generated in the folder named bazel-bin
+After building the project successfully, the executable files will be generated in the folder named `bazel-bin`
 
 
 
