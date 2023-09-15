@@ -26,5 +26,5 @@ jobs:
 
       - name: Build
         run: |
-          "${GITHUB_WORKSPACE}/bin/bazel" build //replica/... //proxy/... //client/...""
+          bazel build //replica/... //proxy/... //client/...""
 
