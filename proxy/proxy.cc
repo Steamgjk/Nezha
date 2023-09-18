@@ -2,47 +2,12 @@
 
 namespace nezha {
 Proxy::Proxy(const std::string& configFile) {
-  proxyConfig_ = YAML::LoadFile(configFile);
-  PrintConfig();
-  CreateContext();
-}
-
-void Proxy::PrintConfig() {
-  if (proxyConfig_["print-config"].as<bool>()) {
-    LOG(INFO) << "Print configs as follows";
-    LOG(INFO) << "Replica Information";
-    YAML::Node replicaConfig = proxyConfig_["replica-info"];
-    LOG(INFO) << "\t"
-              << "Replica IPs";
-    for (uint32_t i = 0; i < replicaConfig["replica-ips"].size(); i++) {
-      LOG(INFO) << "\t\t" << replicaConfig["replica-ips"][i].as<std::string>();
-    }
-    LOG(INFO) << "\t"
-              << "Replica Receiver Shards:"
-              << replicaConfig["receiver-shards"].as<int>();
-    LOG(INFO) << "\t"
-              << "Replica Receiver Port:"
-              << replicaConfig["receiver-port"].as<int>();
-    LOG(INFO) << "\t"
-              << "Initial One-Way Delay(us):"
-              << replicaConfig["initial-owd"].as<uint32_t>();
-
-    YAML::Node proxyConfig = proxyConfig_["proxy-info"];
-    LOG(INFO) << "Proxy Information";
-    LOG(INFO) << "\t"
-              << "Proxy ID:" << proxyConfig["proxy-id"].as<int>();
-    LOG(INFO) << "\t"
-              << "Proxy IP:" << proxyConfig["proxy-ip"].as<std::string>();
-    LOG(INFO) << "\t"
-              << "Shard Number:" << proxyConfig["shard-num"].as<int>();
-    LOG(INFO) << "\t"
-              << "Max OWD:" << proxyConfig["max-owd"].as<uint32_t>();
-    LOG(INFO) << "\t"
-              << "Request Port Base:"
-              << proxyConfig["request-port-base"].as<int>();
-    LOG(INFO) << "\t"
-              << "Reply Port Base:" << proxyConfig["reply-port-base"].as<int>();
+  std::string error = proxyConfig_.parseConfig(configFile);
+  if (error != "") {
+    LOG(ERROR) << "Error parsing proxy config: " << error << "Exiting.";
+    exit(1);
   }
+  CreateContext();
 }
 
 void Proxy::Terminate() {
@@ -127,7 +92,7 @@ int Proxy::CreateSocketFd(const std::string& sip, const int sport) {
 }
 
 void Proxy::LaunchThreads() {
-  int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
+  int shardNum = proxyConfig_.proxyShardNum;
 
   threadPool_["CalcLatencyBound"] =
       new std::thread(&Proxy::CalculateLatencyBoundTd, this);
@@ -148,9 +113,8 @@ void Proxy::LaunchThreads() {
 void Proxy::CalculateLatencyBoundTd() {
   std::pair<uint32_t, uint32_t> owdSample;
   std::vector<uint32_t> replicaOWDs;
-  replicaOWDs.resize(
-      proxyConfig_["replica-info"]["replica-ips"].size(),
-      proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>());
+  replicaOWDs.resize(proxyConfig_.replicaIps.size(),
+                     proxyConfig_.replicaInitialOwd);
   for (uint32_t i = 0; i < replicaOWDs.size(); i++) {
     LOG(INFO) << "replicaOWD " << i << "\t" << replicaOWDs[i];
   }
@@ -177,8 +141,8 @@ void Proxy::CalculateLatencyBoundTd() {
 
 void Proxy::LogTd() {
   Log litem;
-  int proxyId = proxyConfig_["proxy-info"]["proxy-id"].as<int>();
-  std::ofstream ofs("Proxy-Stats-" + std::to_string(proxyId) + ".csv");
+  std::ofstream ofs("Proxy-Stats-" + std::to_string(proxyConfig_.proxyId) +
+                    ".csv");
   ofs << "ReplicaId,ClientId,RequestId,ClientTime,ProxyTime,"
          "ProxyEndProcessTime,RecvTime,Deadline,"
          "FastReplyTime,"
@@ -530,32 +494,26 @@ void Proxy::ForwardRequestsTd(const int id) {
 
 void Proxy::CreateContext() {
   running_ = true;
-  int shardNum = proxyConfig_["proxy-info"]["shard-num"].as<int>();
-  std::string ip = proxyConfig_["proxy-info"]["proxy-ip"].as<std::string>();
-  int requestPortBase =
-      proxyConfig_["proxy-info"]["request-port-base"].as<int>();
-  int replyPortBase = proxyConfig_["proxy-info"]["reply-port-base"].as<int>();
-  int replicaReceiverPortBase =
-      proxyConfig_["replica-info"]["receiver-port"].as<int>();
-  int replicaReceiverShard =
-      proxyConfig_["replica-info"]["receiver-shards"].as<int>();
-  uint32_t proxyId = proxyConfig_["proxy-info"]["proxy-id"].as<uint32_t>();
+  int shardNum = proxyConfig_.proxyShardNum;
+  uint32_t proxyId = proxyConfig_.proxyId;
   forwardFds_.resize(shardNum, -1);
   requestReceiveFds_.resize(shardNum, -1);
   replyFds_.resize(shardNum, -1);
   proxyIds_.resize(shardNum, proxyId);
-  latencyBound_ = proxyConfig_["replica-info"]["initial-owd"].as<uint32_t>();
-  maxOWD_ = proxyConfig_["proxy-info"]["max-owd"].as<uint32_t>();
+  latencyBound_ = proxyConfig_.replicaInitialOwd;
+  maxOWD_ = proxyConfig_.proxyMaxOwd;
   for (int i = 0; i < shardNum; i++) {
-    forwardFds_[i] = CreateSocketFd(ip, replyPortBase + i);
-    requestReceiveFds_[i] = CreateSocketFd(ip, requestPortBase + i);
+    forwardFds_[i] = CreateSocketFd(proxyConfig_.proxyIp,
+                                    proxyConfig_.proxyReplyPortBase + i);
+    requestReceiveFds_[i] = CreateSocketFd(
+        proxyConfig_.proxyIp, proxyConfig_.proxyRequestPortBase + i);
     replyFds_[i] = CreateSocketFd("", -1);
     proxyIds_[i] = ((proxyIds_[i] << 32) | (uint32_t)i);
   }
   committedReplyMap_.resize(shardNum);
   logMap_.resize(shardNum);
 
-  replicaNum_ = proxyConfig_["replica-info"]["replica-ips"].size();
+  replicaNum_ = proxyConfig_.replicaIps.size();
   assert(replicaNum_ % 2 == 1);
   f_ = replicaNum_ / 2;
 
@@ -567,13 +525,12 @@ void Proxy::CreateContext() {
   fastQuorum_ = (f_ % 2 == 1) ? (f_ + (f_ + 1) / 2 + 1) : (f_ + f_ / 2 + 1);
   replicaAddrs_.resize(replicaNum_);
   for (int i = 0; i < replicaNum_; i++) {
-    std::string replicaIP =
-        proxyConfig_["replica-info"]["replica-ips"][i].as<std::string>();
-    for (int j = 0; j < replicaReceiverShard; j++) {
+    std::string replicaIP = proxyConfig_.replicaIps[i];
+    for (int j = 0; j < proxyConfig_.replicaReceiverShards; j++) {
       struct sockaddr_in* addr = new sockaddr_in();
       bzero(addr, sizeof(struct sockaddr_in));
       addr->sin_family = AF_INET;
-      addr->sin_port = htons(replicaReceiverPortBase + j);
+      addr->sin_port = htons(proxyConfig_.replicaReceiverPort + j);
       addr->sin_addr.s_addr = inet_addr(replicaIP.c_str());
       replicaAddrs_[i].push_back(addr);
     }

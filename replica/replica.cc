@@ -29,7 +29,11 @@ Replica::Replica(const std::string& configFile, bool isRecovering)
   unSyncedLogEntryHead_->body.reqKey = 0;
 
   // Load Config
-  replicaConfig_ = YAML::LoadFile(configFile);
+  std::string error = replicaConfig_.parseConfig(configFile);
+  if (error != "") {
+    LOG(ERROR) << "Error loading replica config. " << error << " Exiting";
+    exit(1);
+  }
   if (isRecovering) {
     status_ = ReplicaStatus::RECOVERING;
     LOG(INFO) << "Recovering ...";
@@ -37,7 +41,6 @@ Replica::Replica(const std::string& configFile, bool isRecovering)
     status_ = ReplicaStatus::NORMAL;
   }
   LOG(INFO) << "Replica Status " << status_;
-  PrintConfig();
   CreateContext();
   LOG(INFO) << "viewId_=" << viewId_ << "\treplicaId=" << replicaId_
             << "\treplicaNum=" << replicaNum_ << "\tkeyNum=" << keyNum_;
@@ -80,65 +83,6 @@ void Replica::Run() {
   }
 }
 
-void Replica::PrintConfig() {
-  if (replicaConfig_["print-config"].as<bool>()) {
-    LOG(INFO) << "Endpoint Type (1 for UDP, 2 for GRPC) "
-              << replicaConfig_["endpoint-type"].as<uint32_t>();
-    LOG(INFO) << "Replica IPs";
-    for (uint32_t i = 0; i < replicaConfig_["replica-ips"].size(); i++) {
-      LOG(INFO) << "\t" << replicaConfig_["replica-ips"][i].as<std::string>();
-    }
-    LOG(INFO) << "ReplicaID:" << replicaConfig_["replica-id"].as<int>();
-    LOG(INFO) << "Request Receiver Shards:"
-              << replicaConfig_["receiver-shards"].as<int>();
-    LOG(INFO) << "Record Shards: " << replicaConfig_["record-shards"].as<int>();
-    LOG(INFO) << "Process Shards:"
-              << replicaConfig_["process-shards"].as<int>();
-    LOG(INFO) << "Reply Shards:" << replicaConfig_["reply-shards"].as<int>();
-    LOG(INFO) << "Receiver Port:" << replicaConfig_["receiver-port"].as<int>();
-    LOG(INFO) << "Index Sync Port:"
-              << replicaConfig_["index-sync-port"].as<int>();
-    LOG(INFO) << "(Missing) Request Ask Port:"
-              << replicaConfig_["request-ask-port"].as<int>();
-    LOG(INFO) << "(Missing) Index Ask Port:"
-              << replicaConfig_["index-ask-port"].as<int>();
-    LOG(INFO) << "Master Port:" << replicaConfig_["master-port"].as<int>();
-    LOG(INFO) << "Monitor Period (ms):"
-              << replicaConfig_["monitor-period-ms"].as<int>();
-    LOG(INFO) << "Heartbeat Threshold (ms):"
-              << replicaConfig_["heartbeat-threshold-ms"].as<int>();
-    LOG(INFO) << "(Missing) Index Ask Period (ms):"
-              << replicaConfig_["index-ask-period-ms"].as<int>();
-    LOG(INFO) << "(Missing) Request Ask Period (ms):"
-              << replicaConfig_["request-ask-period-ms"].as<int>();
-    LOG(INFO) << "View Change Period (ms):"
-              << replicaConfig_["view-change-period-ms"].as<int>();
-    LOG(INFO) << "State Transfer Period (ms):"
-              << replicaConfig_["state-transfer-period-ms"].as<int>();
-    LOG(INFO) << "State Transfer Timeout (ms):"
-              << replicaConfig_["state-transfer-timeout-ms"].as<int>();
-
-    LOG(INFO) << "Index Transfer Max Batch:"
-              << replicaConfig_["index-transfer-batch"].as<int>();
-    LOG(INFO) << "(Missing) Request Key Ask Batch:"
-              << replicaConfig_["request-key-transfer-batch"].as<int>();
-    LOG(INFO) << "Request Transfer Max Batch:"
-              << replicaConfig_["request-transfer-batch"].as<int>();
-
-    LOG(INFO) << "Crash Vector Request Period (ms):"
-              << replicaConfig_["crash-vector-request-period-ms"].as<int>();
-    LOG(INFO) << "Recovery Request Period (ms):"
-              << replicaConfig_["recovery-request-period-ms"].as<int>();
-    LOG(INFO) << "Sync Report Period (ms):"
-              << replicaConfig_["sync-report-period-ms"].as<int>();
-    LOG(INFO) << "Key Num:" << replicaConfig_["key-num"].as<int>();
-    LOG(INFO) << "Sliding Window (for owd estimation):"
-              << replicaConfig_["owd-estimation-window"].as<uint32_t>();
-    LOG(INFO) << "Reclaim Timeout (ms):"
-              << replicaConfig_["reclaim-timeout-ms"].as<uint32_t>();
-  }
-}
-
 void Replica::Terminate() {
   do {
     status_ = ReplicaStatus::TERMINATED;
@@ -148,10 +92,10 @@ void Replica::Terminate() {
 }
 
 void Replica::CreateContext() {
-  endPointType_ = replicaConfig_["endpoint-type"].as<uint32_t>();
-  replicaId_ = replicaConfig_["replica-id"].as<int>();
-  replicaNum_ = replicaConfig_["replica-ips"].size();
-  keyNum_ = replicaConfig_["key-num"].as<uint32_t>();
+  endPointType_ = replicaConfig_.endpointType;
+  replicaId_ = replicaConfig_.replicaId;
+  replicaNum_ = replicaConfig_.replicaIps.size();
+  keyNum_ = replicaConfig_.keyNum;
   lastReleasedEntryByKeys_.assign(keyNum_, {0ul, 0ul});
   // Since ConcurrentMap reserves 0 and 1, log-id starts from from 2
   // So these variables are initialized as 2-1=1
@@ -168,10 +112,9 @@ void Replica::CreateContext() {
   toCommitLogId_ = CONCURRENT_MAP_START_INDEX - 1;
 
   // Create master endpoints and context
-  std::string ip =
-      replicaConfig_["replica-ips"][replicaId_.load()].as<std::string>();
-  int port = replicaConfig_["master-port"].as<int>();
-  int monitorPeriodMs = replicaConfig_["monitor-period-ms"].as<int>();
+  std::string ip = replicaConfig_.replicaIps[replicaId_.load()];
+  int port = replicaConfig_.masterPort;
+  int monitorPeriodMs = replicaConfig_.monitorPeriodMs;
   Endpoint* masterEP = CreateEndpoint(endPointType_, ip, port, true);
   auto masterCallBack = [](MessageHeader* msgHeader, char* msgBuffer,
                            Address* sender, void* ctx) {
@@ -192,9 +135,9 @@ void Replica::CreateContext() {
 
   LOG(INFO) << "Master Created";
   // Create request-receiver endpoints and context
-  requestContext_.resize(replicaConfig_["receiver-shards"].as<int>());
-  for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
-    int port = replicaConfig_["receiver-port"].as<int>() + i;
+  requestContext_.resize(replicaConfig_.receiverShards);
+  for (int i = 0; i < replicaConfig_.receiverShards; i++) {
+    int port = replicaConfig_.receiverPort + i;
     Endpoint* requestEP = CreateEndpoint(endPointType_, ip, port);
     // Register a request handler to this endpoint
     auto requestHandlerFunc = [](MessageHeader* msgHeader, char* msgBuffer,
@@ -215,25 +158,25 @@ void Replica::CreateContext() {
 
   LOG(INFO) << "requestContext_ Created";
   // (Leader) Use these endpoints to broadcast indices to followers
-  for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
+  for (int i = 0; i < replicaConfig_.indexSyncShards; i++) {
     indexSender_.push_back(new UDPSocketEndpoint());
   }
   indexAcker_ = CreateEndpoint(endPointType_);
   indexRequester_ = CreateEndpoint(endPointType_);
   reqRequester_ = CreateEndpoint(endPointType_);
   for (uint32_t i = 0; i < replicaNum_; i++) {
-    std::string ip = replicaConfig_["replica-ips"][i].as<std::string>();
-    int indexPort = replicaConfig_["index-sync-port"].as<int>();
+    std::string ip = replicaConfig_.replicaIps[i];
+    int indexPort = replicaConfig_.indexSyncPort;
     indexReceiver_.push_back(new Address(ip, indexPort));
-    int indexAskPort = replicaConfig_["index-ask-port"].as<int>();
+    int indexAskPort = replicaConfig_.indexAskPort;
     indexAskReceiver_.push_back(new Address(ip, indexAskPort));
-    int requestAskPort = replicaConfig_["request-ask-port"].as<int>();
+    int requestAskPort = replicaConfig_.requestAskPort;
     requestAskReceiver_.push_back(new Address(ip, requestAskPort));
-    int masterPort = replicaConfig_["master-port"].as<int>();
+    int masterPort = replicaConfig_.masterPort;
     masterReceiver_.push_back(new Address(ip, masterPort));
   }
   // (Followers:) Create index-sync endpoint to receive indices
-  port = replicaConfig_["index-sync-port"].as<int>();
+  port = replicaConfig_.indexSyncPort;
   Endpoint* idxSyncEP = CreateEndpoint(endPointType_, ip, port);
   // Register a msg handler to this endpoint to handle index sync messages
   auto idxHandleFunc = [](MessageHeader* msgHeader, char* msgBuffer,
@@ -256,7 +199,7 @@ void Replica::CreateContext() {
   LOG(INFO) << "indexSyncContext_ Created";
 
   // Create an endpoint to handle others' requests for missed index
-  port = replicaConfig_["index-ask-port"].as<int>();
+  port = replicaConfig_.indexAskPort;
   Endpoint* missedIdxEP = CreateEndpoint(endPointType_, ip, port);
   // Register message handler
   auto missedIdxHandleFunc = [](MessageHeader* msgHeader, char* msgBuffer,
@@ -279,7 +222,7 @@ void Replica::CreateContext() {
   LOG(INFO) << "missedIndexAckContext_ Created";
 
   // Create an endpoint to handle others' requests for missed req
-  port = replicaConfig_["request-ask-port"].as<int>();
+  port = replicaConfig_.requestAskPort;
   Endpoint* missedReqAckEP = CreateEndpoint(endPointType_, ip, port);
   // Register message handler
   auto missedReqAckHandleFunc = [](MessageHeader* msgHeader, char* msgBuffer,
@@ -301,15 +244,14 @@ void Replica::CreateContext() {
   LOG(INFO) << "missedReqAckContext_ Created";
 
   // Create Record Qus and Maps
-  recordMap_.resize(replicaConfig_["record-shards"].as<int>());
-  recordQu_.resize(replicaConfig_["record-shards"].as<int>());
+  recordMap_.resize(replicaConfig_.recordShards);
+  recordQu_.resize(replicaConfig_.recordShards);
 
   // Create track entry for trackTd
-  trackedEntry_.assign(replicaConfig_["track-shards"].as<int>(),
-                       maxSyncedLogEntry_);
+  trackedEntry_.assign(replicaConfig_.trackShards, maxSyncedLogEntry_);
 
   // Create reply endpoints
-  int replyShardNum = replicaConfig_["reply-shards"].as<int>();
+  int replyShardNum = replicaConfig_.replyShards;
   for (int i = 0; i < replyShardNum; i++) {
     fastReplySender_.push_back(CreateEndpoint(endPointType_));
     slowReplySender_.push_back(CreateEndpoint(endPointType_));
@@ -341,14 +283,14 @@ void Replica::CreateContext() {
 
   indexAskTimer_ = new Timer(
       [](void* ctx, void* receiverEP) { ((Replica*)ctx)->AskMissedIndex(); },
-      replicaConfig_["index-ask-period-ms"].as<int>(), this);
+      replicaConfig_.indexAskPeriodMs, this);
   roundRobinIndexAskIdx_ = 0;
   // Initially, no missed indices, so we make first > second
   missedIndices_ = {1, 0};
 
   requestAskTimer_ = new Timer(
       [](void* ctx, void* receiverEP) { ((Replica*)ctx)->AskMissedRequest(); },
-      replicaConfig_["request-ask-period-ms"].as<int>(), this);
+      replicaConfig_.requestAskPeriodMs, this);
   roundRobinRequestAskIdx_ = 0;
   missedReqKeys_.clear();
 
@@ -356,47 +298,44 @@ void Replica::CreateContext() {
       [](void* ctx, void* receiverEP) {
         ((Replica*)ctx)->BroadcastViewChange();
       },
-      replicaConfig_["view-change-period-ms"].as<int>(), this);
+      replicaConfig_.viewChangePeriodMs, this);
   roundRobinProcessIdx_ = 0;
 
   periodicSyncTimer_ = new Timer(
       [](void* ctx, void* receiverEP) {
         ((Replica*)ctx)->SendSyncStatusReport();
       },
-      replicaConfig_["sync-report-period-ms"].as<int>(), this);
+      replicaConfig_.syncReportPeriodMs, this);
 
-  requestTrasnferBatch_ =
-      replicaConfig_["request-transfer-batch"].as<uint32_t>();
-  indexTransferBatch_ = replicaConfig_["index-transfer-batch"].as<uint32_t>();
-  requestKeyTransferBatch_ =
-      replicaConfig_["request-key-transfer-batch"].as<uint32_t>();
+  requestTrasnferBatch_ = replicaConfig_.requestTransferBatch;
+  indexTransferBatch_ = replicaConfig_.indexTransferBatch;
+  requestKeyTransferBatch_ = replicaConfig_.requestKeyTransferBatch;
 
   stateTransferTimer_ = new Timer(
       [](void* ctx, void* receiverEP) {
         ((Replica*)ctx)->SendStateTransferRequest();
       },
-      replicaConfig_["state-transfer-period-ms"].as<int>(), this);
+      replicaConfig_.stateTransferPeriodMs, this);
 
-  stateTransferTimeout_ =
-      replicaConfig_["state-transfer-timeout-ms"].as<uint64_t>();
+  stateTransferTimeout_ = replicaConfig_.stateTransferTimeoutMs;
 
   crashVectorRequestTimer_ = new Timer(
       [](void* ctx, void* receiverEP) {
         ((Replica*)ctx)->BroadcastCrashVectorRequest();
       },
-      replicaConfig_["crash-vector-request-period-ms"].as<int>(), this);
+      replicaConfig_.crashVectorRequestPeriodMs, this);
 
   recoveryRequestTimer_ = new Timer(
       [](void* ctx, void* receiverEP) {
         ((Replica*)ctx)->BroadcastRecoveryRequest();
       },
-      replicaConfig_["recovery-request-period-ms"].as<int>(), this);
+      replicaConfig_.recoveryRequestPeriodMs, this);
 
-  movingPercentile_ = replicaConfig_["moving_percentile"].as<double>();
-  slidingWindowLen_ = replicaConfig_["owd-estimation-window"].as<uint32_t>();
+  movingPercentile_ = replicaConfig_.movingPercentile;
+  slidingWindowLen_ = replicaConfig_.owdEstimationWindow;
 
   // Signal variable for garbage collection (of followers)
-  reclaimTimeout_ = replicaConfig_["reclaim-timeout-ms"].as<uint32_t>();
+  reclaimTimeout_ = replicaConfig_.reclaimTimeoutMs;
   safeToClearUnSyncedLogId_ = new std::atomic<uint32_t>[replyShardNum + 1];
   safeToClearLateBufferLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   for (int i = 0; i <= replyShardNum; i++) {
@@ -507,7 +446,7 @@ void Replica::LaunchThreads() {
   activeWorkerNum_ = 0;  // Dynamic variable, used as semaphore
   totalWorkerNum_ = 0;   // Static variable to count number of workers
   // RequestReceive
-  for (int i = 0; i < replicaConfig_["receiver-shards"].as<int>(); i++) {
+  for (int i = 0; i < replicaConfig_.receiverShards; i++) {
     totalWorkerNum_++;
     std::thread* td = new std::thread(&Replica::ReceiveTd, this, i);
     std::string key("ReceiveTd-" + std::to_string(i));
@@ -516,7 +455,7 @@ void Replica::LaunchThreads() {
   }
 
   // RequestRecord
-  for (int i = 0; i < replicaConfig_["record-shards"].as<int>(); i++) {
+  for (int i = 0; i < replicaConfig_.recordShards; i++) {
     totalWorkerNum_++;
     std::thread* td = new std::thread(&Replica::RecordTd, this, i);
     std::string key("RecordTd-" + std::to_string(i));
@@ -525,7 +464,7 @@ void Replica::LaunchThreads() {
   }
 
   // RequestProcess
-  for (int i = 0; i < replicaConfig_["process-shards"].as<int>(); i++) {
+  for (int i = 0; i < replicaConfig_.processShards; i++) {
     totalWorkerNum_++;
     std::thread* td = new std::thread(&Replica::ProcessTd, this, i);
     std::string key("ProcessTd-" + std::to_string(i));
@@ -534,7 +473,7 @@ void Replica::LaunchThreads() {
   }
 
   // RequestReply
-  int replyShardNum = replicaConfig_["reply-shards"].as<int>();
+  int replyShardNum = replicaConfig_.replyShards;
   for (int i = 0; i < replyShardNum; i++) {
     totalWorkerNum_++;
     std::thread* td = new std::thread(&Replica::FastReplyTd, this, i, i + 1);
@@ -552,7 +491,7 @@ void Replica::LaunchThreads() {
   }
 
   // Track
-  for (int i = 0; i < replicaConfig_["track-shards"].as<int>(); i++) {
+  for (int i = 0; i < replicaConfig_.trackShards; i++) {
     totalWorkerNum_++;
     std::thread* td = new std::thread(&Replica::TrackTd, this, i);
     std::string key("TrackTd-" + std::to_string(i));
@@ -561,7 +500,7 @@ void Replica::LaunchThreads() {
   }
 
   // IndexSync
-  for (int i = 0; i < replicaConfig_["index-sync-shards"].as<int>(); i++) {
+  for (int i = 0; i < replicaConfig_.indexSyncShards; i++) {
     totalWorkerNum_++;
     std::thread* td =
         new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum + 1);
@@ -1160,7 +1099,7 @@ void Replica::IndexSendTd(int id, int cvId) {
   activeWorkerNum_.fetch_add(1);
   LogEntry* lastSyncedEntry = syncedLogEntryHead_;
   IndexSync indexSyncMsg;
-  uint32_t syncPeriod = replicaConfig_["index-sync-period-us"].as<uint32_t>();
+  uint32_t syncPeriod = replicaConfig_.indexSyncPeriodUs;
   struct timespec sleepIntval({0, syncPeriod * 1000});
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -1650,8 +1589,7 @@ void Replica::CheckHeartBeat() {
     return;
   }
   uint64_t nowTime = GetMicrosecondTimestamp();
-  uint64_t threashold =
-      replicaConfig_["heartbeat-threshold-ms"].as<uint64_t>() * 1000;
+  uint64_t threashold = replicaConfig_.heartbeatThresholdMs * 1000;
 
   if (lastHeartBeatTime_ + threashold < nowTime) {
     // I haven't heard from the leader for too long, it probably has died
