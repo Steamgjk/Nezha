@@ -1,6 +1,6 @@
 cc_library(
     name = "proxy_config",
-    srcs = ["proxy_config.h"],
+    hdrs = ["proxy_config.h"],
     deps = [
         "@com_github_jbeder_yaml_cpp//:yaml-cpp",
     ],

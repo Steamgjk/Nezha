@@ -103,9 +103,9 @@ class Client {
   ConcurrentMap<uint32_t, uint64_t> outstandingRequestSendTime_;
 
   /** Used by LogTd to monitor outstanding reuqests. If they cannot be committed
-   * within retryTimeoutus_ (measured in macro-seconds), they should be retried
+   * within retryTimeoutUs_ (measured in macro-seconds), they should be retried
    * **/
-  uint32_t retryTimeoutus_;
+  uint32_t retryTimeoutUs_;
 
   /** To communicate between ProcessReplyTd and LogTd */
   ConcurrentQueue<LogInfo*> logQu_;

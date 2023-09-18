@@ -70,7 +70,7 @@ Client::Client(const std::string& configFile) {
             << "\tskewFactor=" << clientConfig_.skewFactor
             << "\twriteRatio=" << clientConfig_.writeRatio;
   zipfianKeys_.resize(1000000, 0);
-  retryTimeoutus_ = clientConfig_.requestRetryTimeUs;
+  retryTimeoutUs_ = clientConfig_.requestRetryTimeUs;
   if (clientConfig_.keyNum > 1) {
     std::default_random_engine generator(clientId_);  // clientId as the seed
     zipfian_int_distribution<uint32_t> zipfianDistribution(

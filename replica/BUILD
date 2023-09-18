@@ -1,6 +1,6 @@
 cc_library(
     name = "replica_config",
-    srcs = ["replica_config.h"],
+    hdrs = ["replica_config.h"],
     deps = [
         "@com_github_jbeder_yaml_cpp//:yaml-cpp",
     ],
