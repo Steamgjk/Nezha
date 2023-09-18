@@ -7,20 +7,22 @@ Client::Client(const std::string& configFile) {
   totals.reserve(500000);
 
   LOG(INFO) << "Loading config information from " << configFile;
-  clientConfig_ = YAML::LoadFile(configFile);
-  PrintConfig();
-  clientId_ = clientConfig_["client-info"]["client-id"].as<int>();
+  std::string error = clientConfig_.parseConfig(configFile);
+  if (error != "") {
+    LOG(ERROR) << "Error loading client config: " << error << " Exiting.";
+    exit(1);
+  }
+  clientId_ = clientConfig_.clientId;
   LOG(INFO) << "clientId=" << clientId_;
-  std::string clientIP =
-      clientConfig_["client-info"]["client-ip"].as<std::string>();
+  std::string clientIP = clientConfig_.clientIp;
   LOG(INFO) << "clientIP=" << clientIP;
-  int requestPort = clientConfig_["client-info"]["request-port"].as<int>();
+  int requestPort = clientConfig_.requestPort;
   LOG(INFO) << "requestPort=" << requestPort;
-  endPointType_ = clientConfig_["client-info"]["endpoint-type"].as<int>();
-  LOG(INFO) << "endPointType=" << endPointType_;
-  requestEP_ = CreateEndpoint(endPointType_, clientIP, requestPort, true);
+  LOG(INFO) << "endPointType=" << clientConfig_.endpointType;
+  requestEP_ =
+      CreateEndpoint(clientConfig_.endpointType, clientIP, requestPort, true);
   replyHandler_ = CreateMsgHandler(
-      endPointType_,
+      clientConfig_.endpointType,
       [](MessageHeader* msgHdr, char* msgBuffer, Address* sender, void* ctx) {
         ((Client*)ctx)->ReceiveReply(msgHdr, msgBuffer, sender);
       },
@@ -37,21 +39,19 @@ Client::Client(const std::string& configFile) {
 
   /** Fetch the addreses of all proxies and organize them as a two-dimensional
    * vector */
-  proxyAddrs_.resize(clientConfig_["proxy-info"]["proxy-ips"].size());
+  proxyAddrs_.resize(clientConfig_.proxyIps.size());
   for (uint32_t i = 0; i < proxyAddrs_.size(); i++) {
-    proxyAddrs_[i].resize(
-        clientConfig_["proxy-info"]["proxy-shards"].as<int>());
+    proxyAddrs_[i].resize(clientConfig_.proxyShardNum);
     for (uint32_t j = 0; j < proxyAddrs_[i].size(); j++) {
-      proxyAddrs_[i][j] = new Address(
-          clientConfig_["proxy-info"]["proxy-ips"][i].as<std::string>(),
-          clientConfig_["proxy-info"]["request-port-base"].as<int>() + j);
+      proxyAddrs_[i][j] = new Address(clientConfig_.proxyIps[i],
+                                      clientConfig_.proxyRequestPortBase + j);
     }
   }
 
   /** If the client is a open-loop client, generate the poission trace for the
    * client */
-  if (clientConfig_["client-info"]["is-openloop"].as<bool>()) {
-    poissonRate_ = clientConfig_["client-info"]["poisson-rate"].as<int>();
+  if (clientConfig_.isOpenLoop) {
+    poissonRate_ = clientConfig_.poissonRate;
     LOG(INFO) << "OpenLoop Client rate=" << poissonRate_;
     poissonTrace_.resize(1000, 0);
     std::default_random_engine generator(clientId_);  // clientId as the seed
@@ -66,18 +66,15 @@ Client::Client(const std::string& configFile) {
     }
   }
   /** Generate zipfian workload */
-  int keyNum = clientConfig_["client-info"]["key-num"].as<int>();
-  float skewFactor = clientConfig_["client-info"]["skew-factor"].as<float>();
-  writeRatio_ = clientConfig_["client-info"]["write-ratio"].as<float>();
-  LOG(INFO) << "keyNum=" << keyNum << "\tskewFactor=" << skewFactor
-            << "\twriteRatio=" << writeRatio_;
+  LOG(INFO) << "keyNum=" << clientConfig_.keyNum
+            << "\tskewFactor=" << clientConfig_.skewFactor
+            << "\twriteRatio=" << clientConfig_.writeRatio;
   zipfianKeys_.resize(1000000, 0);
-  retryTimeoutus_ =
-      clientConfig_["client-info"]["request-retry-time-us"].as<uint32_t>();
-  if (keyNum > 1) {
+  retryTimeoutus_ = clientConfig_.requestRetryTimeUs;
+  if (clientConfig_.keyNum > 1) {
     std::default_random_engine generator(clientId_);  // clientId as the seed
-    zipfian_int_distribution<uint32_t> zipfianDistribution(0, keyNum - 1,
-                                                           skewFactor);
+    zipfian_int_distribution<uint32_t> zipfianDistribution(
+        0, clientConfig_.keyNum - 1, clientConfig_.skewFactor);
     for (uint32_t i = 0; i < zipfianKeys_.size(); i++) {
       zipfianKeys_[i] = zipfianDistribution(generator);
     }
@@ -104,55 +101,11 @@ void Client::Run() {
   LOG(INFO) << "Run Terminated ";
 }
 
-void Client::PrintConfig() {
-  if (clientConfig_["print-config"].as<bool>()) {
-    LOG(INFO) << "Print configs as follows";
-    LOG(INFO) << "Proxy Information";
-    YAML::Node proxyConfig = clientConfig_["proxy-info"];
-    LOG(INFO) << "\t"
-              << "Proxy IPs";
-    for (uint32_t i = 0; i < proxyConfig["proxy-ips"].size(); i++) {
-      LOG(INFO) << "\t\t" << proxyConfig["proxy-ips"][i].as<std::string>();
-    }
-    LOG(INFO) << "\t"
-              << "Proxy Shards:" << proxyConfig["proxy-shards"].as<int>();
-    LOG(INFO) << "\t"
-              << "Request Port Base:"
-              << proxyConfig["request-port-base"].as<int>();
-
-    YAML::Node clientConfig = clientConfig_["client-info"];
-    LOG(INFO) << "Client Information";
-    LOG(INFO) << "Client EndPoint Type: "
-              << clientConfig["endpoint-type"].as<int>();
-    LOG(INFO) << "\t"
-              << "Client ID:" << clientConfig["client-id"].as<int>();
-    LOG(INFO) << "\t"
-              << "Client IP:" << clientConfig["client-ip"].as<std::string>();
-    LOG(INFO) << "\t"
-              << "Request(Reply) Port:"
-              << clientConfig["request-port"].as<int>();
-    LOG(INFO) << "\t"
-              << "Is OpenLoop?" << clientConfig["is-openloop"].as<bool>();
-    LOG(INFO) << "\t"
-              << "Poisson Rate:" << clientConfig["poisson-rate"].as<int>();
-    LOG(INFO) << "\t"
-              << "Duration (sec):" << clientConfig["duration-sec"].as<int>();
-    LOG(INFO) << "\t"
-              << "Key Num:" << clientConfig["key-num"].as<int>();
-    LOG(INFO) << "\t"
-              << "Skew Factor (0-0.99):"
-              << clientConfig["skew-factor"].as<float>();
-    LOG(INFO) << "\t"
-              << "Request Retry Time (us):"
-              << clientConfig["request-retry-time-us"].as<int>();
-  }
-}
-
 void Client::LaunchThreads() {
   threadPool_["LogTd"] = new std::thread(&Client::LogTd, this);
   threadPool_["ProcessReplyTd"] =
       new std::thread(&Client::ProcessReplyTd, this);
-  if (clientConfig_["client-info"]["is-openloop"].as<bool>()) {
+  if (clientConfig_.isOpenLoop) {
     LOG(INFO) << "OpenLoop Client";
     threadPool_["OpenLoopSubmissionTd"] =
         new std::thread(&Client::OpenLoopSubmissionTd, this);
@@ -240,17 +193,13 @@ void Client::ReceiveReply(MessageHeader* msgHdr, char* msgBuffer,
 void Client::OpenLoopSubmissionTd() {
   int roundRobinIdx = 0;
   uint64_t startTime = GetMicrosecondTimestamp();
-  uint64_t endTime =
-      startTime +
-      clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
+  uint64_t endTime = startTime + clientConfig_.durationSec * 1000000;
 
   srandom(clientId_);
   endTime += 10 * 1000ul * 1000ul;
   LOG(INFO) << "Expected to end at " << endTime;
   // Poisson rate is ``10ms as one unit''
-  for (uint32_t i = 0;
-       i < clientConfig_["client-info"]["duration-sec"].as<uint32_t>() * 100;
-       i++) {
+  for (uint32_t i = 0; i < clientConfig_.durationSec * 100; i++) {
     if (!running_) {
       return;
     }
@@ -341,9 +290,7 @@ void Client::OpenLoopSubmissionTd() {
 void Client::CloseLoopSubmissionTd() {
   int roundRobinIdx = 0;
   uint64_t startTime = GetMicrosecondTimestamp();
-  uint64_t endTime =
-      startTime +
-      clientConfig_["client-info"]["duration-sec"].as<uint64_t>() * 1000000;
+  uint64_t endTime = startTime + clientConfig_.durationSec * 1000000;
   endTime += 10 * 1000ul * 1000ul;
   LOG(INFO) << "Expected to end at " << endTime;
   srand(clientId_);

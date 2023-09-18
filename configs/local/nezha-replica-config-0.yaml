@@ -33,6 +33,6 @@ crash-vector-request-period-ms: 50 # make it longer, becasue it will clear all p
 recovery-request-period-ms: 10
 sync-report-period-ms: 10
 key-num: 1000000 # When commutativity is enabled for test, we need the specified key number to detect commutativity
-moving_percentile: 0.50 # the percentile used to estimate owd
+moving-percentile: 0.50 # the percentile used to estimate owd
 owd-estimation-window: 1000 # We use a sliding window to get moving median of one-way delays, here is the length of the window
 reclaim-timeout-ms: 5000 # To save memory, those requests who enter the late buffer will not stay there forever: if they have stayed for so long, they will be reclaimed. Similary, for unsynced log entries, if (1) they have been kept for more than reclaim-timeout-ms (2) they are not used by the worker threads; then they will be reclaimed

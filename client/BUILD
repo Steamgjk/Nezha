@@ -1,5 +1,12 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 
+cc_library(
+    name = "client_config",
+    hdrs = ["client_config.h"],
+    deps = [
+        "@com_github_jbeder_yaml_cpp//:yaml-cpp",
+    ],
+)
 
 cc_library(
     name = "client_class",
@@ -9,7 +16,7 @@ cc_library(
         "//proto:nezha_cc_proto",
         "//lib:zipfian",
         "//lib:utils",
-        "@com_github_jbeder_yaml_cpp//:yaml-cpp",
+        ":client_config",
     ],
 )
 

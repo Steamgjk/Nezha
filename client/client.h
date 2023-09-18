@@ -1,6 +1,7 @@
 #include <yaml-cpp/yaml.h>
 #include <fstream>
 #include <iostream>
+#include "client_config.h"
 #include "lib/utils.h"
 #include "lib/zipfian.h"
 #include "proto/nezha_proto.pb.h"
@@ -31,12 +32,9 @@ class Client {
  private:
   /** All the configuration parameters for client are included in
    * clientConfig_*/
-  YAML::Node clientConfig_;
+  ClientConfig clientConfig_;
   /** Each thread is given a unique name (key) and stored in the pool */
   std::map<std::string, std::thread*> threadPool_;
-  /** The endpoint to send requests (1 for UDP, 2 for GRPC (not supported yet))
-   */
-  int endPointType_;
   /** The endpoint uses to submit request to proxies */
   Endpoint* requestEP_;
 
@@ -151,9 +149,6 @@ class Client {
   /** The message handler to handle messages from proxies. The function is used
    * to instantiate a replyHandler_ and registered to requestEP_ */
   void ReceiveReply(MessageHeader* msgHdr, char* msgBuffer, Address* sender);
-
-  /** Print all the information in the replicaConfig_ */
-  void PrintConfig();
 
  public:
   /** Client accepts a config file, which contains all the necessary information

@@ -1,4 +1,12 @@
 cc_library(
+    name = "proxy_config",
+    srcs = ["proxy_config.h"],
+    deps = [
+        "@com_github_jbeder_yaml_cpp//:yaml-cpp",
+    ],
+)
+
+cc_library(
     name = "proxy_class",
     srcs = ["proxy.cc"],
     hdrs = ["proxy.h"],
@@ -6,7 +14,7 @@ cc_library(
         "//proto:nezha_cc_proto",
         "//lib:utils",
         "//lib:address",
-        "@com_github_jbeder_yaml_cpp//:yaml-cpp",
+        ":proxy_config",
     ],
 )
 
@@ -16,7 +24,6 @@ cc_binary(
     deps = [
         ":proxy_class",
     ],
-
 )
 
 

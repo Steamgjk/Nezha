@@ -74,6 +74,15 @@
         "valarray": "cpp",
         "variant": "cpp",
         "hash_map": "cpp",
-        "hash_set": "cpp"
+        "hash_set": "cpp",
+        "*.ipp": "cpp",
+        "csetjmp": "cpp",
+        "strstream": "cpp",
+        "charconv": "cpp",
+        "codecvt": "cpp",
+        "complex": "cpp",
+        "source_location": "cpp",
+        "rope": "cpp",
+        "slist": "cpp"
     }
 }

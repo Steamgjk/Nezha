@@ -2,6 +2,7 @@
 #include <fstream>
 #include "lib/utils.h"
 #include "proto/nezha_proto.pb.h"
+#include "proxy_config.h"
 
 namespace nezha {
 using namespace nezha::proto;
@@ -16,11 +17,9 @@ class Proxy {
  private:
   /** All the configuration parameters for this proxy are included in
    * proxyConfig_*/
-  YAML::Node proxyConfig_;
+  ProxyConfig proxyConfig_;
   /** Each thread is given a unique name (key) */
   std::map<std::string, std::thread*> threadPool_;
-  /** Print all the information in the replicaConfig_ */
-  void PrintConfig();
 
   /** Launch all the threads, these threads are mainly categorized into three
    * classes:
@@ -55,7 +54,8 @@ class Proxy {
    * If the request has been committed, it returns the reply message, which will
    * be delievered to the client; otherwise, it returns NULL
    */
-  Reply* isQuorumReady(std::vector<uint64_t>& repliedSyncPoint, std::map<uint32_t, Reply>& quorum);
+  Reply* isQuorumReady(std::vector<uint64_t>& repliedSyncPoint,
+                       std::map<uint32_t, Reply>& quorum);
 
   /** Tools function: given ip and port, create a socket fd. If ip is not empty,
    * the socket will be binded to the <ip:port>   */

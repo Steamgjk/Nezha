@@ -9,6 +9,7 @@
 #include <fstream>
 #include "lib/utils.h"
 #include "proto/nezha_proto.pb.h"
+#include "replica_config.h"
 
 namespace nezha {
 using namespace nezha::proto;
@@ -55,7 +56,7 @@ class Replica {
  private:
   /** All the configuration parameters for the replica are included in
    * replicaConfig_*/
-  YAML::Node replicaConfig_;
+  ReplicaConfig replicaConfig_;
   /** 1 for UDP, 2 for GRPC (not supported yet) */
   int endPointType_;
   /** viewId_ starts from 0 */
@@ -438,8 +439,6 @@ class Replica {
   std::string ApplicationExecute(const RequestBody& request);
 
   /** Tools */
-  /** Print all the information in the replicaConfig_ */
-  void PrintConfig();
   /** Check whether this replica is leader, return true if it is */
   bool AmLeader();
   /** During view change, BlockWhenStatusIsNot uses the conditional variable
