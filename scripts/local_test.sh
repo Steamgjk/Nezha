@@ -2,19 +2,19 @@
 export FLAGS_alsologtostderr=1
 
 echo "Launching replica 0..."
-($HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/local/nezha-replica-config-0.yam & )
+(./bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/local/nezha-replica-config-0.yam & )
 
 echo "Launching replica 1..."
-($HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/local/nezha-replica-config-1.yaml  &)
+(./bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/local/nezha-replica-config-1.yaml  &)
 
 echo "Launching replica 2..."
-($HOME/Nezha/bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/local/nezha-replica-config-2.yaml &)
+(./bazel-bin/replica/nezha_replica --config $HOME/Nezha/configs/local/nezha-replica-config-2.yaml &)
 
 echo "Launching proxy..."
-($HOME/Nezha/bazel-bin/proxy/nezha_proxy --config $HOME/Nezha/configs/local/nezha-proxy-config.yaml &)
+(./bazel-bin/proxy/nezha_proxy --config $HOME/Nezha/configs/local/nezha-proxy-config.yaml &)
 
 echo "Launching client..."
-$HOME/Nezha/bazel-bin/client/nezha_client --config $HOME/Nezha/configs/local/nezha-client-config.yaml
+./bazel-bin/client/nezha_client --config $HOME/Nezha/configs/local/nezha-client-config.yaml
 
 # Kill replicas
 trap 'trap - SIGTERM && kill 0' SIGINT SIGTERM EXIT
