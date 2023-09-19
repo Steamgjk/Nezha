@@ -16,8 +16,6 @@ echo "Launching proxy..."
 echo "Launching client..."
 ./bazel-bin/client/nezha_client --config ./configs/local/nezha-client-config.yaml
 
-# Kill replicas
-trap 'trap - SIGTERM && kill 0' SIGINT SIGTERM EXIT
 
 # TODO(Katie): This is currently only checking if at least one request succeeded. 
 # It does not check if the client/replica/proxy failed for some reason
@@ -29,10 +27,18 @@ if [ -e "$file" ]; then
         echo "No successful requests."
         exit 1 
     else
-        echo "File '$file' exists and has more than one line."
-        exit 0
+        echo "Success. File '$file' exists and has more than one line."
     fi
 else
     echo "File '$file' does not exist."
     exit 1
 fi
+
+
+# Exit gracefully for github actions. It's okay if there are stray replica processes.
+if [[ "$1" == "--github" ]]; then
+    exit 0 
+fi
+
+# Kill replicas
+trap 'trap - SIGTERM && kill 0' SIGINT SIGTERM EXIT

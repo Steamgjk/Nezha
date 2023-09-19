@@ -28,4 +28,4 @@ jobs:
         run: |
           bazel build //replica/... //proxy/... //client/...
       - name: Run local test
-        run: ./scripts/local_test.sh
+        run: ./scripts/local_test.sh --github
