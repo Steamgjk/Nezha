@@ -9,13 +9,13 @@ on:
 
 jobs:
   build:
-    name: Bazel build
+    name: Bazel build and run local test
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
 
       - name: Setup Bazel
-        run: | 
+        run: |
           sudo apt install -y apt-transport-https curl gnupg
           curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
           sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
@@ -26,5 +26,6 @@ jobs:
 
       - name: Build
         run: |
-          bazel build //replica/... //proxy/... //client/...""
-
+          bazel build //replica/... //proxy/... //client/...
+      - name: Run local test
+        run: ./scripts/local_test.sh --github
