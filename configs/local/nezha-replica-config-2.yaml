@@ -9,7 +9,6 @@ replica-id: 2
 receiver-shards: 1 # The number of threads to receive threads
 record-shards: 1 # The number of threads to record requests in the global concurrent map
 track-shards: 1 # The number of threads to record synced log entries
-process-shards: 1 # The number of threads to process requests. For now process-shards is fixed to 1, because the early-buffer enque/deque is hard to parallelize. Maybe later we can find a high-performant **concurrent priority queue** for early-buffer, then process-shards may be parallelized for higher performance
 reply-shards: 2 # The number of threads to send replies (both fast/slow replies)
 index-sync-shards: 1 # The number of threads used by the leader to broadcast index synchronization messages to followers. For followers, they only need one such thread to receive and handle the index sync msgs
 receiver-port: 33333 # The port is exposed to client/proxy and is used to receive client/proxy requests. When receiver-shards>1, the corresponding ports are receiver-ports + shard-index

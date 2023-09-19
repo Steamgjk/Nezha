@@ -247,7 +247,7 @@ void Replica::CreateContext() {
   recordMap_.resize(replicaConfig_.recordShards);
   recordQu_.resize(replicaConfig_.recordShards);
 
-  // Create track entry for trackTd
+  // Create track entry for trackThread
   trackedEntry_.assign(replicaConfig_.trackShards, maxSyncedLogEntry_);
 
   // Create reply endpoints
@@ -266,7 +266,7 @@ void Replica::CreateContext() {
   crashVector_.assign(cv->version_, cv);
   /** Thw related threads using crash vectors are:
    * (1) master (1 thread)
-   * (2) FastReplyTd(s) (replyShardNum threads) */
+   * (2) FastReplyThread(s) (replyShardNum threads) */
   crashVectorVecSize_ = 1 + replyShardNum;
   crashVectorInUse_ = new std::atomic<CrashVectorStruct*>[crashVectorVecSize_];
   for (uint32_t i = 0; i < crashVectorVecSize_; i++) {
@@ -435,7 +435,7 @@ void Replica::ResetContext() {
   // Reset signal variable for garbage collection (of followers)
   safeToClearLateBufferLogId_ = CONCURRENT_MAP_START_INDEX - 1;
   for (uint32_t i = 0; i <= fastReplyQu_.size(); i++) {
-    // The number of such counters is number of FastReplyTd_ + 1 (IndexRecv)
+    // The number of such counters is number of FastReplyThread_ + 1 (IndexRecv)
     safeToClearUnSyncedLogId_[i] = CONCURRENT_MAP_START_INDEX - 1;
   }
   prepareToClearLateBufferLogId_ = CONCURRENT_MAP_START_INDEX - 1;
@@ -448,8 +448,8 @@ void Replica::LaunchThreads() {
   // RequestReceive
   for (int i = 0; i < replicaConfig_.receiverShards; i++) {
     totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::ReceiveTd, this, i);
-    std::string key("ReceiveTd-" + std::to_string(i));
+    std::thread* td = new std::thread(&Replica::ReceiveThread, this, i);
+    std::string key("ReceiveThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
@@ -457,17 +457,22 @@ void Replica::LaunchThreads() {
   // RequestRecord
   for (int i = 0; i < replicaConfig_.recordShards; i++) {
     totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::RecordTd, this, i);
-    std::string key("RecordTd-" + std::to_string(i));
+    std::thread* td = new std::thread(&Replica::RecordThread, this, i);
+    std::string key("RecordThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
 
   // RequestProcess
+  if (replicaConfig_.processShards != 1) {
+    LOG(ERROR) << "ProcessThread parallelization is not supported. "
+                  "replicaConfig_->processShards must be 1.";
+    exit(1);
+  }
   for (int i = 0; i < replicaConfig_.processShards; i++) {
     totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::ProcessTd, this, i);
-    std::string key("ProcessTd-" + std::to_string(i));
+    std::thread* td = new std::thread(&Replica::ProcessThread, this, i);
+    std::string key("ProcessThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
@@ -476,16 +481,17 @@ void Replica::LaunchThreads() {
   int replyShardNum = replicaConfig_.replyShards;
   for (int i = 0; i < replyShardNum; i++) {
     totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::FastReplyTd, this, i, i + 1);
-    std::string key("FastReplyTd-" + std::to_string(i));
+    std::thread* td =
+        new std::thread(&Replica::FastReplyThread, this, i, i + 1);
+    std::string key("FastReplyThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
 
   for (int i = 0; i < replyShardNum; i++) {
     totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::SlowReplyTd, this, i);
-    std::string key("SlowReplyTd-" + std::to_string(i));
+    std::thread* td = new std::thread(&Replica::SlowReplyThread, this, i);
+    std::string key("SlowReplyThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
@@ -493,8 +499,8 @@ void Replica::LaunchThreads() {
   // Track
   for (int i = 0; i < replicaConfig_.trackShards; i++) {
     totalWorkerNum_++;
-    std::thread* td = new std::thread(&Replica::TrackTd, this, i);
-    std::string key("TrackTd-" + std::to_string(i));
+    std::thread* td = new std::thread(&Replica::TrackThread, this, i);
+    std::string key("TrackThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
   }
@@ -502,9 +508,9 @@ void Replica::LaunchThreads() {
   // IndexSync
   for (int i = 0; i < replicaConfig_.indexSyncShards; i++) {
     totalWorkerNum_++;
-    std::thread* td =
-        new std::thread(&Replica::IndexSendTd, this, i, i + replyShardNum + 1);
-    std::string key("IndexSendTd-" + std::to_string(i));
+    std::thread* td = new std::thread(&Replica::IndexSendThread, this, i,
+                                      i + replyShardNum + 1);
+    std::string key("IndexSendThread-" + std::to_string(i));
     threadPool_[key] = td;
     LOG(INFO) << "Launched " << key << "\t" << td->native_handle();
     if (!AmLeader()) {
@@ -514,42 +520,43 @@ void Replica::LaunchThreads() {
   }
 
   totalWorkerNum_++;
-  threadPool_["IndexRecvTd"] = new std::thread(&Replica::IndexRecvTd, this);
-  LOG(INFO) << "Launched IndexRecvTd\t"
-            << threadPool_["IndexRecvTd"]->native_handle();
+  threadPool_["IndexRecvThread"] =
+      new std::thread(&Replica::IndexRecvThread, this);
+  LOG(INFO) << "Launched IndexRecvThread\t"
+            << threadPool_["IndexRecvThread"]->native_handle();
 
   totalWorkerNum_++;
-  threadPool_["IndexProcessTd"] =
-      new std::thread(&Replica::IndexProcessTd, this);
-  LOG(INFO) << "Launched IndexProcessTd\t"
-            << threadPool_["IndexProcessTd"]->native_handle();
+  threadPool_["IndexProcessThread"] =
+      new std::thread(&Replica::IndexProcessThread, this);
+  LOG(INFO) << "Launched IndexProcessThread\t"
+            << threadPool_["IndexProcessThread"]->native_handle();
 
   totalWorkerNum_++;
-  threadPool_["MissedIndexAckTd"] =
-      new std::thread(&Replica::MissedIndexAckTd, this);
-  LOG(INFO) << "Launched MissedIndexAckTd\t"
-            << threadPool_["MissedIndexAckTd"]->native_handle();
+  threadPool_["MissedIndexAckThread"] =
+      new std::thread(&Replica::MissedIndexAckThread, this);
+  LOG(INFO) << "Launched MissedIndexAckThread\t"
+            << threadPool_["MissedIndexAckThread"]->native_handle();
 
   totalWorkerNum_++;
-  threadPool_["MissedReqAckTd"] =
-      new std::thread(&Replica::MissedReqAckTd, this);
-  LOG(INFO) << "Launched MissedReqAckTd\t"
-            << threadPool_["MissedReqAckTd"]->native_handle();
+  threadPool_["MissedReqAckThread"] =
+      new std::thread(&Replica::MissedReqAckThread, this);
+  LOG(INFO) << "Launched MissedReqAckThread\t"
+            << threadPool_["MissedReqAckThread"]->native_handle();
 
   // totalWorkerNum_++;
-  // threadPool_["GarbageCollectTd"] =
-  //     new std::thread(&Replica::GarbageCollectTd, this);
-  // LOG(INFO) << "Launch  GarbageCollectTd "
-  //           << threadPool_["GarbageCollectTd"]->native_handle();
+  // threadPool_["GarbageCollectThread"] =
+  //     new std::thread(&Replica::GarbageCollectThread, this);
+  // LOG(INFO) << "Launch  GarbageCollectThread "
+  //           << threadPool_["GarbageCollectThread"]->native_handle();
 
   totalWorkerNum_++;
-  threadPool_["OWDCalcTd"] = new std::thread(&Replica::OWDCalcTd, this);
-  LOG(INFO) << "Launch  OWDCalcTd "
-            << threadPool_["OWDCalcTd"]->native_handle();
+  threadPool_["OWDCalcThread"] = new std::thread(&Replica::OWDCalcThread, this);
+  LOG(INFO) << "Launch  OWDCalcThread "
+            << threadPool_["OWDCalcThread"]->native_handle();
 
   // totalWorkerNum_++;
   // threadPool_["LogHash"] = new std::thread(&Replica::LogHash, this);
-  // LOG(INFO) << "Launched IndexRecvTd\t"
+  // LOG(INFO) << "Launched IndexRecvThread\t"
   //           << threadPool_["LogHash"]->native_handle();
 
   LOG(INFO) << "Master Thread " << pthread_self();
@@ -618,7 +625,7 @@ void Replica::BlockWhenStatusIsNot(char targetStatus) {
   }
 }
 
-void Replica::OWDCalcTd() {
+void Replica::OWDCalcThread() {
   activeWorkerNum_.fetch_add(1);
   std::pair<uint64_t, uint32_t> owdSample;
   // uint32_t logCnt = 0;
@@ -646,10 +653,11 @@ void Replica::OWDCalcTd() {
     nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "OWDCalcTd Terminated: " << preVal - 1 << " worker remaining";
+  LOG(INFO) << "OWDCalcThread Terminated: " << preVal - 1
+            << " worker remaining";
 }
 
-void Replica::ReceiveTd(int id) {
+void Replica::ReceiveThread(int id) {
   activeWorkerNum_.fetch_add(1);
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -657,10 +665,10 @@ void Replica::ReceiveTd(int id) {
     requestContext_[id]->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "ReceiveTd Terminated:" << preVal - 1 << " worker remaining";
+  LOG(INFO) << "ReceiveThread Terminated:" << preVal - 1 << " worker remaining";
 }
 
-void Replica::RecordTd(int id) {
+void Replica::RecordThread(int id) {
   activeWorkerNum_.fetch_add(1);
   RequestBody* rb;
   // uint64_t sta, ed, cnt;
@@ -698,11 +706,11 @@ void Replica::RecordTd(int id) {
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "RecordTd-" << id << " Terminated: " << preVal - 1
+  LOG(INFO) << "RecordThread-" << id << " Terminated: " << preVal - 1
             << " worker remaining";
 }
 
-void Replica::TrackTd(int id) {
+void Replica::TrackThread(int id) {
   activeWorkerNum_.fetch_add(1);
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -734,15 +742,15 @@ void Replica::TrackTd(int id) {
       trackedEntry_[id] = next;
     }
     if (status_ == ReplicaStatus::TERMINATED) {
-      LOG(INFO) << "Track Td terminate ";
+      LOG(INFO) << "Track Thread terminate ";
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "TrackTd-" << id << " Terminated: " << preVal - 1
+  LOG(INFO) << "TrackThread-" << id << " Terminated: " << preVal - 1
             << " worker remaining";
 }
 
-void Replica::ProcessTd(int id) {
+void Replica::ProcessThread(int id) {
   activeWorkerNum_.fetch_add(1);
   LogEntry* entry;
   std::set<uint64_t> tags;
@@ -752,10 +760,10 @@ void Replica::ProcessTd(int id) {
 
     if (processQu_.try_dequeue(entry)) {
       if (entry->status == EntryStatus::INITIAL) {
-        std::pair<uint64_t, uint64_t> rankKey(entry->body.deadline,
-                                              entry->body.reqKey);
-        if (rankKey > lastReleasedEntryByKeys_[entry->body.opKey]) {
-          earlyBuffer_[rankKey] = entry;
+        std::pair<uint64_t, uint64_t> earlyBufferRank(entry->body.deadline,
+                                                      entry->body.reqKey);
+        if (earlyBufferRank > lastReleasedEntryByKeys_[entry->body.opKey]) {
+          earlyBuffer_[earlyBufferRank] = entry;
           entry->status = EntryStatus::IN_PROCESS;
         } else {
           // LOG(INFO) <<"Abnormal "<<entry->body.opKey
@@ -768,8 +776,8 @@ void Replica::ProcessTd(int id) {
             // Leader modifies its deadline
             entry->body.deadline =
                 lastReleasedEntryByKeys_[entry->body.opKey].first + 1;
-            rankKey.first = entry->body.deadline;
-            earlyBuffer_[rankKey] = entry;
+            earlyBufferRank.first = entry->body.deadline;
+            earlyBuffer_[earlyBufferRank] = entry;
             entry->status = EntryStatus::IN_PROCESS;
           } else {
             // Followers leave it in late buffer
@@ -793,26 +801,31 @@ void Replica::ProcessTd(int id) {
     // Polling early-buffer
     uint64_t nowTime = GetMicrosecondTimestamp();
 
-    while ((!earlyBuffer_.empty()) &&
-           nowTime >= earlyBuffer_.begin()->first.first) {
-      entry = earlyBuffer_.begin()->second;
-      if (entry->body.isWrite) {
-        lastReleasedEntryByKeys_[entry->body.opKey] =
+    // This while loop is safe because there is only one processThread.
+    // Parallelization of this thread is not supported.
+    while (!earlyBuffer_.empty()) {
+      LogEntry* nextEntry = earlyBuffer_.begin()->second;
+      if (nowTime < nextEntry->body.deadline) {
+        break;
+      }
+      if (nextEntry->body.isWrite) {
+        lastReleasedEntryByKeys_[nextEntry->body.opKey] =
             earlyBuffer_.begin()->first;
       }
-      ProcessRequest(entry, amLeader, true, amLeader);
+      ProcessRequest(nextEntry, amLeader, true, amLeader);
       earlyBuffer_.erase(earlyBuffer_.begin());
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "ProcessTd Terminated: " << preVal - 1 << " worker remaining";
+  LOG(INFO) << "ProcessThread Terminated: " << preVal - 1
+            << " worker remaining";
 }
 
 void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
                              const bool sendReply, const bool canExecute) {
   RequestBody& rb = entry->body;
   // Read Request do not contribute to hash
-  entry->hash = entry->myhash =
+  entry->logHash = entry->entryHash =
       rb.isWrite ? CalculateHash(rb.deadline, rb.reqKey) : SHA_HASH();
 
   std::vector<LogEntry*>& maxEntryByKey =
@@ -835,7 +848,7 @@ void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
   entry->result = (isSyncedReq && canExecute) ? ApplicationExecute(rb) : "";
 
   if (entry->prevNonCommutativeWrite) {
-    entry->hash.XOR(entry->prevNonCommutativeWrite->hash);
+    entry->logHash.XOR(entry->prevNonCommutativeWrite->logHash);
   }
   ASSERT(entry->prev != NULL);
   entry->logId = entry->prev->logId + 1;
@@ -861,7 +874,7 @@ void Replica::ProcessRequest(LogEntry* entry, const bool isSyncedReq,
   }
 }
 
-void Replica::FastReplyTd(int id, int cvId) {
+void Replica::FastReplyThread(int id, int cvId) {
   activeWorkerNum_.fetch_add(1);
   Reply reply;
   reply.set_replytype(MessageType::FAST_REPLY);
@@ -913,7 +926,7 @@ void Replica::FastReplyTd(int id, int cvId) {
       // estimated owd)
       reply.set_owd(owdMap_.get(entry->body.proxyId));
 
-      SHA_HASH hash(entry->hash);
+      SHA_HASH hash(entry->logHash);
       hash.XOR(cv->cvHash_);
       if (amLeader) {
         // Leader's logic is very easy: after XORing the crashVector and the
@@ -956,7 +969,7 @@ void Replica::FastReplyTd(int id, int cvId) {
         if (syncedEntry == NULL) {
           // The index sync process may have not been started, or may have not
           // catch up; Or the unsynced logs have been reclaimed by
-          // GarbageCollectionTd (we have advanced
+          // GarbageCollectionThread (we have advanced
           // safeToClearUnSyncedLogId_) We cannot decide the sync-point, so
           // we directly reply with the XORed hash (similar to the leader)
           reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
@@ -1012,19 +1025,19 @@ void Replica::FastReplyTd(int id, int cvId) {
             // LogStruct log;
             // log.originalHash = hash.toString();
             // hash encodes all the (unsynced) entries up to entry
-            hash.XOR(unsyncedEntry->hash);  // Remove all previous hash
+            hash.XOR(unsyncedEntry->logHash);  // Remove all previous hash
             // before unsyncedEntry [included]
             // log.unsynced = unsyncedEntry;
             // log.addback = false;
             if (syncedEntry->LessThan(*unsyncedEntry)) {
               // add itself back (read request is 0)
-              hash.XOR(unsyncedEntry->myhash);
+              hash.XOR(unsyncedEntry->entryHash);
               // log.addback = true;
             }
             // Now hash only encodes [unsyncedEntry, entry]
             // Let's add the synced part
             // log.synced = syncedEntry;
-            hash.XOR(syncedEntry->hash);
+            hash.XOR(syncedEntry->logHash);
             // log.finalE = entry;
             // entryQu_.enqueue(log);
             reply.set_hash(hash.hash, SHA_DIGEST_LENGTH);
@@ -1043,7 +1056,7 @@ void Replica::FastReplyTd(int id, int cvId) {
   LOG(INFO) << "Fast Reply Terminated " << preVal - 1 << " worker remaining";
 }
 
-void Replica::SlowReplyTd(int id) {
+void Replica::SlowReplyThread(int id) {
   activeWorkerNum_.fetch_add(1);
   Reply reply;
   reply.set_replicaid(replicaId_);
@@ -1092,10 +1105,11 @@ void Replica::SlowReplyTd(int id) {
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "SlowReplyTd Terminated " << preVal - 1 << " worker remaining ";
+  LOG(INFO) << "SlowReplyThread Terminated " << preVal - 1
+            << " worker remaining ";
 }
 
-void Replica::IndexSendTd(int id, int cvId) {
+void Replica::IndexSendThread(int id, int cvId) {
   activeWorkerNum_.fetch_add(1);
   LogEntry* lastSyncedEntry = syncedLogEntryHead_;
   IndexSync indexSyncMsg;
@@ -1147,10 +1161,11 @@ void Replica::IndexSendTd(int id, int cvId) {
     nanosleep(&sleepIntval, NULL);
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "IndexSendTd Terminated " << preVal - 1 << " worker remaining";
+  LOG(INFO) << "IndexSendThread Terminated " << preVal - 1
+            << " worker remaining";
 }
 
-void Replica::IndexRecvTd() {
+void Replica::IndexRecvThread() {
   activeWorkerNum_.fetch_add(1);
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -1158,13 +1173,14 @@ void Replica::IndexRecvTd() {
     indexSyncContext_->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "IndexRecvTd Terminated " << preVal - 1 << " worker remaining";
+  LOG(INFO) << "IndexRecvThread Terminated " << preVal - 1
+            << " worker remaining";
 }
 
 void Replica::ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer) {
-  // Promise to the GarbageCollectTd, that I will not use the data before
+  // Promise to the GarbageCollectThread, that I will not use the data before
   // safeToClearLateBufferLogId_ and safeToClearUnSyncedLogId_, so that
-  // GarbageCollectTd can safely reclaim them
+  // GarbageCollectThread can safely reclaim them
   safeToClearLateBufferLogId_.store(prepareToClearLateBufferLogId_.load());
   safeToClearUnSyncedLogId_[fastReplyQu_.size()].store(
       prepareToClearUnSyncedLogId_.load());
@@ -1176,7 +1192,7 @@ void Replica::ReceiveIndexSyncMessage(MessageHeader* msgHdr, char* msgBuffer) {
   indexQu_.enqueue({newMsgHdr, newBuffer});
 }
 
-void Replica::IndexProcessTd() {
+void Replica::IndexProcessThread() {
   activeWorkerNum_.fetch_add(1);
   std::pair<MessageHeader*, char*> ele;
   while (status_ != ReplicaStatus::TERMINATED) {
@@ -1222,9 +1238,9 @@ void Replica::IndexProcessTd() {
               RequestBody* rb = new RequestBody(
                   rbMsg.deadline(), rbMsg.reqkey(), rbMsg.key(),
                   rbMsg.proxyid(), rbMsg.command(), rbMsg.iswrite());
-              // We must handle it to ProcessTd instead of processing it here,
-              // to avoid data race (and further memroy leakage), although it
-              // is a trivial possibility
+              // We must handle it to ProcessThread instead of processing it
+              // here, to avoid data race (and further memroy leakage), although
+              // it is a trivial possibility
               uint32_t quId = rbMsg.reqkey() % recordQu_.size();
               recordQu_[quId].enqueue(rb);
 
@@ -1243,7 +1259,7 @@ void Replica::IndexProcessTd() {
     }
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "IndexProcessTd Terminated: " << preVal - 1
+  LOG(INFO) << "IndexProcessThread Terminated: " << preVal - 1
             << " worker remaining";
 }
 
@@ -1293,7 +1309,7 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
       if (prevNonCommutativeWrite) {
         // This request has some pre non-commutative ones
         // In that way, XOR the previous accumulated hash
-        hash.XOR(prevNonCommutativeWrite->hash);
+        hash.XOR(prevNonCommutativeWrite->logHash);
       }
       LogEntry* newEntry =
           new LogEntry(entry->body, myHash, hash, prevNonCommutative, NULL,
@@ -1355,7 +1371,7 @@ bool Replica::ProcessIndexSync(const IndexSync& idxSyncMsg) {
   }
 }
 
-void Replica::MissedIndexAckTd() {
+void Replica::MissedIndexAckThread() {
   activeWorkerNum_.fetch_add(1);
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -1363,7 +1379,7 @@ void Replica::MissedIndexAckTd() {
     missedIndexAckContext_->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "MissedIndexAckTd Terminated " << preVal - 1
+  LOG(INFO) << "MissedIndexAckThread Terminated " << preVal - 1
             << " worker remaining";
 }
 
@@ -1401,7 +1417,7 @@ void Replica::ReceiveAskMissedIdx(MessageHeader* msgHdr, char* msgBuffer) {
   }
 }
 
-void Replica::MissedReqAckTd() {
+void Replica::MissedReqAckThread() {
   activeWorkerNum_.fetch_add(1);
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -1409,7 +1425,7 @@ void Replica::MissedReqAckTd() {
     missedReqAckContext_->endPoint_->LoopRun();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "MissedReqAckTd Terminated " << preVal - 1
+  LOG(INFO) << "MissedReqAckThread Terminated " << preVal - 1
             << " worker remaining";
 }
 
@@ -1520,7 +1536,7 @@ void Replica::AskMissedRequest() {
   }
 }
 
-void Replica::GarbageCollectTd() {
+void Replica::GarbageCollectThread() {
   activeWorkerNum_.fetch_add(1);
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
@@ -1533,7 +1549,7 @@ void Replica::GarbageCollectTd() {
     PrepareNextReclaim();
   }
   uint32_t preVal = activeWorkerNum_.fetch_sub(1);
-  LOG(INFO) << "GarbageCollectTd Terminated " << preVal - 1
+  LOG(INFO) << "GarbageCollectThread Terminated " << preVal - 1
             << " worker remaining";
 }
 

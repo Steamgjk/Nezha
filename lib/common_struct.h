@@ -115,9 +115,9 @@ struct RequestBody {
 struct LogEntry {
   // Request Body
   RequestBody body;
-  SHA_HASH myhash;  // The hash value of this **single** entry
-  SHA_HASH hash;  // The accumulative hash, which is calculated based on all the
-                  // log entries from the beginning to this entry
+  SHA_HASH entryHash;  // The hash value of this **single** entry
+  SHA_HASH logHash;  // The accumulative hash, which is calculated based on all
+                     // the log entries from the beginning to this entry
 
   /** prevNonCommutative and nextNonCommutative organize the LogEntries as a
    * skiplist, and easier and more efficient to traverse/modify/delete */
@@ -151,15 +151,15 @@ struct LogEntry {
         result(""),
         status(EntryStatus::INITIAL),
         logId(0) {}
-  LogEntry(const RequestBody& rb, const SHA_HASH& mh, const SHA_HASH& h,
+  LogEntry(const RequestBody& rb, const SHA_HASH& eh, const SHA_HASH& h,
            LogEntry* prevNonComm = NULL, LogEntry* nextNonComm = NULL,
            LogEntry* preNonCOmmW = NULL, LogEntry* nextNonCommW = NULL,
            LogEntry* pre = NULL, LogEntry* nxt = NULL,
            const std::string& re = "", const char sts = EntryStatus::INITIAL,
            const uint32_t lid = 0)
       : body(rb),
-        myhash(mh),
-        hash(h),
+        entryHash(eh),
+        logHash(h),
         prevNonCommutative(prevNonComm),
         nextNonCommutative(nextNonComm),
         prevNonCommutativeWrite(preNonCOmmW),
@@ -171,14 +171,14 @@ struct LogEntry {
         logId(lid) {}
   LogEntry(const uint64_t d, const uint64_t r, const uint32_t ok,
            const uint64_t p, const std::string& cmd, const bool& isw,
-           const SHA_HASH& mh, const SHA_HASH& h, LogEntry* prevNonComm = NULL,
+           const SHA_HASH& eh, const SHA_HASH& h, LogEntry* prevNonComm = NULL,
            LogEntry* nextNonComm = NULL, LogEntry* preNonCOmmW = NULL,
            LogEntry* nextNonCommW = NULL, LogEntry* pre = NULL,
            LogEntry* nxt = NULL, const std::string& re = "",
            const char sts = EntryStatus::INITIAL, const uint32_t lid = 0)
       : body(d, r, ok, p, cmd, isw),
-        myhash(mh),
-        hash(h),
+        entryHash(eh),
+        logHash(h),
         prevNonCommutative(prevNonComm),
         nextNonCommutative(nextNonComm),
         prevNonCommutativeWrite(preNonCOmmW),

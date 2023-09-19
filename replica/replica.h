@@ -70,10 +70,12 @@ class Replica {
    * view change) */
   std::atomic<char> status_;
 
-  /** After request is received, it first go through recordMap */
+  /** Every unique request, sharded across several maps for concurrency.
+   * Before a request is processed, it is addded to one of these maps by
+   * recordThread. Map from reqKey -> logEntry */
   std::vector<ConcurrentMap<uint64_t, LogEntry*>> recordMap_;
 
-  /** TrackTd traverses the synced log list and record in
+  /** TrackThread traverses the synced log list and record in
    * syncedLogEntryByReqKey_ and syncedLogEntryByLogId_ */
   std::vector<LogEntry*> trackedEntry_;
 
@@ -271,7 +273,8 @@ class Replica {
   std::map<uint32_t, ViewChange> viewChangeSet_;
   std::map<uint32_t, SyncStatusReport> syncStatusSet_;
 
-  /** Inserted by ReceiveTd, and looked up by FastReplyTd/SlowReplyTd */
+  /** Inserted by ReceiveThread, and looked up by
+   * FastReplyThread/SlowReplyThread */
   ConcurrentMap<uint64_t, Address*> proxyAddressMap_;
 
   /** Followers periodically check lastHeartBeatTime_ to decide whether it
@@ -298,22 +301,23 @@ class Replica {
   std::mutex waitMutext_;
 
   ConcurrentQueue<uint64_t> tagQu_;  // For Debug, will be deleted
-  /** To communicate between ReceiveTd and ProcessTd */
+  /** To communicate between ReceiveThread and ProcessThread */
   ConcurrentQueue<LogEntry*> processQu_;
-  /** To communicate between ReceiveTd and RecordTd */
+  /** To communicate between ReceiveThread and RecordThread */
   std::vector<ConcurrentQueue<RequestBody*>> recordQu_;
-  /** To communicate between IndexRecvTd and IndexProcessTd */
+  /** To communicate between IndexRecvThread and IndexProcessThread */
   ConcurrentQueue<std::pair<MessageHeader*, char*>> indexQu_;
 
-  /** To communinicate between ProcessTd and FastReplyTd */
+  /** To communinicate between ProcessThread and FastReplyThread */
   std::vector<ConcurrentQueue<LogEntry*>> fastReplyQu_;
-  /** To communinicate between ProcessTd and SlowReplyTd */
+  /** To communinicate between ProcessThread and SlowReplyThread */
   std::vector<ConcurrentQueue<LogEntry*>> slowReplyQu_;
-  /** To communicate between ReceiveTd and OWDCalcTd (Transmit <proxyId, owd>)
+  /** To communicate between ReceiveThread and OWDCalcThread (Transmit <proxyId,
+   * owd>)
    */
   ConcurrentQueue<std::pair<uint64_t, uint32_t>> owdQu_;
-  /** Record the one-way delay for each proxy. Updated by OWDCalcTd, read by
-   * FastReplyTd/SlowReplyTd */
+  /** Record the one-way delay for each proxy. Updated by OWDCalcThread, read by
+   * FastReplyThread/SlowReplyThread */
   ConcurrentMap<uint64_t, uint32_t> owdMap_;
   /** To window size used to estimate one-way delay */
   uint32_t slidingWindowLen_;
@@ -325,20 +329,22 @@ class Replica {
   uint32_t reclaimTimeout_;
   /** The old versions of crash vectors in crashVector_ that can be reclaimed */
   uint32_t cvVersionToClear_;
-  /**  GarbageCollectTd use prepareToClearLateBufferLogId_ to tell IndexSyncTd
-   * that it intends to clear the requests before this point [included]  */
-  std::atomic<uint32_t> prepareToClearLateBufferLogId_;
-  /**  GarbageCollectTd use prepareToClearLateBufferLogId_ to tell IndexSyncTd
-   * and FastReplyTd that it intends to clear the log entries before this point
+  /**  GarbageCollectThread use prepareToClearLateBufferLogId_ to tell
+   * IndexSyncThread that it intends to clear the requests before this point
    * [included]  */
+  std::atomic<uint32_t> prepareToClearLateBufferLogId_;
+  /**  GarbageCollectThread use prepareToClearLateBufferLogId_ to tell
+   * IndexSyncThread and FastReplyThread that it intends to clear the log
+   * entries before this point [included]  */
   std::atomic<uint32_t> prepareToClearUnSyncedLogId_;
-  /** IndexSyncTd use safeToClearLateBufferLogId_ to tell GarbageCollectTd that
-   * it can safely clear the requests in late buffer up to this point [included]
+  /** IndexSyncThread use safeToClearLateBufferLogId_ to tell
+   * GarbageCollectThread that it can safely clear the requests in late buffer
+   * up to this point [included]
    */
   std::atomic<uint32_t> safeToClearLateBufferLogId_;
-  /** FastReplyTd(s) and IndexSyncTd use these atomic variables to tell
-   * GarbageCollectTd, telling that it can safely clear unsynced log entries up
-   * to this point [included] */
+  /** FastReplyThread(s) and IndexSyncThread use these atomic variables to tell
+   * GarbageCollectThread, telling that it can safely clear unsynced log entries
+   * up to this point [included] */
   std::atomic<uint32_t>* safeToClearUnSyncedLogId_;
 
   /** Create/Initialize all the necessary variables, it is only called once
@@ -486,26 +492,26 @@ class Replica {
 
   /** Threads
    *
-   * Functions whose names are ended with ``Td`` will be instianted with a
+   * Functions whose names are ended with ``Thread`` will be instianted with a
    * thread. Some functions are heavy and needed to be parallelized, so the
    * parallized threads with the same functionality are distinguished with the
    * first parameter, id.
    *
    * Some functions will also use crash vector, to distinguish the crash vectors
    * used by them, the functions also accept the second parameter, cvId.  */
-  void ReceiveTd(int id = -1);
-  void ProcessTd(int id = -1);
-  void RecordTd(int id = -1);
-  void TrackTd(int id = -1);
-  void FastReplyTd(int id = -1, int cvId = -1);
-  void SlowReplyTd(int id = -1);
-  void IndexSendTd(int id = -1, int cvId = -1);
-  void IndexRecvTd();
-  void IndexProcessTd();
-  void MissedIndexAckTd();
-  void MissedReqAckTd();
-  void OWDCalcTd();
-  void GarbageCollectTd();
+  void ReceiveThread(int id = -1);
+  void ProcessThread(int id = -1);
+  void RecordThread(int id = -1);
+  void TrackThread(int id = -1);
+  void FastReplyThread(int id = -1, int cvId = -1);
+  void SlowReplyThread(int id = -1);
+  void IndexSendThread(int id = -1, int cvId = -1);
+  void IndexRecvThread();
+  void IndexProcessThread();
+  void MissedIndexAckThread();
+  void MissedReqAckThread();
+  void OWDCalcThread();
+  void GarbageCollectThread();
 
   /** Message handler functions
    * These message handler functions will be used to instantiate MessageHandlers
