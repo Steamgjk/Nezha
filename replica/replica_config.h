@@ -11,8 +11,6 @@ struct ReplicaConfig {
   int receiverShards;
   int recordShards;
   int replyShards;
-  int processShards;
-  int indexSyncShards;
   int trackShards;
   int receiverPort;
   int indexSyncPort;
@@ -37,6 +35,14 @@ struct ReplicaConfig {
   int keyNum;
   uint32_t owdEstimationWindow;
   uint32_t reclaimTimeoutMs;
+  int indexSyncShards;
+
+  // The number of threads to process requests. For now process-shards
+  // is fixed to 1, because the early-buffer enque/deque is hard to
+  // parallelize. Maybe later we can find a high-performant **concurrent
+  // priority queue** for early-buffer, then process-shards may be
+  // parallelized for higher performance
+  int processShards = 1;
 
   // Parses yaml file configFilename and fills in fields of ReplicaConfig
   // accordingly. Returns an error message or "" if there are no errors.
@@ -65,8 +71,6 @@ struct ReplicaConfig {
       recordShards = config[key].as<int>();
       key = "reply-shards";
       replyShards = config[key].as<int>();
-      key = "process-shards";
-      processShards = config[key].as<int>();
       key = "index-sync-shards";
       indexSyncShards = config[key].as<int>();
       key = "track-shards";
