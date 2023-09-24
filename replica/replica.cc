@@ -676,20 +676,6 @@ void Replica::RecordThread(int id) {
   while (status_ != ReplicaStatus::TERMINATED) {
     BlockWhenStatusIsNot(ReplicaStatus::NORMAL);
     if (recordQu_[id].try_dequeue(rb)) {
-      // cnt++;
-      // if (cnt == 1) {
-      //   sta = GetMicrosecondTimestamp();
-      // }
-      // if (cnt % 100000 == 0) {
-      //   ed = GetMicrosecondTimestamp();
-      //   float rate = 100000.0 / ((ed - sta) * 1e-6);
-      //   sta = ed;
-      //   LOG(INFO) << "id=" << id << "  record rate = " << rate << "\t"
-      //             << "recordQuLen=" << recordQu_[id].size_approx() << "\t"
-      //             << "processQuLen=" << processQu_.size_approx() << "\t"
-      //             << "gap sample =" << ed - rb->deadline
-      //             << " \t deadline=" << rb->deadline;
-      // }
       /** The map is sharded by reqKey */
       LogEntry* duplicate = recordMap_[id].get(rb->reqKey);
       if (duplicate == NULL) {
@@ -698,10 +684,13 @@ void Replica::RecordThread(int id) {
         recordMap_[id].assign(rb->reqKey, newEntry);
         processQu_.enqueue(newEntry);
 
-      } else {
-        // Duplicate requests
-        processQu_.enqueue(duplicate);
+      } else if (duplicate->status == EntryStatus::PROCESSED) {
+        uint32_t quId = (duplicate->body.reqKey) % fastReplyQu_.size();
+        fastReplyQu_[quId].enqueue(
+            duplicate);  // TODO(Katie): what happens if proxy id changes?
       }
+      // else: duplicate is not yet processed. Reply is sent when duplicate is
+      // processed.
       delete rb;
     }
   }
@@ -784,15 +773,6 @@ void Replica::ProcessThread(int id) {
             entry->status = EntryStatus::IN_LATEBUFFER;
           }
         }
-      } else if (entry->status == EntryStatus::IN_PROCESS ||
-                 entry->status == EntryStatus::IN_LATEBUFFER) {
-        continue;
-      } else if (entry->status == EntryStatus::PROCESSED) {
-        uint32_t quId = (entry->body.reqKey) % fastReplyQu_.size();
-        fastReplyQu_[quId].enqueue(entry);
-      } else if (entry->status == EntryStatus::TO_SLOW_REPLY) {
-        uint32_t quId = (entry->body.reqKey) % slowReplyQu_.size();
-        slowReplyQu_[quId].enqueue(entry);
       } else {
         LOG(WARNING) << "Unexpected Entry Status " << (int)(entry->status);
       }

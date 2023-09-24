@@ -137,7 +137,7 @@ struct LogEntry {
   LogEntry* next;  // The next LogEntry pointer
 
   std::string result;  // The execution result of the LogEntry
-  char status;         //
+  char status;         // TODO(Katie): does this need to be thread safe?
   uint32_t logId;  // The logId (the position of the LogEntry in the list) of
                    // the entry
 
